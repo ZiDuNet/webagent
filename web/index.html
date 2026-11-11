@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>WebAgent · 业务系统 Agent 集成 Demo</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="login-view" class="login-view">
+    <section class="login-story">
+      <div class="story-brand">
+        <span class="brand-mark">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h6a4 4 0 0 1 4 4v6M17 17h-6a4 4 0 0 1-4-4V7"/><circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+        </span>
+        <span>WebAgent</span>
+        <span class="brand-tag">DEMO</span>
+      </div>
+      <div class="story-copy">
+        <span class="eyebrow"><i></i> Agent × 业务系统</span>
+        <h1>把 Agent 装进现有系统，<br>但不拿走用户的权限。</h1>
+        <p>Agent 框架不直连业务数据库，也不持有超级管理员 Token。它只通过 MCP 工具层，带着当前登录用户的身份调用业务 API。</p>
+      </div>
+      <div class="flow-card">
+        <div class="flow-node">
+          <span class="flow-index">01</span>
+          <strong>业务系统</strong>
+          <small>登录 · RBAC · REST API</small>
+        </div>
+        <span class="flow-arrow">→</span>
+        <div class="flow-node">
+          <span class="flow-index">02</span>
+          <strong>MCP 工具层</strong>
+          <small>工具描述 · 透传 Token</small>
+        </div>
+        <span class="flow-arrow">→</span>
+        <div class="flow-node accent">
+          <span class="flow-index">03</span>
+          <strong>Agent 运行时</strong>
+          <small>模型 · 工具选择 · 审批</small>
+        </div>
+      </div>
+      <ul class="story-points">
+        <li><span></span>Agent 与业务代码解耦，通过连接器接入新系统</li>
+        <li><span></span>所有工具调用继承当前用户真实权限</li>
+        <li><span></span>写入和删除必须经过用户二次审批</li>
+        <li><span></span>模型、工具、技能由管理员统一治理</li>
+      </ul>
+      <div class="story-foot">Mock Business System · FastAPI · MCP · OpenAI-compatible</div>
+    </section>
+
+    <section class="login-panel">
+      <div class="login-card">
+        <div class="login-head">
+          <span class="secure-dot"></span>
+          <span>同源会话 · HttpOnly Cookie</span>
+        </div>
+        <h2>登录业务后台</h2>
+        <p class="login-sub">使用演示账号体验不同权限下 Agent 的能力边界。</p>
+        <form id="login-form" autocomplete="on">
+          <label class="field">
+            <span>用户名</span>
+            <input id="login-username" name="username" type="text" value="admin" autocomplete="username" required>
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="login-password" name="password" type="password" value="admin123" autocomplete="current-password" required>
+          </label>
+          <div id="login-error" class="form-error hidden"></div>
+          <button id="login-btn" class="primary-btn login-submit" type="submit">
+            <span>进入后台</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+        </form>
+        <div class="demo-accounts">
+          <div class="demo-accounts-head"><span>快速填充演示账号</span><span>权限逐级递增</span></div>
+          <div class="account-grid">
+            <button type="button" class="account-chip" data-user="admin" data-pass="admin123">
+              <span class="account-avatar admin">A</span>
+              <span><strong>admin</strong><small>全部权限 + 用户管理</small></span>
+            </button>
+            <button type="button" class="account-chip" data-user="user1" data-pass="user1pass">
+              <span class="account-avatar">1</span>
+              <span><strong>user1</strong><small>只能查询设备</small></span>
+            </button>
+            <button type="button" class="account-chip" data-user="user2" data-pass="user2pass">
+              <span class="account-avatar">2</span>
+              <span><strong>user2</strong><small>查询 + 修改设备</small></span>
+            </button>
+            <button type="button" class="account-chip" data-user="user3" data-pass="user3pass">
+              <span class="account-avatar">3</span>
+              <span><strong>user3</strong><small>查询 + 修改 + 删除</small></span>
+            </button>
+          </div>
+        </div>
+        <div class="login-note">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 12l1.8 1.8 3.5-3.6"/></svg>
+          <span>API Key 仅保存在 Agent 服务端，不会下发浏览器。</span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="app-view" class="app hidden">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h6a4 4 0 0 1 4 4v6M17 17h-6a4 4 0 0 1-4-4V7"/><circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+        </span>
+        <span class="brand-name">WebAgent</span>
+        <span class="brand-tag">DEMO</span>
+      </div>
+      <nav class="main-nav" aria-label="主导航">
+        <button class="nav-item active" data-page="ai" aria-label="AI 对话" title="AI 对话">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z"/></svg>
+          <span class="nav-label">AI 对话</span>
+        </button>
+        <button class="nav-item" data-page="devices" aria-label="设备信息表" title="设备信息表">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+          <span class="nav-label">设备信息表</span>
+        </button>
+        <button class="nav-item" data-page="config" aria-label="AI 配置" title="AI 配置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.1 2.1-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V20h-3v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L6.6 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H5v-3h.5a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L6.6 8 8.7 6l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V4h3v.9a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1 2.1 2.1-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.6v3h-.6a1.7 1.7 0 0 0-1.5 1z"/></svg>
+          <span class="nav-label">AI 配置</span>
+        </button>
+      </nav>
+      <div class="topbar-right">
+        <span id="health-pill" class="health-pill"><i></i> 检查服务</span>
+        <div class="user-chip">
+          <span id="top-avatar" class="user-avatar">A</span>
+          <span class="user-meta"><strong id="top-display-name">—</strong><small id="top-role">—</small></span>
+        </div>
+        <button id="logout-btn" class="icon-btn" title="退出登录" aria-label="退出登录">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5M14 8l4 4-4 4M8 12h10"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <section id="page-ai" class="page page-ai">
+        <div class="ai-layout">
+          <aside class="chat-rail">
+            <div class="rail-head">
+              <div><span class="rail-eyebrow">AI 对话</span><strong>助手</strong></div>
+            </div>
+            <div id="assistant-list" class="assistant-list"></div>
+            <div class="rail-divider">
+              <span>会话</span>
+              <button id="new-chat-btn" class="icon-btn" title="新建对话" aria-label="新建对话">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+            </div>
+            <div id="conv-list" class="conv-list"></div>
+            <div class="rail-foot">
+              <div class="rail-user">
+                <span id="rail-avatar" class="user-avatar">A</span>
+                <span><strong id="rail-display-name">—</strong><small id="rail-username">—</small></span>
+              </div>
+              <span class="rail-version">v0.1 · demo</span>
+            </div>
+          </aside>
+
+          <section class="chat-main">
+            <header class="chat-head">
+              <div class="chat-title">
+                <span id="chat-assistant-icon" class="chat-assistant-icon">✦</span>
+                <div><strong id="chat-heading">新对话</strong><small id="chat-subheading">Agent 已就绪，使用你的账号权限</small></div>
+              </div>
+              <div class="chat-head-actions">
+                <button id="mobile-assistant-btn" class="icon-btn mobile-only" type="button" title="切换助手" aria-label="切换助手">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3z"/></svg>
+                </button>
+                <button id="mobile-new-chat-btn" class="icon-btn mobile-only" type="button" title="新建对话" aria-label="新建对话">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                </button>
+                <span id="mode-badge" class="badge badge-blue">多步</span>
+                <span id="demo-badge" class="badge badge-warn hidden">演示模式</span>
+                <button id="clear-chat-btn" class="ghost-btn">清空</button>
+              </div>
+            </header>
+
+            <div id="chat-scroll" class="chat-scroll">
+              <div id="chat-welcome" class="welcome">
+                <div class="welcome-orb">
+                  <span></span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3z"/></svg>
+                </div>
+                <h1 id="welcome-title">有什么我能帮你的吗？</h1>
+                <p id="welcome-subtitle">我可以查询设备、统计状态，并在你审批后执行修改或删除。</p>
+                <div id="assistant-cards" class="assistant-cards"></div>
+                <div id="quick-chips" class="quick-chips"></div>
+                <div class="welcome-note">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 12l1.8 1.8 3.5-3.6"/></svg>
+                  <span>Agent 只通过 MCP 工具访问数据，工具会再次校验你的真实权限。</span>
+                </div>
+              </div>
+              <div id="messages" class="messages"></div>
+            </div>
+
+            <div class="composer-zone">
+              <div id="tool-popover" class="tool-popover hidden">
+                <div class="popover-head">
+                  <div><strong>本轮可用工具</strong><small>只列出你的账号有权限且管理员已启用的工具</small></div>
+                  <div class="popover-actions">
+                    <button type="button" id="tools-all-btn" class="text-btn">全选</button>
+                    <button type="button" id="tools-none-btn" class="text-btn">清空</button>
+                  </div>
+                </div>
+                <div id="tool-popover-list" class="popover-list"></div>
+              </div>
+              <div class="composer">
+                <div id="attach-bar" class="attach-bar hidden"></div>
+                <textarea id="chat-input" rows="1" placeholder="输入消息，Enter 发送，Shift + Enter 换行"></textarea>
+                <div class="composer-bar">
+                  <div class="composer-left">
+                    <label class="pill-btn attach-btn" title="添加图片">
+                      <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12.5l-7.8 7.8a5 5 0 0 1-7.1-7.1l8.5-8.5a3.4 3.4 0 0 1 4.8 4.8l-8.5 8.5a1.8 1.8 0 0 1-2.5-2.5l7.8-7.8"/></svg>
+                    </label>
+                    <button id="tool-picker-btn" class="pill-btn" type="button">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2.3-2.3 2.3-2.3z"/></svg>
+                      工具 <span id="tool-count" class="pill-count">0/0</span>
+                    </button>
+                    <label class="model-select">
+                      <span>模型</span>
+                      <select id="model-select" aria-label="选择模型"></select>
+                    </label>
+                  </div>
+                  <div class="composer-right">
+                    <span class="send-hint">Enter 发送</span>
+                    <button id="send-btn" class="send-btn" type="button" aria-label="发送">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="composer-note">
+                <span><i></i> 工具调用继承当前账号权限</span>
+                <span id="composer-model-note">—</span>
+              </div>
+            </div>
+          </section>
+
+          <aside class="context-rail">
+            <div class="context-title">当前会话</div>
+            <div class="identity-card">
+              <span id="context-avatar" class="user-avatar large">A</span>
+              <div><strong id="context-display-name">—</strong><small id="context-username">—</small></div>
+              <span id="context-admin-badge" class="badge badge-green hidden">管理员</span>
+            </div>
+            <div class="context-block">
+              <div class="context-label">账号权限</div>
+              <div id="permission-chips" class="permission-chips"></div>
+            </div>
+            <div class="context-block">
+              <div class="context-label">本轮模型</div>
+              <div id="context-model" class="context-value">
+                <span class="model-dot"></span><span>—</span>
+              </div>
+            </div>
+            <div class="context-block">
+              <div class="context-label">可用工具 <span id="context-tool-total"></span></div>
+              <div id="context-tool-list" class="mini-list"></div>
+            </div>
+            <div class="context-block">
+              <div class="context-label">启用技能</div>
+              <div id="context-skill-list" class="mini-list"></div>
+            </div>
+            <div class="context-block">
+              <div class="context-label">运行预算</div>
+              <div id="context-budget" class="budget-grid"></div>
+            </div>
+            <div class="context-block">
+              <div class="context-label">长期记忆 <span id="context-memory-count"></span></div>
+              <button id="manage-memory-btn" class="ghost-btn memory-btn" type="button">管理记忆</button>
+            </div>
+            <div class="context-boundary">
+              <div class="boundary-title">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/></svg>
+                权限边界
+              </div>
+              <p>浏览器只访问业务系统同源代理。Agent 服务不信任前端传来的用户 ID，只通过业务系统校验 Token。</p>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="page-devices" class="page page-scroll hidden">
+        <div class="page-head">
+          <div>
+            <span class="eyebrow"><i></i> 业务系统</span>
+            <h1>设备信息表</h1>
+            <p>一张普通业务表，通过 REST API 与 MCP 工具暴露给 Agent。</p>
+          </div>
+          <div class="page-head-actions">
+            <button id="refresh-devices-btn" class="ghost-btn">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v6h-6"/></svg>
+              刷新
+            </button>
+            <button id="add-device-btn" class="primary-btn hidden">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              新增设备
+            </button>
+          </div>
+        </div>
+        <div id="readonly-banner" class="permission-banner hidden">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/></svg>
+          <span id="readonly-banner-text">当前账号仅有查看权限，编辑与删除入口已隐藏；服务端同样会拒绝越权请求。</span>
+        </div>
+        <div id="stats-grid" class="stats-grid"></div>
+        <section class="panel">
+          <div class="panel-toolbar">
+            <div class="table-title"><strong>设备列表</strong><span id="device-count">—</span></div>
+            <div class="toolbar-controls">
+              <label class="search-box">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16 16l4 4"/></svg>
+                <input id="device-search" type="search" placeholder="搜索名称、编号、位置、负责人">
+              </label>
+              <select id="device-status-filter" class="select-control" aria-label="按状态筛选">
+                <option value="">全部状态</option>
+                <option value="在线">在线</option>
+                <option value="离线">离线</option>
+                <option value="维护中">维护中</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="w-id">ID</th>
+                  <th>设备名称</th>
+                  <th>类型</th>
+                  <th>设备编号</th>
+                  <th>位置</th>
+                  <th>状态</th>
+                  <th>负责人</th>
+                  <th class="w-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="device-tbody"></tbody>
+            </table>
+            <div id="device-empty" class="empty-state hidden">
+              <div class="empty-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+              </div>
+              <strong>没有匹配的设备</strong>
+              <span>尝试修改搜索关键词或状态筛选。</span>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="page-config" class="page page-scroll hidden">
+        <div class="page-head">
+          <div>
+            <span class="eyebrow"><i></i> 统一治理</span>
+            <h1>AI 配置</h1>
+            <p>供应商、模型、助手、工具、技能、用户和审计统一管理。普通用户只能查看自己的可用范围。</p>
+          </div>
+          <div id="config-refresh-wrap" class="page-head-actions">
+            <button id="refresh-config-btn" class="ghost-btn">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v6h-6"/></svg>
+              刷新
+            </button>
+          </div>
+        </div>
+
+        <div id="config-guest" class="hidden">
+          <div class="guest-config-grid" id="guest-config-grid"></div>
+          <div class="panel guest-note">
+            <div class="guest-note-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 12l1.8 1.8 3.5-3.6"/></svg>
+            </div>
+            <div><strong>配置项由管理员统一维护</strong><p>你可以切换管理员启用的模型，并在每轮对话中选择是否使用某个工具。管理员停用的模型或工具不会出现在用户侧。</p></div>
+          </div>
+        </div>
+
+        <div id="config-admin" class="config-layout hidden">
+          <aside id="config-nav" class="config-nav">
+            <div class="config-nav-group">
+              <span class="config-nav-label">模型接入</span>
+              <button class="config-nav-item active" data-tab="providers"><span>供应商</span><small>API Key / Base URL</small></button>
+              <button class="config-nav-item" data-tab="models"><span>模型</span><small>拉取 / 参数 / 能力</small></button>
+            </div>
+            <div class="config-nav-group">
+              <span class="config-nav-label">Agent</span>
+              <button class="config-nav-item" data-tab="assistants"><span>助手</span><small>提示词 / 工具 / 预算</small></button>
+              <button class="config-nav-item" data-tab="tools"><span>工具</span><small>MCP 全局开关</small></button>
+              <button class="config-nav-item" data-tab="skills"><span>技能</span><small>规范与知识注入</small></button>
+            </div>
+            <div class="config-nav-group">
+              <span class="config-nav-label">系统</span>
+              <button class="config-nav-item" data-tab="users"><span>用户</span><small>账号与权限</small></button>
+              <button class="config-nav-item" data-tab="audit"><span>审计</span><small>双端操作日志</small></button>
+              <button class="config-nav-item" data-tab="settings"><span>运行设置</span><small>演示模式 / 预算</small></button>
+            </div>
+          </aside>
+          <div class="config-body">
+            <div id="config-content" class="config-content"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

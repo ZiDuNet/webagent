@@ -1,0 +1,2 @@
+"""Mock business system."""
+
