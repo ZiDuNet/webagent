@@ -1,0 +1,55 @@
+# 代码审查与验收记录
+
+审查日期：2026-11-12。目标是单机接入框架 Demo 的逻辑、权限边界、正式页面交互和 Docker Compose 可运行性，不代表所有第三方供应商和真实微信设备都已认证。
+
+## 本轮修正
+
+- 压缩摘要必须真正进入下一次模型上下文；编辑/删除已摘要消息时作废旧摘要和过期操作卡。
+- 统一四态工具规则；默认未勾选的可见工具仍出现在可选列表，隐藏写/删工具不会跳过 RBAC 或审批。
+- 同一会话运行互斥；用户并发上限与 SSE 缓存背压；运行截止时间使用单调时钟，模型和工具受硬超时约束。
+- 修复 React 分叉参数、重复工具调用状态对应、旧会话流更新串入新会话、手工标题被异步自动标题覆盖的问题。
+- 思考原文实时可展开，未启用保存时不写入消息元数据；清理历史重复原文，管理员只看元数据时隐藏正文、思考和工具详情。
+- 解决 Markdown 重复解析引起的无效更新、代码块内存堆积、Mermaid 被全局图标样式缩成小点的问题；支持流式图表语法完整时提前绘制。
+- HTML 与 React 使用相同上下文输入预算，区分当前上下文和本轮累计消耗；模型切换后立即重算。
+- 修复 SDK Cookie 登录，要求直连 Tool 业务鉴权回调；动态 URL 参数不能改主机、注入凭据或形成路径穿越。
+- SQLite 事务上下文退出后真正关闭连接；HTML 录入图片校验数量/单文件/总容量，避免异步读取串入其他会话。
+- Docker 内部 MCP 服务名加入精确 Host/Origin 白名单，保留 DNS 重绑定保护；补齐截图运行库，并实现三服务就绪检查、本地资源、非 root 和数据持久化。
+
+## 自动验证
+
+| 验证 | 范围 |
+|---|---|
+| `scripts/test_asr_protocol.py`：16 项 | 转写协议、录音转换、推理开关、超时和错误脱敏 |
+| `scripts/test_publications.py`：16 项 | 发布归属、并发、版本、部分成功、兼容路由和秘密处理 |
+| `scripts/test_publications_api.py`：8 项 | HTTP/SDK 契约、跨用户访问、关闭连接器后的本地读取 |
+| `scripts/test_review_regressions.py`：33 项 | 上述上下文、四态、审批、互斥、隐私、SDK、缓存与 MCP 容器回归 |
+| `scripts/smoke_test.py` | 独立 Compose 数据卷中的真实 BFF → Agent → MCP → 业务 API、角色权限、审批、SSE 重放、加密配置、会话操作、假 PagePilot 发布/更新、真实 Chromium PNG 截图 |
+| 静态与构建 | Ruff `F,E9`、Python 全量语法编译、HTML JavaScript 语法、TypeScript、Vite 生产构建、`git diff --check` |
+| npm 审计 | 生产依赖已知漏洞为 0（验收时的 registry 结果，不保证未来不会出现新的公告） |
+
+运行单元测试：
+
+```bash
+for test_file in scripts/test_asr_protocol.py scripts/test_publications.py scripts/test_publications_api.py scripts/test_review_regressions.py; do
+  .venv/bin/python "$test_file"
+done
+```
+
+冒烟测试会临时修改配置、创建发布记录，应该只在隔离验收实例运行，不能作为针对现有生产数据的无副作用探针。涉及 PagePilot 的写入均使用本机假服务，本轮没有向用户真实远端站点发布或更新。
+
+## 浏览器检查
+
+实际打开正式 HTML、生产 React 页面和 390px 窄视口，检查同源登录、真实工具触发、Markdown 表格/公式/Mermaid/柱图、HTML 隔离预览、可展开过程和思考、完成后折叠、当前上下文/用量、切换模型、删除确认、手机端发布记录弹窗，以及模型/工具/运行配置入口。
+
+流式视觉验收采用临时的 OpenAI-compatible 测试网关，输出明确标注为验收数据，通过真实 Agent 循环调用只读业务工具，测试网关不会进入产品代码。这样验证传输和渲染，不冒充真实大模型效果，也不消耗用户模型额度。
+
+## 已知边界
+
+- 原生配置管理台和 React 聊天组件并存；React 不是整套后台的完全重写。移动验收是响应式 Web，不是微信原生小程序真机认证。
+- 当前浏览器录音文件转写不支持 WebSocket 实时语音模型；已有目标网关的文件模型路由限制仍需供应商解决，不能宣称实际语音已全面可用。
+- MCP 为远程 Streamable HTTP 配置入口；没有后台管理任意 stdio/SSE 服务器的完整控制面。原生 Tool、HTTP 连接器与 PagePilot REST 走各自适配路径。
+- Agent/SSE 运行锁和重放缓存仍在单进程内，保持单 worker；服务重启不恢复正在运行的任务。持久化审批不等于持久化任务调度。
+- 长期记忆当前手动维护；自动提取、租户知识库、任意脚本沙箱等不属于此次落地范围。第三方知识库可通过受控工具扩展。
+- Mermaid 的高级图类型分包较大，Vite 会提示部分分包超过 500KB；已按需加载，不把构建警告隐藏成零问题。
+
+部署、安全、数据隔离与备份流程见 [DEPLOYMENT.md](DEPLOYMENT.md)，业务鉴权和 SDK 注册示例见 [INTEGRATION.md](INTEGRATION.md)。

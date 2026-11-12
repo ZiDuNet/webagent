@@ -1,0 +1,21 @@
+.data-chart { margin: 16px 0; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text); }
+.data-chart figcaption { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.data-chart figcaption span { font-size: 12px; opacity: .8; }
+.data-chart__bars { display: grid; gap: 12px; }
+.data-chart__bars > div { display: grid; grid-template-columns: minmax(64px, 1fr) minmax(60px, 2fr) auto; align-items: center; gap: 12px; font-size: 13px; }
+.data-chart__bars > div > span { overflow-wrap: anywhere; }
+.data-chart__bars i { height: 8px; background: #263040; border-radius: 4px; overflow: hidden; }
+.data-chart__bars b { display: block; height: 100%; border-radius: 4px; }
+.data-chart__trend { display: block; width: 100%; height: auto; }
+.data-chart__round { display: flex; align-items: center; gap: 20px; }
+.data-chart__round svg { width: 140px; max-width: 40%; flex-shrink: 0; }
+.data-chart__round ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; flex: 1; min-width: 0; }
+.data-chart__round li { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.data-chart__round li i { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.data-chart__round li span { overflow-wrap: anywhere; }
+.data-chart__round li strong { margin-left: auto; white-space: nowrap; }
+.data-chart__table { margin-top: 12px; font-size: 12px; }
+.data-chart__table summary { cursor: pointer; padding: 8px 0; }
+.data-chart__table table { width: 100%; margin-top: 8px; border-collapse: collapse; }
+.data-chart__table th, .data-chart__table td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border-subtle, #293241); }
+@media (max-width: 480px) { .data-chart { padding: 12px; } .data-chart__round { gap: 12px; } .data-chart__table summary { min-height: 44px; display: flex; align-items: center; } }

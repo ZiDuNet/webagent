@@ -2,26 +2,50 @@
 
 from __future__ import annotations
 
+import csv
 import hmac
+import io
+import json
+import logging
+import base64
+import binascii
+import secrets
+import asyncio
+import time
 from typing import Any, Literal
 
 import httpx2
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from webagent.agent import db, runtime, sessions
-from webagent.agent.llm import runtime_config, test_llm
-from webagent.agent.mcp_client import list_tools
+from webagent.agent import artifacts, db, dynamic_tools, pagepilot, publications, runtime, sessions
+from webagent.agent.llm import runtime_config, test_llm, transcribe_audio
 from webagent.agent.providers import (
     ProviderError,
+    enrich_model_defaults,
     list_remote_models,
+    reasoning_config,
     suggest_model_defaults,
+    transcription_config,
     validate_base_url,
     validate_headers,
 )
 from webagent.agent.runtime import AgentError
-from webagent.config import AGENT_PORT, INTERNAL_SECRET, MCP_PORT
+from webagent.config import AGENT_PORT, INTERNAL_SECRET, MCP_HEALTH_URL
+
+
+logger = logging.getLogger("uvicorn.error")
+
+ReasoningEffort = Literal[
+    "off",
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+]
 
 
 class ChatAttachment(BaseModel):
@@ -42,6 +66,8 @@ class ChatBody(BaseModel):
     assistant_id: int | None = None
     model_row_id: int | None = None
     enabled_tools: list[str] | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    approval_mode: Literal["confirm", "full_access"] | None = None
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=4)
 
 
@@ -78,6 +104,15 @@ class ModelCreate(BaseModel):
     provider_id: int
     name: str = Field(min_length=1, max_length=80)
     model_id: str = Field(min_length=1, max_length=160)
+    model_kind: Literal[
+        "chat",
+        "vision",
+        "asr",
+        "asr_realtime",
+        "embedding",
+        "rerank",
+        "image_generation",
+    ] = "chat"
     enabled: bool = True
     is_default: bool = False
     capabilities: list[Literal["text", "image"]] = Field(
@@ -88,6 +123,15 @@ class ModelCreate(BaseModel):
     max_output_tokens: int = Field(default=0, ge=0, le=1_000_000)
     temperature: float = Field(default=0.3, ge=0, le=2)
     top_p: float = Field(default=1.0, ge=0, le=1)
+    input_price_per_1m: float = Field(default=0, ge=0, le=100_000)
+    output_price_per_1m: float = Field(default=0, ge=0, le=100_000)
+    supports_reasoning: bool = False
+    reasoning_style: Literal["effort"] = "effort"
+    reasoning_efforts: list[ReasoningEffort] = Field(default_factory=list)
+    default_reasoning_effort: Literal["", "off", "none", "minimal", "low", "medium", "high", "xhigh"] = ""
+    supports_reasoning_summary: bool = True
+    supports_transcription: bool = False
+    metadata_source: str = Field(default="", max_length=40)
     extra_params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -95,6 +139,15 @@ class ModelUpdate(BaseModel):
     provider_id: int | None = None
     name: str | None = Field(default=None, min_length=1, max_length=80)
     model_id: str | None = Field(default=None, min_length=1, max_length=160)
+    model_kind: Literal[
+        "chat",
+        "vision",
+        "asr",
+        "asr_realtime",
+        "embedding",
+        "rerank",
+        "image_generation",
+    ] | None = None
     enabled: bool | None = None
     is_default: bool | None = None
     capabilities: list[Literal["text", "image"]] | None = None
@@ -103,24 +156,85 @@ class ModelUpdate(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=0, le=1_000_000)
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
+    input_price_per_1m: float | None = Field(default=None, ge=0, le=100_000)
+    output_price_per_1m: float | None = Field(default=None, ge=0, le=100_000)
+    supports_reasoning: bool | None = None
+    reasoning_style: Literal["effort"] | None = None
+    reasoning_efforts: list[ReasoningEffort] | None = None
+    default_reasoning_effort: Literal["", "off", "none", "minimal", "low", "medium", "high", "xhigh"] | None = None
+    supports_reasoning_summary: bool | None = None
+    supports_transcription: bool | None = None
+    metadata_source: str | None = Field(default=None, max_length=40)
     extra_params: dict[str, Any] | None = None
 
 
-class ToolToggle(BaseModel):
-    enabled: bool
+class ToolConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    visible: bool | None = None
+    selectable: bool | None = None
+    default_selected: bool | None = None
+
+
+class DynamicToolCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=64)
+    display_name: str = Field(default="", max_length=120)
+    description: str = Field(default="", max_length=2000)
+    category: str = Field(default="业务连接器", max_length=60)
+    permission: str = Field(default="", max_length=100)
+    risk: Literal["read", "write", "delete"] = "read"
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
+    url_template: str = Field(min_length=8, max_length=1000)
+    headers: dict[str, str] = Field(default_factory=dict)
+    input_schema: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
+    enabled: bool = True
+
+
+class DynamicToolUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=64)
+    display_name: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    category: str | None = Field(default=None, max_length=60)
+    permission: str | None = Field(default=None, max_length=100)
+    risk: Literal["read", "write", "delete"] | None = None
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] | None = None
+    url_template: str | None = Field(default=None, min_length=8, max_length=1000)
+    headers: dict[str, str] | None = None
+    input_schema: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
+class DynamicToolTestBody(BaseModel):
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class TranscribeBody(BaseModel):
+    audio_data_url: str = Field(min_length=32, max_length=20_000_000)
+    language: str = Field(default="zh", max_length=20)
 
 
 class SkillCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+    slug: str = Field(default="", max_length=100)
     description: str = Field(default="", max_length=300)
     content: str = Field(min_length=1, max_length=20000)
+    kind: Literal["prompt"] = "prompt"
+    license: str = Field(default="", max_length=200)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    files: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
 
 
 class SkillUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
+    slug: str | None = Field(default=None, max_length=100)
     description: str | None = Field(default=None, max_length=300)
     content: str | None = Field(default=None, min_length=1, max_length=20000)
+    kind: Literal["prompt"] | None = None
+    license: str | None = Field(default=None, max_length=200)
+    metadata: dict[str, Any] | None = None
+    files: dict[str, str] | None = None
     enabled: bool | None = None
 
 
@@ -129,11 +243,36 @@ class ConfigUpdate(BaseModel):
     max_iterations: int | None = Field(default=None, ge=1, le=12)
     max_tool_calls: int | None = Field(default=None, ge=1, le=50)
     max_run_seconds: int | None = Field(default=None, ge=10, le=900)
-    context_max_tokens: int | None = Field(default=None, ge=4096, le=1_000_000)
+    context_max_tokens: int | None = Field(default=None, ge=0, le=1_000_000)
     context_compression: bool | None = None
+    bm25_enabled: bool | None = None
+    context_reserve_tokens: int | None = Field(default=None, ge=0, le=100_000)
+    compaction_model_id: int | None = None
+    compaction_keep_ratio: float | None = Field(default=None, ge=0.2, le=0.9)
+    session_retention_days: int | None = Field(default=None, ge=0, le=3650)
+    admin_session_content: bool | None = None
+    store_reasoning: bool | None = None
+    user_daily_token_limit: int | None = Field(default=None, ge=0, le=100_000_000)
     memory_enabled: bool | None = None
     system_prompt_extra: str | None = Field(default=None, max_length=4000)
     demo_mode: bool | None = None
+    default_reasoning_effort: Literal["", "off", "none", "minimal", "low", "medium", "high", "xhigh"] | None = None
+    default_approval_mode: Literal["confirm", "full_access"] | None = None
+    allow_full_access: bool | None = None
+    welcome_title: str | None = Field(default=None, max_length=120)
+    welcome_subtitle: str | None = Field(default=None, max_length=500)
+    welcome_prompts: str | None = Field(default=None, max_length=4000)
+    asr_model_id: int | None = None
+    title_model_id: int | None = None
+    fallback_model_id: int | None = None
+    retry_enabled: bool | None = None
+    retry_max_attempts: int | None = Field(default=None, ge=1, le=8)
+    retry_initial_backoff_ms: int | None = Field(default=None, ge=100, le=60_000)
+    retry_max_backoff_ms: int | None = Field(default=None, ge=100, le=120_000)
+    retry_multiplier: float | None = Field(default=None, ge=1, le=10)
+    retry_jitter: float | None = Field(default=None, ge=0, le=1)
+    retry_honor_retry_after: bool | None = None
+    retry_max_elapsed_seconds: int | None = Field(default=None, ge=1, le=600)
 
 
 class SessionCreate(BaseModel):
@@ -144,6 +283,45 @@ class SessionCreate(BaseModel):
 class SessionUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=120)
     assistant_id: int | None = None
+
+
+class CompactBody(BaseModel):
+    model_row_id: int | None = None
+
+
+class ForkBody(BaseModel):
+    until_message_id: int | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class MessageEditBody(BaseModel):
+    content: str = Field(min_length=1, max_length=20000)
+
+
+class PagePilotConfigUpdate(BaseModel):
+    base_url: str = Field(min_length=8, max_length=500)
+    token: str | None = Field(default=None, max_length=800)
+    clear_token: bool = False
+    enabled: bool | None = None
+    default_title: str | None = Field(default=None, max_length=120)
+    default_description: str | None = Field(default=None, max_length=240)
+    default_visibility: Literal["public", "unlisted"] | None = None
+
+
+class PagePilotPublishBody(BaseModel):
+    html: str = Field(min_length=20, max_length=3_200_000)
+    title: str = Field(default="", max_length=120)
+    description: str = Field(default="", max_length=240)
+    filename: str = Field(default="index.html", max_length=160)
+    code: str = Field(default="", max_length=300)
+    access_password: str | None = Field(default=None, max_length=200)
+    visibility: Literal["public", "unlisted"] | None = None
+    session_id: str | None = Field(default=None, max_length=80)
+    publication_id: int | None = Field(default=None, gt=0)
+
+
+class ArtifactScreenshotBody(BaseModel):
+    html: str = Field(min_length=20, max_length=3_200_000)
 
 
 class MemoryCreate(BaseModel):
@@ -206,6 +384,9 @@ app = FastAPI(title="WebAgent Agent Gateway", version="1.0.0")
 @app.on_event("startup")
 def startup() -> None:
     db.init_db()
+    publications.recover_interrupted()
+    config = runtime_config()
+    db.purge_old_sessions(int(config.get("session_retention_days") or 0))
 
 
 @app.exception_handler(AgentError)
@@ -235,6 +416,14 @@ async def _admin(token: str) -> dict[str, Any]:
     user = await runtime.identity_from_token(token)
     if not user.get("is_admin"):
         raise AgentError("仅管理员可执行此操作", 403)
+    return user
+
+
+async def _session_admin(token: str) -> dict[str, Any]:
+    user = await runtime.identity_from_token(token)
+    permissions = set(user.get("permissions", []))
+    if not user.get("is_admin") and "session:read_all" not in permissions:
+        raise AgentError("需要 session:read_all 权限才能查看全部会话", 403)
     return user
 
 
@@ -313,6 +502,49 @@ def _assistant_for_user(
     return assistant
 
 
+def _session_detail(session_id: str, include_content: bool) -> dict[str, Any] | None:
+    session = sessions.get_session_admin(session_id)
+    if session is None:
+        return None
+    messages = sessions.list_messages_admin(session_id)
+    compaction_events = db.list_compaction_events(session_id)
+    llm_calls = db.list_llm_calls(session_id, limit=500)
+    if not include_content:
+        session = dict(session)
+        session["summary"] = "[内容已隐藏]"
+        session["title"] = "[内容已隐藏]"
+        session["last_error"] = ""
+        for message in messages:
+            message["content"] = "[内容已隐藏]"
+            message["reasoning"] = ""
+            message["attachments"] = []
+            message["metadata"] = {
+                key: value for key, value in (message.get("metadata") or {}).items()
+                if key in {"status", "approval_status", "usage", "run", "model_row_id", "reasoning"}
+            }
+            run = message["metadata"].get("run")
+            if isinstance(run, dict):
+                message["metadata"]["run"] = {key: value for key, value in run.items() if key != "reasoning"}
+            runs = []
+            for run in message.get("tool_runs") or []:
+                item = dict(run)
+                item["arguments"] = {}
+                item["result"] = None
+                item["result_text"] = ""
+                item["summary"] = "[内容已隐藏]"
+                runs.append(item)
+            message["tool_runs"] = runs
+        for item in [*compaction_events, *llm_calls]:
+            item["error"] = ""
+    return {
+        "session": session,
+        "messages": messages,
+        "compaction_events": compaction_events,
+        "llm_calls": llm_calls,
+        "privacy": {"include_content": include_content},
+    }
+
+
 def _validated_provider_values(
     *,
     name: str,
@@ -355,8 +587,47 @@ def _validate_extra_params(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _validate_model_protocols(model: dict[str, Any], provider: dict[str, Any]) -> None:
+    try:
+        reasoning_config(model)
+        transcription_config(model, provider)
+    except ProviderError as exc:
+        raise AgentError(str(exc), 422) from exc
+
+
+def _asr_status(config: dict[str, Any]) -> dict[str, Any]:
+    model_id = config.get("asr_model_id")
+    model = db.get_model(int(model_id)) if model_id else None
+    result = {
+        "configured": False,
+        "model_id": model_id,
+        "model_name": model.get("name", "") if model else "",
+        "protocol": "",
+        "reason": "管理员尚未设置默认语音识别模型",
+    }
+    if not model:
+        return result
+    provider = db.get_provider(int(model["provider_id"])) if model.get("provider_id") else None
+    if not model.get("enabled") or not model.get("supports_transcription"):
+        result["reason"] = "所选模型未启用语音转写能力"
+    elif not provider or not provider.get("enabled") or not provider.get("api_key"):
+        result["reason"] = "语音模型的供应商未启用或尚未配置密钥"
+    else:
+        try:
+            protocol = transcription_config(model, provider)["protocol"]
+            result["protocol"] = protocol
+            if protocol == "realtime":
+                result["reason"] = "所选模型使用 WebSocket 实时语音协议，不能用于当前录音文件转写"
+            else:
+                result.update(configured=True, reason="")
+        except ProviderError as exc:
+            result["reason"] = str(exc)
+    return result
+
+
 def _config_public() -> dict[str, Any]:
     config = runtime_config()
+    retry = config.get("retry") or {}
     return {
         "llm_temperature": config["temperature"],
         "max_iterations": config["max_iterations"],
@@ -364,14 +635,228 @@ def _config_public() -> dict[str, Any]:
         "max_run_seconds": config["max_run_seconds"],
         "context_max_tokens": config["context_max_tokens"],
         "context_compression": config["context_compression"],
+        "bm25_enabled": config["bm25_enabled"],
+        "context_reserve_tokens": config["context_reserve_tokens"],
+        "compaction_model_id": config["compaction_model_id"],
+        "compaction_keep_ratio": config["compaction_keep_ratio"],
+        "session_retention_days": config["session_retention_days"],
+        "admin_session_content": config["admin_session_content"],
+        "store_reasoning": config["store_reasoning"],
+        "user_daily_token_limit": config["user_daily_token_limit"],
         "memory_enabled": config["memory_enabled"],
         "system_prompt_extra": config["system_prompt_extra"],
         "demo_mode": config["demo_mode"],
         "effective_demo_mode": config["demo_mode"],
+        "default_reasoning_effort": config["default_reasoning_effort"],
+        "default_approval_mode": config["default_approval_mode"],
+        "allow_full_access": config["allow_full_access"],
+        "welcome_title": config["welcome_title"],
+        "welcome_subtitle": config["welcome_subtitle"],
+        "welcome_prompts": config["welcome_prompts"],
+        "asr_model_id": config["asr_model_id"],
+        "title_model_id": config["title_model_id"],
+        "fallback_model_id": config["fallback_model_id"],
         "provider_count": len(db.get_providers(include_disabled=True)),
         "model_count": len(db.get_models(include_disabled=True)),
         "assistants": len(db.get_assistants(include_disabled=True)),
+        "retry_enabled": retry.get("enabled", True),
+        "retry_max_attempts": retry.get("max_attempts", 3),
+        "retry_initial_backoff_ms": retry.get("initial_backoff_ms", 800),
+        "retry_max_backoff_ms": retry.get("max_backoff_ms", 8000),
+        "retry_multiplier": retry.get("multiplier", 2.0),
+        "retry_jitter": retry.get("jitter", 0.2),
+        "retry_honor_retry_after": retry.get("honor_retry_after", True),
+        "retry_max_elapsed_seconds": retry.get("max_elapsed_seconds", 60),
     }
+
+
+class RunChannel:
+    def __init__(self, run_id: str, user_id: int) -> None:
+        self.run_id = run_id
+        self.user_id = user_id
+        self.events: list[tuple[int, str, dict[str, Any]]] = []
+        self.closed = False
+        self.created_at = time.time()
+        self.condition = asyncio.Condition()
+        self.task: asyncio.Task[Any] | None = None
+
+    async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        async with self.condition:
+            event_id = len(self.events) + 1
+            self.events.append((event_id, event_type, payload))
+            self.condition.notify_all()
+
+    async def close(self) -> None:
+        async with self.condition:
+            self.closed = True
+            self.condition.notify_all()
+
+    async def subscribe(self, last_event_id: int = 0):
+        cursor = max(0, last_event_id)
+        while True:
+            heartbeat = False
+            async with self.condition:
+                pending = [
+                    item for item in self.events if item[0] > cursor
+                ]
+                if not pending and not self.closed:
+                    try:
+                        await asyncio.wait_for(
+                            self.condition.wait(), timeout=15.0
+                        )
+                    except asyncio.TimeoutError:
+                        heartbeat = True
+                    else:
+                        pending = [
+                            item for item in self.events if item[0] > cursor
+                        ]
+                if heartbeat:
+                    pending = []
+                closed = self.closed
+            if heartbeat:
+                yield _sse_event(
+                    0,
+                    "heartbeat",
+                    {"run_id": self.run_id, "ts": int(time.time())},
+                )
+                continue
+            for event_id, event_type, payload in pending:
+                cursor = event_id
+                yield _sse_event(event_id, event_type, payload)
+            if closed and not pending:
+                return
+
+
+RUNS: dict[str, RunChannel] = {}
+RUNS_LOCK = asyncio.Lock()
+RUN_TTL_SECONDS = 30 * 60
+
+
+def _sse_event(event_id: int, event_type: str, payload: dict[str, Any]) -> str:
+    try:
+        data = json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        logger.exception("SSE payload serialization failed for %s", event_type)
+        data = json.dumps(payload, ensure_ascii=False, default=str)
+    prefix = f"id: {event_id}\n" if event_id else ""
+    return f"{prefix}event: {event_type}\ndata: {data}\n\n"
+
+
+async def _new_run_channel(user_id: int) -> RunChannel:
+    async with RUNS_LOCK:
+        now = time.time()
+        expired = [
+            key
+            for key, channel in RUNS.items()
+            if channel.closed and now - channel.created_at > RUN_TTL_SECONDS
+        ]
+        for key in expired:
+            RUNS.pop(key, None)
+        if sum(not channel.closed and channel.user_id == user_id for channel in RUNS.values()) >= 4:
+            raise AgentError("当前账号已有多个任务执行中，请等待完成后再发起请求", 429)
+        if len(RUNS) >= 120:
+            completed = [channel for channel in RUNS.values() if channel.closed]
+            if not completed:
+                raise AgentError("服务当前繁忙，请稍后重试", 429)
+            oldest = min(completed, key=lambda item: item.created_at)
+            RUNS.pop(oldest.run_id, None)
+        run_id = secrets.token_urlsafe(12)
+        channel = RunChannel(run_id, user_id)
+        RUNS[run_id] = channel
+        return channel
+
+
+async def _run_chat_job(
+    channel: RunChannel,
+    token: str,
+    text: str,
+    body: ChatBody,
+) -> None:
+    try:
+        result = await runtime.chat(
+            token,
+            text,
+            body.model_row_id,
+            body.enabled_tools,
+            assistant_id=body.assistant_id,
+            session_id=body.session_id,
+            attachments=[item.model_dump() for item in body.attachments],
+            reasoning_effort=body.reasoning_effort,
+            approval_mode=body.approval_mode,
+            emit=channel.emit,
+        )
+        has_text_delta = any(
+            event_type == "text.delta" for _, event_type, _ in channel.events
+        )
+        if not has_text_delta:
+            answer = str(result.get("answer") or "")
+            for index in range(0, len(answer), 28):
+                await channel.emit("text.delta", {"delta": answer[index : index + 28]})
+                await asyncio.sleep(0.018)
+        await channel.emit(
+            "run.completed",
+            {
+                "status": result.get("status"),
+                "session_id": result.get("session_id"),
+                "answer": result.get("answer"),
+                "usage": result.get("usage") or {},
+                "context": result.get("context") or {},
+                "run": result.get("run") or {},
+                "tool_runs": result.get("tool_runs") or [],
+                "approval": result.get("approval"),
+                "demo_mode": result.get("demo_mode"),
+                "approval_mode": result.get("approval_mode"),
+                "model": result.get("model"),
+                "budget": result.get("budget"),
+                "session_usage": result.get("session_usage"),
+                "enabled_tools": result.get("enabled_tools"),
+                "tool_retrieval": result.get("tool_retrieval"),
+            },
+        )
+    except asyncio.CancelledError:
+        logger.warning("run %s cancelled", channel.run_id)
+        raise
+    except AgentError as exc:
+        await channel.emit(
+            "run.failed",
+            {"message": exc.message, "status_code": exc.status_code},
+        )
+    except Exception as exc:  # noqa: BLE001 - reported through the stream
+        logger.exception("run %s failed", channel.run_id)
+        await channel.emit("run.failed", {"message": str(exc)[:800]})
+    finally:
+        await channel.close()
+
+
+async def _start_stream(
+    body: ChatBody,
+    request: Request,
+    last_event_id: int = 0,
+) -> StreamingResponse:
+    token = _bearer(request)
+    text = (body.message or "").strip()
+    if not text and body.messages:
+        last = next(
+            (item for item in reversed(body.messages) if item.role == "user"),
+            None,
+        )
+        text = last.content.strip() if last else ""
+    if not text:
+        raise AgentError("消息不能为空", 422)
+    user = await runtime.identity_from_token(token)
+    channel = await _new_run_channel(int(user["id"]))
+    channel.task = asyncio.create_task(
+        _run_chat_job(channel, token, text, body)
+    )
+    return StreamingResponse(
+        channel.subscribe(last_event_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Run-Id": channel.run_id,
+        },
+    )
 
 
 @app.get("/health")
@@ -379,7 +864,7 @@ async def health() -> dict[str, Any]:
     mcp_ok = False
     try:
         async with httpx2.AsyncClient(timeout=1.5) as client:
-            response = await client.get(f"http://127.0.0.1:{MCP_PORT}/health")
+            response = await client.get(MCP_HEALTH_URL)
             mcp_ok = response.status_code < 400
     except Exception:  # noqa: BLE001
         mcp_ok = False
@@ -417,7 +902,94 @@ async def chat(
         assistant_id=body.assistant_id,
         session_id=body.session_id,
         attachments=attachments,
+        reasoning_effort=body.reasoning_effort,
+        approval_mode=body.approval_mode,
     )
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(
+    body: ChatBody,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+    last_event_id: int = Header(default=0, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    _verify_internal(x_internal_token)
+    return await _start_stream(body, request, last_event_id)
+
+
+@app.get("/api/chat/stream/{run_id}")
+async def resume_chat_stream(
+    run_id: str,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+    last_event_id: int = Header(default=0, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    async with RUNS_LOCK:
+        channel = RUNS.get(run_id)
+    if channel is None:
+        raise AgentError("运行记录不存在或已过期", 404)
+    if channel.user_id != int(user["id"]):
+        raise AgentError("不能恢复其他用户的运行记录", 403)
+    return StreamingResponse(
+        channel.subscribe(last_event_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/transcribe")
+async def transcribe(
+    body: TranscribeBody,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    config = runtime_config()
+    model_id = config.get("asr_model_id")
+    if not model_id:
+        raise AgentError("管理员还没有配置语音识别模型", 400)
+    model = db.get_model(int(model_id))
+    if not model or not model.get("enabled") or not model.get("provider_id"):
+        raise AgentError("语音识别模型不可用，请联系管理员", 400)
+    provider = db.get_provider(int(model["provider_id"]))
+    if not provider or not provider.get("enabled"):
+        raise AgentError("语音识别模型的供应商不可用", 400)
+    availability = _asr_status(config)
+    if not availability["configured"]:
+        raise AgentError(availability["reason"], 422)
+    data_url = body.audio_data_url
+    if not data_url.startswith("data:audio/") or ";base64," not in data_url:
+        raise AgentError("音频格式不正确", 422)
+    header, payload = data_url.split(",", 1)
+    mime_type = header[5:].split(";")[0]
+    try:
+        audio = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise AgentError("音频不是有效的 Base64 数据", 422) from exc
+    if len(audio) > 12 * 1024 * 1024:
+        raise AgentError("录音不能超过 12 MB", 413)
+    try:
+        result = await transcribe_audio(
+            audio=audio,
+            mime_type=mime_type,
+            filename="voice.webm",
+            model=model,
+            provider=provider,
+            language=body.language or "zh",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise AgentError(f"语音识别失败：{str(exc)[:400]}", 502) from exc
+    db.log_audit(
+        username=user["username"],
+        action="agent.transcribe",
+        resource=f"model:{model['id']}",
+        detail={"bytes": len(audio), "mime_type": mime_type},
+    )
+    return result
 
 
 @app.post("/api/approvals/{approval_id}/approve")
@@ -454,6 +1026,7 @@ async def models(
                 "id": item["id"],
                 "name": item["name"],
                 "model_id": item["model_id"],
+                "model_kind": item.get("model_kind", "chat"),
                 "is_default": item["is_default"],
                 "provider_id": item.get("provider_id"),
                 "provider_name": item.get("provider_name"),
@@ -461,6 +1034,18 @@ async def models(
                 "supports_tools": item.get("supports_tools", True),
                 "context_window": item.get("context_window", 0),
                 "max_output_tokens": item.get("max_output_tokens", 0),
+                "supports_reasoning": item.get("supports_reasoning", False),
+                "reasoning_efforts": reasoning_config(item)["efforts"],
+                "reasoning_can_disable": reasoning_config(item)["can_disable"],
+                "default_reasoning_effort": item.get(
+                    "default_reasoning_effort", ""
+                ),
+                "supports_reasoning_summary": item.get(
+                    "supports_reasoning_summary", True
+                ),
+                "supports_transcription": item.get(
+                    "supports_transcription", False
+                ),
             }
             for item in items
         ]
@@ -489,7 +1074,9 @@ async def skills(
         {
             "id": item["id"],
             "name": item["name"],
+            "slug": item.get("slug", ""),
             "description": item["description"],
+            "kind": item.get("kind", "prompt"),
         }
         for item in db.get_skills(include_disabled=False)
     ]
@@ -526,10 +1113,15 @@ async def create_session(
 ) -> dict[str, Any]:
     _verify_internal(x_internal_token)
     user = await runtime.identity_from_token(_bearer(request))
+    assistant_id = body.assistant_id
+    if assistant_id is None:
+        available = db.assistants_for_user(user)
+        if available:
+            assistant_id = int(available[0]["id"])
     if body.assistant_id:
         _assistant_for_user(user, body.assistant_id)
     session = sessions.create_session(
-        user, title=body.title, assistant_id=body.assistant_id
+        user, title=body.title, assistant_id=assistant_id
     )
     return {"session": session}
 
@@ -564,6 +1156,7 @@ async def remove_session(
 ) -> dict[str, Any]:
     _verify_internal(x_internal_token)
     user = await runtime.identity_from_token(_bearer(request))
+    runtime.ensure_session_idle(session_id)
     if not sessions.delete_session(session_id, user["id"]):
         raise AgentError("会话不存在或不属于当前账号", 404)
     return {"ok": True}
@@ -594,9 +1187,102 @@ async def clear_session_messages(
 ) -> dict[str, Any]:
     _verify_internal(x_internal_token)
     user = await runtime.identity_from_token(_bearer(request))
+    runtime.ensure_session_idle(session_id)
     if not sessions.clear_messages(session_id, user["id"]):
         raise AgentError("会话不存在或不属于当前账号", 404)
     return {"ok": True}
+
+
+@app.post("/api/sessions/{session_id}/fork", status_code=201)
+async def fork_session(
+    session_id: str,
+    request: Request,
+    body: ForkBody | None = None,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    session = sessions.fork_session(
+        session_id,
+        user["id"],
+        until_message_id=(body.until_message_id if body else None),
+        title=(body.title if body else None),
+    )
+    if session is None:
+        raise AgentError("会话不存在或不属于当前账号", 404)
+    return {"session": session}
+
+
+@app.patch("/api/sessions/{session_id}/messages/{message_id}")
+async def edit_session_message(
+    session_id: str,
+    message_id: int,
+    body: MessageEditBody,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    runtime.ensure_session_idle(session_id)
+    message = sessions.update_message_owned(
+        session_id,
+        message_id,
+        user["id"],
+        content=body.content,
+    )
+    if message is None:
+        raise AgentError("消息不存在、不属于当前账号或不是用户消息", 404)
+    return {"message": message}
+
+
+@app.delete("/api/sessions/{session_id}/messages/{message_id}")
+async def delete_session_message(
+    session_id: str,
+    message_id: int,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    runtime.ensure_session_idle(session_id)
+    if not sessions.delete_message(session_id, message_id, user["id"]):
+        raise AgentError("消息不存在或不属于当前账号", 404)
+    return {"ok": True}
+
+
+@app.post("/api/sessions/{session_id}/compact")
+async def compact_session(
+    session_id: str,
+    request: Request,
+    body: CompactBody | None = None,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    token = _bearer(request)
+    result = await runtime.compact_session_now(
+        token,
+        session_id,
+        model_row_id=(body.model_row_id if body else None),
+    )
+    if result.get("session") is None:
+        raise AgentError("会话不存在或不属于当前账号", 404)
+    return result
+
+
+@app.get("/api/usage/me")
+async def my_usage(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=90),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    config = runtime_config()
+    return {
+        "usage": db.user_usage(user["username"], days=days),
+        "daily_limit": config["user_daily_token_limit"],
+        "used_today": db.user_daily_usage(user["username"]),
+    }
 
 
 @app.get("/api/memories")
@@ -707,6 +1393,11 @@ async def admin_update_assistant(
     values = body.model_dump(exclude_unset=True)
     if not values:
         raise AgentError("没有需要更新的字段", 422)
+    kind = values.get("model_kind")
+    if kind in {"asr", "asr_realtime"}:
+        values["supports_transcription"] = True
+    if kind and kind not in {"chat", "vision"}:
+        values["supports_tools"] = False
     if values.get("model_row_id") and not db.get_model(values["model_row_id"]):
         raise AgentError("绑定的模型不存在", 404)
     assistant = db.update_assistant(assistant_id, values)
@@ -771,12 +1462,70 @@ async def update_config(
         values["context_max_tokens"] = str(body.context_max_tokens)
     if body.context_compression is not None:
         values["context_compression"] = "1" if body.context_compression else "0"
+    if body.bm25_enabled is not None:
+        values["bm25_enabled"] = "1" if body.bm25_enabled else "0"
+    if body.context_reserve_tokens is not None:
+        values["context_reserve_tokens"] = str(body.context_reserve_tokens)
+    if body.compaction_model_id is not None:
+        values["compaction_model_id"] = (
+            str(body.compaction_model_id) if body.compaction_model_id else ""
+        )
+    if body.compaction_keep_ratio is not None:
+        values["compaction_keep_ratio"] = str(body.compaction_keep_ratio)
+    if body.session_retention_days is not None:
+        values["session_retention_days"] = str(body.session_retention_days)
+    if body.admin_session_content is not None:
+        values["admin_session_content"] = "1" if body.admin_session_content else "0"
+    if body.store_reasoning is not None:
+        values["store_reasoning"] = "1" if body.store_reasoning else "0"
+    if body.user_daily_token_limit is not None:
+        values["user_daily_token_limit"] = str(body.user_daily_token_limit)
     if body.memory_enabled is not None:
         values["memory_enabled"] = "1" if body.memory_enabled else "0"
     if body.system_prompt_extra is not None:
         values["system_prompt_extra"] = body.system_prompt_extra.strip()
     if body.demo_mode is not None:
         values["demo_mode"] = "1" if body.demo_mode else "0"
+    if body.default_reasoning_effort is not None:
+        values["default_reasoning_effort"] = body.default_reasoning_effort
+    if body.default_approval_mode is not None:
+        values["default_approval_mode"] = body.default_approval_mode
+    if body.allow_full_access is not None:
+        values["allow_full_access"] = "1" if body.allow_full_access else "0"
+    if body.welcome_title is not None:
+        values["welcome_title"] = body.welcome_title.strip()
+    if body.welcome_subtitle is not None:
+        values["welcome_subtitle"] = body.welcome_subtitle.strip()
+    if body.welcome_prompts is not None:
+        values["welcome_prompts"] = body.welcome_prompts.strip()
+    if body.asr_model_id is not None:
+        values["asr_model_id"] = str(body.asr_model_id) if body.asr_model_id else ""
+    if body.title_model_id is not None:
+        values["title_model_id"] = (
+            str(body.title_model_id) if body.title_model_id else ""
+        )
+    if body.fallback_model_id is not None:
+        values["fallback_model_id"] = (
+            str(body.fallback_model_id) if body.fallback_model_id else ""
+        )
+    if body.retry_enabled is not None:
+        values["retry_enabled"] = "1" if body.retry_enabled else "0"
+    if body.retry_max_attempts is not None:
+        values["retry_max_attempts"] = str(body.retry_max_attempts)
+    if body.retry_initial_backoff_ms is not None:
+        values["retry_initial_backoff_ms"] = str(body.retry_initial_backoff_ms)
+    if body.retry_max_backoff_ms is not None:
+        values["retry_max_backoff_ms"] = str(body.retry_max_backoff_ms)
+    if body.retry_multiplier is not None:
+        values["retry_multiplier"] = str(body.retry_multiplier)
+    if body.retry_jitter is not None:
+        values["retry_jitter"] = str(body.retry_jitter)
+    if body.retry_honor_retry_after is not None:
+        values["retry_honor_retry_after"] = (
+            "1" if body.retry_honor_retry_after else "0"
+        )
+    if body.retry_max_elapsed_seconds is not None:
+        values["retry_max_elapsed_seconds"] = str(body.retry_max_elapsed_seconds)
     db.set_settings(values)
     db.log_audit(
         username=user["username"],
@@ -998,16 +1747,74 @@ async def admin_discover_provider_models(
     items = []
     for item in models:
         existing = db.find_model_by_external_id(provider_id, item["model_id"])
-        defaults = suggest_model_defaults(item["model_id"])
         items.append(
             {
                 **item,
                 "already_imported": bool(existing),
                 "existing_model_row_id": existing["id"] if existing else None,
-                "suggested": defaults,
+                # Keep discovery fast: full models.dev enrichment happens on
+                # import or when the administrator edits a single model.
+                "suggested": suggest_model_defaults(item["model_id"]),
             }
         )
     return {"provider": _provider_public(provider), "items": items}
+
+
+@app.get("/api/admin/model-suggest")
+async def admin_model_suggest(
+    request: Request,
+    model_id: str = Query(min_length=1, max_length=160),
+    provider_id: int | None = Query(default=None),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    await _admin(_bearer(request))
+    provider_name = ""
+    if provider_id:
+        provider = db.get_provider(provider_id)
+        provider_name = str(provider.get("name") or "") if provider else ""
+    defaults = await enrich_model_defaults(model_id, provider_name)
+    return {"model_id": model_id, "suggested": defaults}
+
+
+@app.post("/api/admin/models/{model_row_id}/sync")
+async def admin_sync_model(
+    model_row_id: int,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await _admin(_bearer(request))
+    model = db.get_model(model_row_id)
+    if not model:
+        raise AgentError("模型不存在", 404)
+    provider = db.get_provider(int(model.get("provider_id") or 0))
+    if not provider:
+        raise AgentError("模型所属供应商不存在", 404)
+    remote_name = ""
+    try:
+        remote_models = await list_remote_models(provider)
+        for item in remote_models:
+            if item.get("model_id") == model.get("model_id"):
+                remote_name = str(item.get("name") or "")
+                break
+    except ProviderError:
+        remote_models = []
+    defaults = await enrich_model_defaults(
+        str(model.get("model_id") or ""),
+        str(provider.get("name") or ""),
+    )
+    defaults["metadata_source"] = "models.dev" if defaults.get("context_window") else model.get("metadata_source")
+    if remote_name and not str(model.get("name") or "").strip():
+        defaults["name"] = remote_name
+    updated = db.update_model(model_row_id, defaults)
+    db.log_audit(
+        username=user["username"],
+        action="model.sync",
+        resource=f"model:{model_row_id}",
+        detail={"model_id": model.get("model_id"), "remote_listed": bool(remote_models)},
+    )
+    return {"model": updated}
 
 
 @app.post("/api/admin/providers/{provider_id}/import-models")
@@ -1038,7 +1845,9 @@ async def admin_import_provider_models(
             skipped.append(model_id)
             continue
         remote = remote_map[model_id]
-        defaults = suggest_model_defaults(model_id)
+        defaults = await enrich_model_defaults(
+            model_id, str(provider.get("name") or "")
+        )
         model = db.create_model(
             provider_id=provider_id,
             name=remote.get("name") or model_id,
@@ -1078,19 +1887,35 @@ async def admin_create_model(
     provider = db.get_provider(body.provider_id)
     if not provider:
         raise AgentError("供应商不存在", 404)
+    _validate_model_protocols(body.model_dump(), provider)
     is_default = body.is_default or not db.get_models(include_disabled=True)
+    supports_tools = body.supports_tools and body.model_kind in {"chat", "vision"}
+    supports_transcription = body.supports_transcription or body.model_kind in {
+        "asr",
+        "asr_realtime",
+    }
     model = db.create_model(
         provider_id=body.provider_id,
         name=body.name,
         model_id=body.model_id,
+        model_kind=body.model_kind,
         enabled=body.enabled,
         is_default=is_default,
         capabilities=body.capabilities,
-        supports_tools=body.supports_tools,
+        supports_tools=supports_tools,
         context_window=body.context_window,
         max_output_tokens=body.max_output_tokens,
         temperature=body.temperature,
         top_p=body.top_p,
+        input_price_per_1m=body.input_price_per_1m,
+        output_price_per_1m=body.output_price_per_1m,
+        supports_reasoning=body.supports_reasoning,
+        reasoning_style=body.reasoning_style,
+        reasoning_efforts=body.reasoning_efforts,
+        default_reasoning_effort=body.default_reasoning_effort,
+        supports_reasoning_summary=body.supports_reasoning_summary,
+        supports_transcription=supports_transcription,
+        metadata_source=body.metadata_source,
         extra_params=_validate_extra_params(body.extra_params),
     )
     db.log_audit(
@@ -1100,6 +1925,7 @@ async def admin_create_model(
         detail={
             "name": model["name"],
             "model_id": model["model_id"],
+            "model_kind": model["model_kind"],
             "provider": provider["name"],
             "capabilities": model["capabilities"],
         },
@@ -1119,10 +1945,22 @@ async def admin_update_model(
     values = body.model_dump(exclude_unset=True)
     if not values:
         raise AgentError("没有需要更新的字段", 422)
+    current = db.get_model(model_row_id)
+    if current is None:
+        raise AgentError("模型不存在", 404)
     if "provider_id" in values and not db.get_provider(values["provider_id"]):
         raise AgentError("供应商不存在", 404)
     if "extra_params" in values:
         values["extra_params"] = _validate_extra_params(values["extra_params"])
+    merged = {**current, **values}
+    provider = db.get_provider(int(merged["provider_id"]))
+    if not provider:
+        raise AgentError("供应商不存在", 404)
+    _validate_model_protocols(merged, provider)
+    if values.get("model_kind") in {"asr", "asr_realtime"}:
+        values["supports_transcription"] = True
+    if values.get("model_kind") and values["model_kind"] not in {"chat", "vision"}:
+        values["supports_tools"] = False
     model = db.update_model(model_row_id, values)
     if model is None:
         raise AgentError("模型不存在", 404)
@@ -1194,28 +2032,332 @@ async def admin_tools(
 @app.put("/api/admin/tools/{name}")
 async def admin_toggle_tool(
     name: str,
-    body: ToolToggle,
+    body: ToolConfigUpdate,
     request: Request,
     x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ) -> dict[str, Any]:
     _verify_internal(x_internal_token)
     token = _bearer(request)
     user = await _admin(token)
-    try:
-        specs = await list_tools(token)
-    except Exception as exc:  # noqa: BLE001
-        raise AgentError(f"MCP 工具服务不可用：{exc}", 503) from exc
-    spec = next((item for item in specs if item.name == name), None)
-    if spec is None:
+    items = await runtime.admin_all_tools(token)
+    current = next((item for item in items if item["name"] == name), None)
+    if current is None:
         raise AgentError("工具不存在", 404)
-    db.set_tool_setting(name, body.enabled)
+    values = body.model_dump(exclude_unset=True)
+    merged = {
+        "enabled": values.get("enabled", current.get("enabled", True)),
+        "visible": values.get("visible", current.get("visible", True)),
+        "selectable": values.get("selectable", current.get("selectable", True)),
+        "default_selected": values.get(
+            "default_selected", current.get("default_selected", True)
+        ),
+    }
+    if not merged["visible"]:
+        merged["selectable"] = False
+    if merged["enabled"] and merged["visible"] and not merged["selectable"]:
+        merged["default_selected"] = True
+    setting = db.set_tool_setting(
+        name,
+        **merged,
+        source=str(current.get("source") or "mcp"),
+        definition=current.get("definition") or {},
+    )
     db.log_audit(
         username=user["username"],
         action="tool.toggle",
         resource=f"tool:{name}",
-        detail={"enabled": body.enabled},
+        detail=merged,
     )
-    return {"tool": spec.public(enabled=body.enabled)}
+    return {"tool": {**current, **setting}}
+
+
+async def _check_dynamic_tool_name(token: str, name: str) -> None:
+    reserved = {"load_skill", "read_skill_file", pagepilot.TOOL_NAME, pagepilot.LIST_TOOL_NAME, pagepilot.GET_TOOL_NAME}
+    tools = await runtime.admin_all_tools(token)
+    if name in reserved or any(item["name"] == name and item.get("source") != "dynamic" for item in tools):
+        raise AgentError("工具名与已有 MCP 或内置工具冲突，请使用独立的业务工具名", 409)
+
+
+@app.get("/api/admin/dynamic-tools")
+async def admin_dynamic_tools(
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    await _admin(_bearer(request))
+    items = db.get_dynamic_tools(include_disabled=True)
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/api/admin/dynamic-tools", status_code=201)
+async def admin_create_dynamic_tool(
+    body: DynamicToolCreate,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    token = _bearer(request)
+    user = await _admin(token)
+    if db.get_dynamic_tool_by_name(body.name):
+        raise AgentError("工具名已存在", 409)
+    await _check_dynamic_tool_name(token, body.name)
+    try:
+        values = dynamic_tools.validate_dynamic_tool(body.model_dump())
+    except dynamic_tools.DynamicToolError as exc:
+        raise AgentError(str(exc), 422) from exc
+    tool = db.create_dynamic_tool(**values)
+    db.log_audit(
+        username=user["username"],
+        action="dynamic_tool.create",
+        resource=f"dynamic_tool:{tool['id']}",
+        detail={"name": tool["name"], "method": tool["method"], "url": tool["url_template"]},
+    )
+    return {"tool": tool}
+
+
+@app.put("/api/admin/dynamic-tools/{tool_id}")
+async def admin_update_dynamic_tool(
+    tool_id: int,
+    body: DynamicToolUpdate,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    token = _bearer(request)
+    user = await _admin(token)
+    current = db.get_dynamic_tool(tool_id)
+    if not current:
+        raise AgentError("动态工具不存在", 404)
+    updates = body.model_dump(exclude_unset=True)
+    merged = {**current, **updates}
+    try:
+        validated = dynamic_tools.validate_dynamic_tool(merged)
+    except dynamic_tools.DynamicToolError as exc:
+        raise AgentError(str(exc), 422) from exc
+    if validated["name"] != current["name"] and db.get_dynamic_tool_by_name(
+        validated["name"]
+    ):
+        raise AgentError("工具名已存在", 409)
+    await _check_dynamic_tool_name(token, validated["name"])
+    tool = db.update_dynamic_tool(
+        tool_id,
+        {
+            key: validated[key]
+            for key in (
+                "name",
+                "display_name",
+                "description",
+                "category",
+                "permission",
+                "risk",
+                "method",
+                "url_template",
+                "headers",
+                "input_schema",
+                "enabled",
+            )
+        },
+    )
+    db.log_audit(
+        username=user["username"],
+        action="dynamic_tool.update",
+        resource=f"dynamic_tool:{tool_id}",
+        detail={"keys": sorted(updates)},
+    )
+    return {"tool": tool}
+
+
+@app.delete("/api/admin/dynamic-tools/{tool_id}")
+async def admin_delete_dynamic_tool(
+    tool_id: int,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await _admin(_bearer(request))
+    if not db.delete_dynamic_tool(tool_id):
+        raise AgentError("动态工具不存在", 404)
+    db.log_audit(
+        username=user["username"],
+        action="dynamic_tool.delete",
+        resource=f"dynamic_tool:{tool_id}",
+    )
+    return {"ok": True}
+
+
+@app.post("/api/admin/dynamic-tools/{tool_id}/test")
+async def admin_test_dynamic_tool(
+    tool_id: int,
+    request: Request,
+    body: DynamicToolTestBody | None = None,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    token = _bearer(request)
+    await _admin(token)
+    tool = db.get_dynamic_tool(tool_id)
+    if not tool:
+        raise AgentError("动态工具不存在", 404)
+    spec = dynamic_tools.spec_from_row(tool)
+    result = await dynamic_tools.test_dynamic_tool(
+        token, spec, (body.arguments if body else {})
+    )
+    return {"tool": tool, **result}
+
+
+@app.get("/api/admin/pagepilot")
+async def admin_pagepilot(
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    await _admin(_bearer(request))
+    return {"config": pagepilot.public_config()}
+
+
+@app.put("/api/admin/pagepilot")
+async def admin_update_pagepilot(
+    body: PagePilotConfigUpdate,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await _admin(_bearer(request))
+    try:
+        config = pagepilot.save_config(
+            base_url=body.base_url,
+            token=body.token,
+            clear_token=body.clear_token,
+            enabled=body.enabled,
+            default_title=body.default_title,
+            default_description=body.default_description,
+            default_visibility=body.default_visibility,
+        )
+    except pagepilot.PagePilotError as exc:
+        raise AgentError(str(exc), 422) from exc
+    db.log_audit(
+        username=user["username"],
+        action="pagepilot.config",
+        resource="pagepilot:connector",
+        detail={"base_url": config["base_url"], "enabled": config["enabled"]},
+    )
+    return {"config": config}
+
+
+@app.post("/api/admin/pagepilot/test")
+async def admin_test_pagepilot(
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    await _admin(_bearer(request))
+    return await pagepilot.test_connection()
+
+
+@app.get("/api/pagepilot/status")
+async def pagepilot_status(
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    await runtime.identity_from_token(_bearer(request))
+    return pagepilot.status_for_user()
+
+
+@app.post("/api/pagepilot/publish")
+async def pagepilot_publish(
+    body: PagePilotPublishBody,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    setting = db.get_tool_setting(pagepilot.TOOL_NAME, source="pagepilot")
+    if not setting.get("enabled", True):
+        raise AgentError("PagePilot 发布工具已被管理员停用", 403)
+    try:
+        return await pagepilot.publish_html(
+            html=body.html,
+            title=body.title,
+            description=body.description,
+            filename=body.filename,
+            code=body.code,
+            access_password=body.access_password,
+            visibility=body.visibility,
+            user=user,
+            session_id=body.session_id,
+            publication_id=body.publication_id,
+            source="preview",
+        )
+    except pagepilot.PagePilotError as exc:
+        raise AgentError(str(exc), exc.status_code) from exc
+
+
+@app.get("/api/pagepilot/publications")
+async def pagepilot_publications(
+    request: Request,
+    q: str = Query(default="", max_length=200),
+    session_id: str | None = Query(default=None, max_length=80),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    return publications.list_publications(
+        int(user["id"]), q=q, session_id=session_id, limit=limit, offset=offset
+    )
+
+
+@app.get("/api/pagepilot/publications/{publication_id}")
+async def pagepilot_publication_detail(
+    publication_id: int,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    try:
+        return {"publication": publications.detail(publication_id, int(user["id"]))}
+    except publications.PublicationError as exc:
+        raise AgentError(str(exc), exc.status_code) from exc
+
+
+@app.get("/api/pagepilot/publications/{publication_id}/versions/{version_id}")
+async def pagepilot_publication_version(
+    publication_id: int,
+    version_id: int,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    try:
+        return {"version": publications.version_detail(publication_id, version_id, int(user["id"]))}
+    except publications.PublicationError as exc:
+        raise AgentError(str(exc), exc.status_code) from exc
+
+
+@app.post("/api/artifacts/screenshot")
+async def artifact_screenshot(
+    body: ArtifactScreenshotBody,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> Response:
+    _verify_internal(x_internal_token)
+    await runtime.identity_from_token(_bearer(request))
+    try:
+        png = await artifacts.render_html_png(body.html)
+    except artifacts.ArtifactRenderError as exc:
+        raise AgentError(str(exc), 503) from exc
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Content-Disposition": 'attachment; filename="webagent-report.png"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/api/admin/skills")
@@ -1236,8 +2378,18 @@ async def admin_create_skill(
 ) -> dict[str, Any]:
     _verify_internal(x_internal_token)
     user = await _admin(_bearer(request))
+    if body.slug.strip() and db.skill_slug_exists(body.slug):
+        raise AgentError(f"技能标识已被占用：{body.slug.strip()}", 409)
     skill = db.create_skill(
-        body.name, body.description, body.content, enabled=body.enabled
+        body.name,
+        body.description,
+        body.content,
+        enabled=body.enabled,
+        slug=body.slug,
+        kind=body.kind,
+        license=body.license,
+        metadata=body.metadata,
+        files=body.files,
     )
     db.log_audit(
         username=user["username"],
@@ -1260,6 +2412,9 @@ async def admin_update_skill(
     values = body.model_dump(exclude_unset=True)
     if not values:
         raise AgentError("没有需要更新的字段", 422)
+    slug = str(values.get("slug") or "").strip()
+    if slug and db.skill_slug_exists(slug, exclude_id=skill_id):
+        raise AgentError(f"技能标识已被占用：{slug}", 409)
     skill = db.update_skill(skill_id, values)
     if skill is None:
         raise AgentError("技能不存在", 404)
@@ -1288,6 +2443,181 @@ async def admin_delete_skill(
         resource=f"skill:{skill_id}",
     )
     return {"ok": True}
+
+
+@app.get("/api/admin/sessions")
+async def admin_sessions(
+    request: Request,
+    username: str = Query(default="", max_length=100),
+    assistant_id: int | None = Query(default=None),
+    model: str = Query(default="", max_length=100),
+    status: str = Query(default="", max_length=30),
+    q: str = Query(default="", max_length=120),
+    date_from: str = Query(default="", max_length=30),
+    date_to: str = Query(default="", max_length=30),
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    await _session_admin(_bearer(request))
+    if date_to and len(date_to) == 10:
+        date_to = f"{date_to}T23:59:59"
+    result = sessions.list_all_sessions(
+        username=username.strip(),
+        assistant_id=assistant_id,
+        model=model.strip(),
+        status=status.strip(),
+        q=q.strip(),
+        date_from=date_from.strip(),
+        date_to=date_to.strip(),
+        limit=limit,
+        offset=offset,
+    )
+    if not runtime_config()["admin_session_content"]:
+        for item in result["items"]:
+            item.update(title="[内容已隐藏]", summary="[内容已隐藏]", last_error="")
+    return result
+
+
+@app.get("/api/admin/usage/summary")
+async def admin_usage_summary(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=90),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    await _session_admin(_bearer(request))
+    return db.usage_summary(days=days)
+
+
+@app.get("/api/admin/sessions/{session_id}")
+async def admin_session_detail(
+    session_id: str,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await _session_admin(_bearer(request))
+    config = runtime_config()
+    detail = _session_detail(
+        session_id, include_content=config["admin_session_content"]
+    )
+    if detail is None:
+        raise AgentError("会话不存在", 404)
+    db.log_audit(
+        username=user["username"],
+        action="admin.session.view",
+        resource=f"session:{session_id}",
+        detail={"include_content": config["admin_session_content"]},
+    )
+    return detail
+
+
+@app.get("/api/admin/sessions/{session_id}/export")
+async def admin_session_export(
+    session_id: str,
+    request: Request,
+    format: Literal["json", "markdown", "csv"] = Query(default="json"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> Response:
+    _verify_internal(x_internal_token)
+    user = await _session_admin(_bearer(request))
+    config = runtime_config()
+    detail = _session_detail(
+        session_id, include_content=config["admin_session_content"]
+    )
+    if detail is None:
+        raise AgentError("会话不存在", 404)
+    db.log_audit(
+        username=user["username"],
+        action="admin.session.export",
+        resource=f"session:{session_id}",
+        detail={
+            "format": format,
+            "include_content": config["admin_session_content"],
+        },
+    )
+    session = detail["session"]
+    messages = detail["messages"]
+    if format == "json":
+        content = json.dumps(detail, ensure_ascii=False, indent=2)
+        media_type = "application/json; charset=utf-8"
+        extension = "json"
+    elif format == "csv":
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(
+            [
+                "message_id",
+                "role",
+                "created_at",
+                "content",
+                "token_estimate",
+                "tool_count",
+                "tool_statuses",
+            ]
+        )
+        for message in messages:
+            runs = message.get("tool_runs") or []
+            writer.writerow(
+                [
+                    message["id"],
+                    message["role"],
+                    message["created_at"],
+                    message["content"],
+                    message["token_estimate"],
+                    len(runs),
+                    ",".join(str(run.get("status", "")) for run in runs),
+                ]
+            )
+        content = buffer.getvalue()
+        media_type = "text/csv; charset=utf-8"
+        extension = "csv"
+    else:
+        lines = [
+            f"# 会话 {session['id']}",
+            "",
+            f"- 用户：{session['username']}（ID {session['user_id']}）",
+            f"- 助手：{session.get('assistant_name') or '—'}",
+            f"- 模型：{session.get('last_model_name') or '—'}",
+            f"- 状态：{session.get('last_status') or '—'}",
+            f"- 消息数：{session.get('message_count', 0)}",
+            f"- 累计 tokens：{session.get('total_tokens', 0)}",
+            f"- 估算费用：${session.get('total_cost_usd', 0):.6f}",
+            f"- 压缩次数：{session.get('compaction_count', 0)}",
+            f"- 重试次数：{session.get('retry_count', 0)}",
+            "",
+            "## 消息",
+            "",
+        ]
+        for message in messages:
+            lines.append(
+                f"### {message['role']} · {message['created_at']} · "
+                f"{message.get('token_estimate', 0)} tokens"
+            )
+            lines.append("")
+            lines.append(message.get("content") or "（无正文）")
+            lines.append("")
+            for run in message.get("tool_runs") or []:
+                lines.append(
+                    f"- 工具 `{run.get('tool')}`：{run.get('status')} "
+                    f"{run.get('summary') or ''}"
+                )
+            if message.get("tool_runs"):
+                lines.append("")
+        content = "\n".join(lines)
+        media_type = "text/markdown; charset=utf-8"
+        extension = "md"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="session-{session_id}.{extension}"'
+            )
+        },
+    )
 
 
 @app.get("/api/admin/audit")
@@ -1319,4 +2649,19 @@ async def status(
         "max_tool_calls": config["max_tool_calls"],
         "max_run_seconds": config["max_run_seconds"],
         "context_max_tokens": config["context_max_tokens"],
+        "bm25_enabled": config["bm25_enabled"],
+        "context_reserve_tokens": config["context_reserve_tokens"],
+        "user_daily_token_limit": config["user_daily_token_limit"],
+        "compaction_model_id": config["compaction_model_id"],
+        "store_reasoning": config["store_reasoning"],
+        "default_reasoning_effort": config["default_reasoning_effort"],
+        "default_approval_mode": config["default_approval_mode"],
+        "allow_full_access": config["allow_full_access"],
+        "welcome_title": config["welcome_title"],
+        "welcome_subtitle": config["welcome_subtitle"],
+        "welcome_prompts": config["welcome_prompts"],
+        "fallback_model_id": config["fallback_model_id"],
+        "title_model_id": config["title_model_id"],
+        "asr": _asr_status(config),
+        "tool_retrieval_limit": 16,
     }

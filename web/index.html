@@ -6,6 +6,10 @@
   <meta name="color-scheme" content="dark">
   <title>WebAgent · 业务系统 Agent 集成 Demo</title>
   <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+  <script defer src="/static/vendor/markdown-it.min.js"></script>
+  <script defer src="/static/vendor/katex/katex.min.js"></script>
+  <script defer src="/static/vendor/mermaid/mermaid.min.js"></script>
 </head>
 <body>
   <div id="login-view" class="login-view">
@@ -57,7 +61,7 @@
           <span>同源会话 · HttpOnly Cookie</span>
         </div>
         <h2>登录业务后台</h2>
-        <p class="login-sub">使用演示账号体验不同权限下 Agent 的能力边界。</p>
+        <p class="login-sub">使用业务系统账号登录；管理员密码以部署配置为准，普通演示账号仅在启用时可用。</p>
         <form id="login-form" autocomplete="on">
           <label class="field">
             <span>用户名</span>
@@ -65,7 +69,7 @@
           </label>
           <label class="field">
             <span>密码</span>
-            <input id="login-password" name="password" type="password" value="admin123" autocomplete="current-password" required>
+            <input id="login-password" name="password" type="password" autocomplete="current-password" required>
           </label>
           <div id="login-error" class="form-error hidden"></div>
           <button id="login-btn" class="primary-btn login-submit" type="submit">
@@ -76,7 +80,7 @@
         <div class="demo-accounts">
           <div class="demo-accounts-head"><span>快速填充演示账号</span><span>权限逐级递增</span></div>
           <div class="account-grid">
-            <button type="button" class="account-chip" data-user="admin" data-pass="admin123">
+            <button type="button" class="account-chip" data-user="admin" data-pass="">
               <span class="account-avatar admin">A</span>
               <span><strong>admin</strong><small>全部权限 + 用户管理</small></span>
             </button>
@@ -176,6 +180,8 @@
                 </button>
                 <span id="mode-badge" class="badge badge-blue">多步</span>
                 <span id="demo-badge" class="badge badge-warn hidden">演示模式</span>
+                <button class="ghost-btn published-entry" type="button" data-action="publications-open" title="查看当前账号已发布的页面">已发布</button>
+                <button id="compact-chat-btn" class="ghost-btn" type="button" title="把较早对话压缩成摘要">压缩上下文</button>
                 <button id="clear-chat-btn" class="ghost-btn">清空</button>
               </div>
             </header>
@@ -188,7 +194,6 @@
                 </div>
                 <h1 id="welcome-title">有什么我能帮你的吗？</h1>
                 <p id="welcome-subtitle">我可以查询设备、统计状态，并在你审批后执行修改或删除。</p>
-                <div id="assistant-cards" class="assistant-cards"></div>
                 <div id="quick-chips" class="quick-chips"></div>
                 <div class="welcome-note">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 12l1.8 1.8 3.5-3.6"/></svg>
@@ -199,6 +204,21 @@
             </div>
 
             <div class="composer-zone">
+              <div id="access-popover" class="access-popover hidden">
+                <button type="button" class="access-option" data-action="set-approval-mode" data-mode="confirm">
+                  <span class="access-option-icon">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 12l1.8 1.8 3.5-3.6"/></svg>
+                  </span>
+                  <span><strong>变更前确认</strong><small>改动类工具先列清单，等你点「执行」</small></span>
+                  <span class="access-check">✓</span>
+                </button>
+                <button type="button" class="access-option" data-action="set-approval-mode" data-mode="full_access">
+                  <span class="access-option-icon warn">!</span>
+                  <span><strong>完全访问</strong><small>改动类工具直接执行，不再询问；不扩大工具权限</small></span>
+                  <span class="access-check">✓</span>
+                </button>
+                <p>只跳过确认，不扩大工具权限；每次执行仍会写入审计和对话记录。</p>
+              </div>
               <div id="tool-popover" class="tool-popover hidden">
                 <div class="popover-head">
                   <div><strong>本轮可用工具</strong><small>只列出你的账号有权限且管理员已启用的工具</small></div>
@@ -211,20 +231,32 @@
               </div>
               <div class="composer">
                 <div id="attach-bar" class="attach-bar hidden"></div>
-                <textarea id="chat-input" rows="1" placeholder="输入消息，Enter 发送，Shift + Enter 换行"></textarea>
+                <textarea id="chat-input" rows="1" placeholder="输入消息，Enter 发送，Shift + Enter 换行，可粘贴图片"></textarea>
                 <div class="composer-bar">
                   <div class="composer-left">
                     <label class="pill-btn attach-btn" title="添加图片">
                       <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12.5l-7.8 7.8a5 5 0 0 1-7.1-7.1l8.5-8.5a3.4 3.4 0 0 1 4.8 4.8l-8.5 8.5a1.8 1.8 0 0 1-2.5-2.5l7.8-7.8"/></svg>
                     </label>
+                    <button id="voice-btn" class="pill-btn" type="button" title="语音输入" aria-label="语音输入">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>
+                      <span id="voice-label">语音</span>
+                    </button>
                     <button id="tool-picker-btn" class="pill-btn" type="button">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2.3-2.3 2.3-2.3z"/></svg>
                       工具 <span id="tool-count" class="pill-count">0/0</span>
                     </button>
+                    <button id="access-mode-btn" class="pill-btn access-mode-btn" type="button" title="本次对话的执行方式">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 12l1.8 1.8 3.5-3.6"/></svg>
+                      <span id="access-mode-label">变更前确认</span>
+                    </button>
                     <label class="model-select">
                       <span>模型</span>
                       <select id="model-select" aria-label="选择模型"></select>
+                    </label>
+                    <label class="model-select reasoning-select hidden" id="reasoning-wrap" title="模型推理等级">
+                      <span>推理</span>
+                      <select id="reasoning-select" aria-label="推理等级"></select>
                     </label>
                   </div>
                   <div class="composer-right">
@@ -234,6 +266,13 @@
                     </button>
                   </div>
                 </div>
+              </div>
+              <div id="composer-context" class="composer-context">
+                <div class="composer-context-line">
+                  <span>上下文</span>
+                  <span id="composer-context-value">尚未开始对话</span>
+                </div>
+                <div class="context-meter compact"><span id="composer-context-fill" style="width:0%"></span></div>
               </div>
               <div class="composer-note">
                 <span><i></i> 工具调用继承当前账号权限</span>
@@ -270,6 +309,11 @@
             <div class="context-block">
               <div class="context-label">运行预算</div>
               <div id="context-budget" class="budget-grid"></div>
+            </div>
+            <div class="context-block">
+              <div class="context-label">会话累计 <span id="context-compaction-count"></span></div>
+              <div id="context-session-usage" class="usage-list"></div>
+              <div id="context-compaction" class="usage-note"></div>
             </div>
             <div class="context-block">
               <div class="context-label">长期记忆 <span id="context-memory-count"></span></div>
@@ -381,18 +425,18 @@
           <aside id="config-nav" class="config-nav">
             <div class="config-nav-group">
               <span class="config-nav-label">模型接入</span>
-              <button class="config-nav-item active" data-tab="providers"><span>供应商</span><small>API Key / Base URL</small></button>
-              <button class="config-nav-item" data-tab="models"><span>模型</span><small>拉取 / 参数 / 能力</small></button>
+              <button class="config-nav-item active" data-tab="models"><span>模型</span><small>供应商 / 参数 / 能力</small></button>
             </div>
             <div class="config-nav-group">
               <span class="config-nav-label">Agent</span>
               <button class="config-nav-item" data-tab="assistants"><span>助手</span><small>提示词 / 工具 / 预算</small></button>
-              <button class="config-nav-item" data-tab="tools"><span>工具</span><small>MCP 全局开关</small></button>
+              <button class="config-nav-item" data-tab="tools"><span>工具</span><small>四态 / 动态接入 / 检索</small></button>
               <button class="config-nav-item" data-tab="skills"><span>技能</span><small>规范与知识注入</small></button>
             </div>
             <div class="config-nav-group">
               <span class="config-nav-label">系统</span>
               <button class="config-nav-item" data-tab="users"><span>用户</span><small>账号与权限</small></button>
+              <button class="config-nav-item" data-tab="sessions"><span>会话管理</span><small>全量对话 / 用量 / 导出</small></button>
               <button class="config-nav-item" data-tab="audit"><span>审计</span><small>双端操作日志</small></button>
               <button class="config-nav-item" data-tab="settings"><span>运行设置</span><small>演示模式 / 预算</small></button>
             </div>
@@ -403,6 +447,56 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <div id="artifact-modal" class="artifact-modal hidden" aria-hidden="true">
+    <button class="artifact-backdrop" type="button" data-action="artifact-close" aria-label="关闭 HTML 预览"></button>
+    <section class="artifact-dialog" role="dialog" aria-modal="true" aria-labelledby="artifact-title">
+      <header class="artifact-head">
+        <span class="artifact-head-icon">HTML</span>
+        <div class="artifact-head-copy">
+          <strong id="artifact-title">HTML 页面预览</strong>
+          <small id="artifact-meta">隔离沙箱 · 不允许访问当前系统登录态</small>
+        </div>
+        <button class="icon-btn" type="button" data-action="artifact-close" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div class="artifact-viewport">
+        <iframe id="artifact-frame" class="artifact-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" title="HTML 页面预览"></iframe>
+      </div>
+      <footer class="artifact-foot">
+        <span id="artifact-hint">模型生成的 HTML 在独立沙箱中运行，无法读取业务系统登录态。</span>
+        <span class="foot-spacer"></span>
+        <button class="artifact-action" type="button" data-action="publications-open">我的已发布</button>
+        <button class="artifact-action" type="button" data-action="artifact-save">保存图片</button>
+        <button class="artifact-action primary" type="button" data-action="artifact-publish-open" id="artifact-publish-btn">发布到 PagePilot</button>
+      </footer>
+      <div id="artifact-publish-panel" class="artifact-publish-panel hidden">
+        <form id="artifact-publish-form" class="publish-card">
+          <div class="publish-card-head">
+            <div><h3>发布到 PagePilot</h3><p>由业务后端代理上传，PagePilot Token 不会下发浏览器。</p></div>
+            <button class="icon-btn" type="button" data-action="artifact-publish-close" aria-label="关闭">×</button>
+          </div>
+          <label class="field"><span>发布目标</span><select name="publication_id"><option value="">新建页面</option></select><small>只可更新当前账号在本系统发布的页面，更新后保留原链接。</small></label>
+          <label class="field"><span>页面标题</span><input name="title" maxlength="120" placeholder="填写本次页面标题"></label>
+          <label class="field"><span>发布说明</span><input name="description" maxlength="240" placeholder="留空则由系统按日期生成"></label>
+          <label class="field"><span>访问密码（可选）</span><input name="access_password" type="password" maxlength="200" autocomplete="new-password" placeholder="留空则公开访问；不会自动生成"></label>
+          <label class="field"><span>可见范围</span>
+            <select name="visibility">
+              <option value="unlisted">不公开（仅链接可见）</option>
+              <option value="public">公开（创作广场可见）</option>
+            </select>
+          </label>
+          <div id="artifact-publish-status" class="publish-status">正在检查 PagePilot 连接器…</div>
+          <div id="artifact-publish-result" class="publish-result hidden"></div>
+          <div class="publish-actions">
+            <button class="ghost-btn" type="button" data-action="artifact-publish-close">取消</button>
+            <button class="primary-btn" type="submit" id="artifact-publish-submit" disabled>发布</button>
+          </div>
+        </form>
+      </div>
+    </section>
   </div>
 
   <div id="modal-root"></div>

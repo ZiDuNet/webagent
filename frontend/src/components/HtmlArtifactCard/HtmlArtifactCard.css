@@ -1,0 +1,330 @@
+.artifact {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(39, 201, 106, 0.05), transparent 34%),
+    #0d1218;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.16);
+}
+
+.artifact-preview-dialog { width: min(1100px, calc(100vw - 32px)); height: min(860px, calc(100dvh - 40px)); }
+.artifact__button:disabled { opacity: .45; cursor: not-allowed; }
+
+.artifact__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.artifact__file-icon {
+  display: grid;
+  flex: none;
+  width: 33px;
+  height: 33px;
+  place-items: center;
+  border: 1px solid rgba(39, 201, 106, 0.16);
+  border-radius: 8px;
+  background: rgba(39, 201, 106, 0.07);
+  color: var(--accent);
+}
+
+.artifact__heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.artifact__title-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.artifact__title-line h3 {
+  overflow: hidden;
+  margin: 0;
+  color: #dce5f0;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact__badge {
+  flex: none;
+  padding: 1.5px 5px;
+  border: 1px solid rgba(101, 169, 255, 0.18);
+  border-radius: 4px;
+  background: rgba(101, 169, 255, 0.06);
+  color: #7daee7;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 650;
+}
+
+.artifact__description {
+  overflow: hidden;
+  margin: 3px 0 0;
+  color: #677589;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact__time {
+  flex: none;
+  color: #536074;
+  font-size: 9.5px;
+}
+
+.artifact__preview {
+  margin: 10px 10px 0;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #080b0f;
+}
+
+.artifact__chrome {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  background: #10151c;
+}
+
+.artifact__chrome > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #2d3745;
+}
+
+.artifact__chrome em {
+  margin-left: 6px;
+  color: #4d5b6e;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.artifact__frame {
+  position: relative;
+  height: 246px;
+  overflow: hidden;
+  background: #0b0f14;
+}
+
+.artifact__frame iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  pointer-events: none;
+}
+
+.artifact__code {
+  padding: 0 10px;
+}
+
+.artifact__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+}
+
+.artifact__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.artifact__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 27px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #748296;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition:
+    color 0.16s ease,
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+
+.artifact__button:hover,
+.artifact__button.is-active {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.035);
+  color: #c1cddd;
+}
+
+.artifact__button--primary {
+  border-color: rgba(39, 201, 106, 0.22);
+  background: rgba(39, 201, 106, 0.1);
+  color: #67dd99;
+  font-weight: 550;
+}
+
+.artifact__button--primary:hover {
+  border-color: rgba(39, 201, 106, 0.4);
+  background: rgba(39, 201, 106, 0.15);
+  color: #8aefb3;
+}
+
+.artifact__note {
+  position: absolute;
+  right: 12px;
+  bottom: 48px;
+  z-index: 2;
+  max-width: 280px;
+  padding: 6px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: #171f29;
+  color: #aab7c8;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.32);
+  font-size: 10px;
+  animation: artifact-note-in 0.18s ease both;
+}
+
+.artifact-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  padding: 24px;
+  place-items: center;
+  background: rgba(3, 5, 8, 0.78);
+  backdrop-filter: blur(10px);
+  animation: artifact-fade 0.18s ease both;
+}
+
+.artifact-modal__panel {
+  display: flex;
+  width: min(1040px, calc(100vw - 48px));
+  height: min(820px, calc(100vh - 48px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #2a3442;
+  border-radius: 15px;
+  background: #0b0f14;
+  box-shadow: 0 32px 100px rgba(0, 0, 0, 0.55);
+  animation: artifact-panel-in 0.2s ease both;
+}
+
+.artifact-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.artifact-modal__eyebrow {
+  display: block;
+  margin-bottom: 3px;
+  color: #5e6d80;
+  font-size: 8.5px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.artifact-modal__header h3 {
+  margin: 0;
+  color: #e2eaf4;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.artifact-modal__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.artifact-modal__header-actions > span {
+  color: #536175;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.artifact-modal__close {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #121821;
+  color: #8795a8;
+  cursor: pointer;
+}
+
+.artifact-modal__close:hover {
+  background: #19212b;
+  color: #d0dae8;
+}
+
+.artifact-modal__body {
+  min-height: 0;
+  flex: 1;
+  margin: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #070a0e;
+}
+
+.artifact-modal__body iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.artifact-modal__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px 12px;
+}
+
+.artifact-modal__footer > span {
+  color: #4d5b6e;
+  font-size: 9.5px;
+}
+
+@keyframes artifact-note-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@keyframes artifact-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes artifact-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+}

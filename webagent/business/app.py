@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sqlite3
 from typing import Any, Literal
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -35,9 +34,11 @@ from webagent.business.db import (
 from webagent.config import (
     AGENT_URL,
     BUSINESS_PORT,
+    FRONTEND_DIST_DIR,
     INTERNAL_SECRET,
-    MCP_PORT,
+    MCP_HEALTH_URL,
     SESSION_COOKIE,
+    SESSION_COOKIE_SECURE,
     SESSION_HOURS,
     WEB_DIR,
 )
@@ -121,11 +122,11 @@ async def health() -> dict[str, Any]:
 
     results = await asyncio.gather(
         probe("agent", f"{AGENT_URL}/health"),
-        probe("mcp", f"http://127.0.0.1:{MCP_PORT}/health"),
+        probe("mcp", MCP_HEALTH_URL),
     )
     services = dict(results)
     return {
-        "ok": True,
+        "ok": all(service["ok"] for service in services.values()),
         "service": "business",
         "port": BUSINESS_PORT,
         "services": services,
@@ -153,7 +154,7 @@ async def login(body: LoginBody, request: Request, response: Response) -> dict[s
         max_age=SESSION_HOURS * 3600,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=SESSION_COOKIE_SECURE,
         path="/",
     )
     log_audit(
@@ -415,8 +416,50 @@ async def proxy_agent(path: str, request: Request) -> Response:
     accept = request.headers.get("accept")
     if accept:
         headers["Accept"] = accept
+    last_event_id = request.headers.get("last-event-id")
+    if last_event_id:
+        headers["Last-Event-ID"] = last_event_id
 
     body = await request.body()
+    upstream_headers = {}
+    accept = request.headers.get("accept", "")
+    if path == "chat/stream" or "text/event-stream" in accept:
+        client = httpx2.AsyncClient(timeout=None)
+        try:
+            upstream_request = client.build_request(
+                request.method,
+                target,
+                headers=headers,
+                content=body if body else None,
+            )
+            upstream = await client.send(upstream_request, stream=True)
+        except httpx2.RequestError as exc:
+            await client.aclose()
+            raise HTTPException(
+                status_code=502,
+                detail=f"Agent 服务不可用，请确认 8010 端口已启动：{exc}",
+            ) from exc
+
+        async def body_iter():
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        upstream_headers["Cache-Control"] = "no-cache"
+        upstream_headers["X-Accel-Buffering"] = "no"
+        if upstream.headers.get("x-run-id"):
+            upstream_headers["X-Run-Id"] = upstream.headers["x-run-id"]
+        return StreamingResponse(
+            body_iter(),
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get(
+                "content-type", "text/event-stream"
+            ).split(";")[0],
+            headers=upstream_headers,
+        )
     try:
         async with httpx2.AsyncClient(timeout=180.0) as client:
             upstream = await client.request(
@@ -440,6 +483,8 @@ async def proxy_agent(path: str, request: Request) -> Response:
 
 
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+if FRONTEND_DIST_DIR.is_dir():
+    app.mount("/react", StaticFiles(directory=FRONTEND_DIST_DIR, html=True), name="react")
 
 
 @app.get("/")

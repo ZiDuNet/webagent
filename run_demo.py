@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -14,27 +15,30 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+from webagent.config import (
+    AGENT_HOST, AGENT_PORT, BUSINESS_HOST, BUSINESS_PORT, DATA_DIR,
+    MCP_HOST, MCP_PORT,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
-DATA_DIR = BASE_DIR / "data"
-
 SERVICES = [
-    ("mcp", "webagent.mcp_server.server:app", 8020, "/health"),
-    ("agent", "webagent.agent.app:app", 8010, "/health"),
-    ("business", "webagent.business.app:app", 8000, "/api/health"),
+    ("mcp", "webagent.mcp_server.server:app", MCP_HOST, MCP_PORT, "/health"),
+    ("agent", "webagent.agent.app:app", AGENT_HOST, AGENT_PORT, "/health"),
+    ("business", "webagent.business.app:app", BUSINESS_HOST, BUSINESS_PORT, "/api/health"),
 ]
 
 
-def health_url(port: int, path: str) -> str:
-    return f"http://127.0.0.1:{port}{path}"
+def health_url(host: str, port: int, path: str) -> str:
+    host = "127.0.0.1" if host == "0.0.0.0" else host
+    return f"http://{host}:{port}{path}"
 
 
-def wait_for(name: str, port: int, path: str, timeout: float = 20.0) -> None:
+def wait_for(name: str, host: str, port: int, path: str, timeout: float = 20.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(health_url(port, path), timeout=1.5) as response:
+            with urllib.request.urlopen(health_url(host, port, path), timeout=1.5) as response:
                 if response.status < 500:
                     return
         except (urllib.error.URLError, TimeoutError, ConnectionError):
@@ -67,7 +71,13 @@ def main() -> int:
     processes: list[tuple[str, subprocess.Popen[bytes]]] = []
     log_files = []
     try:
-        for name, target, port, _path in SERVICES:
+        for name, _target, host, port, _path in SERVICES:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.bind((host, port))
+                except OSError as exc:
+                    raise RuntimeError(f"{name} 的监听地址 {host}:{port} 不可用：{exc}") from exc
+        for name, target, host, port, _path in SERVICES:
             log_path = LOG_DIR / f"{name}.log"
             log_file = log_path.open("ab")
             log_files.append(log_file)
@@ -77,7 +87,7 @@ def main() -> int:
                 "uvicorn",
                 target,
                 "--host",
-                "127.0.0.1",
+                host,
                 "--port",
                 str(port),
             ]
@@ -91,21 +101,24 @@ def main() -> int:
                 start_new_session=True,
             )
             processes.append((name, process))
-            wait_for(name, port, _path, args.timeout)
+            wait_for(name, host, port, _path, args.timeout)
 
         print("\nWebAgent Demo 已启动")
-        print("  控制台： http://127.0.0.1:8000")
-        print("  Agent  ： http://127.0.0.1:8010/health")
-        print("  MCP    ： http://127.0.0.1:8020/health")
+        console_url = health_url(BUSINESS_HOST, BUSINESS_PORT, "")
+        print(f"  控制台： {console_url}")
+        print(f"  React ： {console_url}/react/")
+        print(f"  Agent ： {health_url(AGENT_HOST, AGENT_PORT, '/health')}")
+        print(f"  MCP   ： {health_url(MCP_HOST, MCP_PORT, '/health')}")
         print("\n演示账号：")
-        print("  admin / admin123   全部权限 + 用户管理")
-        print("  user1 / user1pass  只读设备")
-        print("  user2 / user2pass  查询 + 修改（审批后执行）")
-        print("  user3 / user3pass  查询 + 修改 + 删除（审批后执行）")
+        print("  admin：全部权限 + 用户管理，初始密码由 WEBAGENT_ADMIN_PASSWORD 决定（本地默认 admin123）")
+        if env.get("WEBAGENT_SEED_DEMO_USERS", "1").lower() in {"1", "true", "yes"}:
+            print("  user1 / user1pass  只读设备")
+            print("  user2 / user2pass  查询 + 修改（审批后执行）")
+            print("  user3 / user3pass  查询 + 修改 + 删除（审批后执行）")
         print("\n按 Ctrl+C 停止全部服务。\n")
 
         if args.open:
-            webbrowser.open("http://127.0.0.1:8000")
+            webbrowser.open(console_url)
 
         while True:
             for name, process in processes:
@@ -142,4 +155,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

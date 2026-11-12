@@ -36,4 +36,6 @@ Thumbs.db
 data/
 logs/
 uploads/
+backups/
+web/vendor/
 *.log

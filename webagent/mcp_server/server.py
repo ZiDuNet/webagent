@@ -9,14 +9,16 @@ from __future__ import annotations
 import hmac
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx2
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from starlette.responses import JSONResponse, Response
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from webagent.config import BUSINESS_URL, INTERNAL_SECRET
+from webagent.config import BUSINESS_URL, INTERNAL_SECRET, MCP_URL
 
 
 mcp = MCPServer(
@@ -268,6 +270,19 @@ class InternalTokenMiddleware:
         await self.app(scope, receive, send)
 
 
-app = mcp.streamable_http_app(json_response=True, stateless_http=True)
-app.add_middleware(InternalTokenMiddleware, secret=INTERNAL_SECRET)
+def transport_security(url: str) -> TransportSecuritySettings:
+    origin = urlsplit(url)
+    return TransportSecuritySettings(
+        allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", origin.netloc],
+        allowed_origins=[
+            "http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*",
+            f"{origin.scheme}://{origin.netloc}",
+        ],
+    )
 
+
+app = mcp.streamable_http_app(
+    json_response=True, stateless_http=True,
+    transport_security=transport_security(MCP_URL),
+)
+app.add_middleware(InternalTokenMiddleware, secret=INTERNAL_SECRET)

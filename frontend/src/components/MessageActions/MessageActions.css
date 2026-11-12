@@ -1,0 +1,82 @@
+.message-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 7px;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+}
+
+.message:hover .message-actions,
+.message-actions:focus-within {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.message-actions__usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.message-usage {
+  padding: 1px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.02);
+  color: #56647a;
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.message-usage b {
+  color: #8d9aab;
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.message-actions__buttons {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.message-action {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #56647a;
+  cursor: pointer;
+  transition:
+    background 0.14s ease,
+    color 0.14s ease;
+}
+
+.message-action:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #c4cfdd;
+}
+
+.message-action.is-danger:hover {
+  background: rgba(239, 100, 112, 0.09);
+  color: #e0858d;
+}
+
+@media (max-width: 720px) {
+  .message-actions {
+    opacity: 1;
+    transform: none;
+  }
+
+  .message-actions__usage {
+    flex-wrap: wrap;
+  }
+}

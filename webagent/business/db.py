@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from webagent.common.security import hash_password
-from webagent.config import BUSINESS_DB_PATH, ensure_data_dir
+from webagent.common.storage import SQLiteConnection
+from webagent.config import ADMIN_PASSWORD, BUSINESS_DB_PATH, SEED_DEMO_USERS, ensure_data_dir
 
 
 PERMISSIONS = {
@@ -20,6 +21,7 @@ PERMISSIONS = {
         "device:update",
         "device:delete",
         "user:manage",
+        "session:read_all",
     ],
     "user1": ["profile:read", "device:read"],
     "user2": ["profile:read", "device:read", "device:update"],
@@ -33,7 +35,7 @@ def utc_now() -> str:
 
 def connect() -> sqlite3.Connection:
     ensure_data_dir()
-    conn = sqlite3.connect(BUSINESS_DB_PATH)
+    conn = sqlite3.connect(BUSINESS_DB_PATH, timeout=15, factory=SQLiteConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
@@ -91,6 +93,7 @@ def init_db() -> None:
         count = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
         if count == 0:
             _seed_users(conn)
+        _ensure_admin_session_permission(conn)
         device_count = conn.execute("SELECT COUNT(*) AS n FROM devices").fetchone()["n"]
         if device_count == 0:
             _seed_devices(conn)
@@ -99,11 +102,14 @@ def init_db() -> None:
 def _seed_users(conn: sqlite3.Connection) -> None:
     now = utc_now()
     users = [
-        ("admin", "admin123", "系统管理员", "admin", PERMISSIONS["admin"], 1),
-        ("user1", "user1pass", "只读用户", "viewer", PERMISSIONS["user1"], 0),
-        ("user2", "user2pass", "运维用户", "operator", PERMISSIONS["user2"], 0),
-        ("user3", "user3pass", "设备管理员", "device_admin", PERMISSIONS["user3"], 0),
+        ("admin", ADMIN_PASSWORD, "系统管理员", "admin", PERMISSIONS["admin"], 1),
     ]
+    if SEED_DEMO_USERS:
+        users.extend([
+            ("user1", "user1pass", "只读用户", "viewer", PERMISSIONS["user1"], 0),
+            ("user2", "user2pass", "运维用户", "operator", PERMISSIONS["user2"], 0),
+            ("user3", "user3pass", "设备管理员", "device_admin", PERMISSIONS["user3"], 0),
+        ])
     for username, password, display_name, role, permissions, is_admin in users:
         conn.execute(
             """
@@ -121,6 +127,27 @@ def _seed_users(conn: sqlite3.Connection) -> None:
                 now,
             ),
         )
+
+
+def _ensure_admin_session_permission(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT id, permissions FROM users WHERE username = 'admin'"
+    ).fetchone()
+    if not row:
+        return
+    try:
+        permissions = json.loads(row["permissions"])
+    except json.JSONDecodeError:
+        permissions = []
+    if not isinstance(permissions, list):
+        permissions = []
+    if "session:read_all" in permissions:
+        return
+    permissions.append("session:read_all")
+    conn.execute(
+        "UPDATE users SET permissions = ? WHERE id = ?",
+        (json.dumps(permissions, ensure_ascii=False), row["id"]),
+    )
 
 
 def _seed_devices(conn: sqlite3.Connection) -> None:

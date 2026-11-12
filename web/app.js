@@ -52,12 +52,40 @@
     activeSessionId: null,
     messages: [],
     attachments: [],
+    attachmentReads: 0,
     sending: false,
     approvalLoading: new Set(),
     lastBudget: null,
+    lastRun: null,
     contextInfo: null,
+    usage: null,
+    sessionUsage: null,
+    myUsage: null,
     memoryCount: 0,
-    configTab: "providers",
+    reasoningEffort: "",
+    approvalMode: "confirm",
+    liveUpdateTimer: null,
+    processTimer: null,
+    streamEl: null,
+    liveToolsSignature: "",
+    liveApprovalSignature: "",
+    liveStartedAt: 0,
+    liveElapsed: null,
+    liveError: "",
+    activeRunId: null,
+    lastEventId: 0,
+    streamingMessage: null,
+    liveThinking: "",
+    liveText: "",
+    liveRenderedHtml: "",
+    liveRenderedText: "",
+    liveToolRuns: [],
+    recording: false,
+    recognition: null,
+    mediaRecorder: null,
+    mediaChunks: [],
+    voiceBusy: false,
+    configTab: "models",
     config: {
       providers: [],
       models: [],
@@ -67,8 +95,20 @@
       users: [],
       audit: [],
       agentAudit: [],
+      sessions: [],
+      usageSummary: null,
       settings: null,
+      dynamicTools: [],
+      pagepilot: null,
     },
+    sessionFilter: {
+      username: "",
+      model: "",
+      status: "",
+      q: "",
+      days: 7,
+    },
+    sessionDetail: null,
     devices: [],
     deviceFilter: { q: "", status: "" },
     deviceTimer: null,
@@ -76,6 +116,17 @@
 
   let healthTimer = null;
   let modalTarget = null;
+  let modalKeyHandler = null;
+  let modalReturnFocus = null;
+  let chartSequence = 0;
+  const htmlArtifacts = new Map();
+  const codeBoxes = new Map();
+  const transientReasoning = new Map();
+  let codeBoxSequence = 0;
+  let codeBoxCleanupTimer = null;
+  let activeArtifact = null;
+  let artifactPublishStatus = null;
+  let publicationsView = null;
 
   const PERMISSION_LABELS = {
     "profile:read": "身份读取",
@@ -84,9 +135,42 @@
     "device:update": "设备修改",
     "device:delete": "设备删除",
     "user:manage": "用户管理",
+    "session:read_all": "会话治理",
   };
   const RISK_LABELS = { read: "读取", write: "写入", delete: "删除" };
   const MODE_LABELS = { agent: "多步", report: "单步报告" };
+  const APPROVAL_MODE_LABELS = { confirm: "变更前确认", full_access: "完全访问" };
+  const MODEL_KIND_LABELS = {
+    chat: "对话",
+    vision: "视觉理解",
+    asr: "语音转写",
+    asr_realtime: "实时语音（暂不支持）",
+    embedding: "向量 Embedding",
+    rerank: "重排 Rerank",
+    image_generation: "图片生成",
+  };
+  const REASONING_OPTIONS = [
+    ["", "跟随模型"],
+    ["off", "关闭深度思考"],
+    ["none", "不使用推理"],
+    ["minimal", "minimal"],
+    ["low", "low"],
+    ["medium", "medium"],
+    ["high", "high"],
+    ["xhigh", "xhigh"],
+  ];
+  const TOOL_STATE_LABELS = {
+    optional: "可见 · 可选",
+    fixed: "可见 · 不可选",
+    hidden: "不可见 · 默认启用",
+    disabled: "不可见 · 不可用",
+  };
+  const SESSION_STATUS_LABELS = {
+    ok: "成功",
+    error: "失败",
+    approval_required: "待审批",
+    "": "—",
+  };
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -114,6 +198,19 @@
     return state.models.find((model) => Number(model.id) === Number(state.modelId)) || state.models[0] || null;
   }
 
+  function toolState(tool) {
+    if (!tool?.enabled) return "disabled";
+    if (!tool.visible) return "hidden";
+    return tool.selectable ? "optional" : "fixed";
+  }
+
+  function toolSourceLabel(tool) {
+    if (tool.source === "mcp") return "MCP";
+    if (tool.source === "dynamic") return "HTTP Tool";
+    if (tool.source === "pagepilot") return tool.name === "publish_to_pagepilot" ? "REST 连接器" : "内置 Tool";
+    return "Tool";
+  }
+
   function formatTime(value) {
     if (!value) return "—";
     const date = new Date(value);
@@ -134,6 +231,25 @@
   function truncate(value, max = 80) {
     const text = String(value ?? "");
     return text.length > max ? `${text.slice(0, max)}…` : text;
+  }
+
+  function formatTokens(value) {
+    const number = Number(value) || 0;
+    if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(2)}M`;
+    if (number >= 1_000) return `${(number / 1_000).toFixed(1)}k`;
+    return String(number);
+  }
+
+  function formatCost(value) {
+    const number = Number(value) || 0;
+    if (!number) return "$0";
+    if (number < 0.000001) return "<$0.000001";
+    return `$${number.toFixed(6)}`;
+  }
+
+  function formatPrice(value) {
+    const number = Number(value) || 0;
+    return `$${number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
   }
 
   async function api(path, options = {}) {
@@ -185,86 +301,432 @@
     window.setTimeout(() => node.remove(), timeout);
   }
 
-  /* ---------- Markdown (escape first, then a small safe subset) ---------- */
-  function renderMarkdown(raw) {
-    if (!raw) return "";
-    const codeBlocks = [];
-    let text = String(raw).replace(/```([\w+-]*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
-      codeBlocks.push({ lang, code });
-      return `\n@@CODEBLOCK_${codeBlocks.length - 1}@@\n`;
-    });
-    text = escapeHtml(text);
-    text = text.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-    text = text.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-    text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label, url) => {
-      const safeUrl = /^https?:\/\//i.test(url) || url.startsWith("/") ? url : "#";
-      return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  /* ---------- Markdown (markdown-it + KaTeX + Mermaid, sanitized) ---------- */
+  let markdownIt = null;
+
+  function markdownEngine() {
+    if (markdownIt) return markdownIt;
+    const md = window.markdownit({
+      html: false,
+      linkify: true,
+      breaks: false,
+      typographer: false,
     });
 
-    const lines = text.split("\n");
-    const html = [];
-    let paragraph = [];
-    let listType = null;
-
-    const flushParagraph = () => {
-      if (!paragraph.length) return;
-      html.push(`<p>${paragraph.join("<br>")}</p>`);
-      paragraph = [];
-    };
-    const closeList = () => {
-      if (!listType) return;
-      html.push(`</${listType}>`);
-      listType = null;
-    };
-    const openList = (type) => {
-      if (listType === type) return;
-      closeList();
-      html.push(`<${type}>`);
-      listType = type;
-    };
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      const codeMatch = trimmed.match(/^@@CODEBLOCK_(\d+)@@$/);
-      if (codeMatch) {
-        flushParagraph();
-        closeList();
-        const block = codeBlocks[Number(codeMatch[1])];
-        html.push(`<pre><code>${escapeHtml(block.code.replace(/\n$/, ""))}</code></pre>`);
-        continue;
+    function mathInline(state, silent) {
+      const src = state.src;
+      const pos = state.pos;
+      if (src[pos] !== "$" || src[pos + 1] === "$") return false;
+      const next = src.charCodeAt(pos + 1);
+      if (next === 0x20 || next === 0x09 || (next >= 0x30 && next <= 0x39)) return false;
+      let end = -1;
+      for (let i = pos + 1; i < src.length; i += 1) {
+        const code = src.charCodeAt(i);
+        if (code === 0x0a) break;
+        if (code === 0x5c) { i += 1; continue; }
+        if (code === 0x24) { end = i; break; }
       }
-      if (!trimmed) { flushParagraph(); closeList(); continue; }
-      if (/^#{1,3}\s+/.test(trimmed)) {
-        flushParagraph();
-        closeList();
-        const level = trimmed.match(/^#+/)[0].length;
-        html.push(`<h${level}>${trimmed.replace(/^#{1,3}\s+/, "")}</h${level}>`);
-        continue;
+      if (end < 0 || end === pos + 1) return false;
+      const content = src.slice(pos + 1, end);
+      if (!content.trim()) return false;
+      if (!silent) {
+        const token = state.push("math_inline", "math", 0);
+        token.content = content;
       }
-      if (/^[-*]\s+/.test(trimmed)) {
-        flushParagraph();
-        openList("ul");
-        html.push(`<li>${trimmed.replace(/^[-*]\s+/, "")}</li>`);
-        continue;
-      }
-      if (/^\d+\.\s+/.test(trimmed)) {
-        flushParagraph();
-        openList("ol");
-        html.push(`<li>${trimmed.replace(/^\d+\.\s+/, "")}</li>`);
-        continue;
-      }
-      if (/^&gt;\s+/.test(trimmed)) {
-        flushParagraph();
-        closeList();
-        html.push(`<blockquote>${trimmed.replace(/^&gt;\s+/, "")}</blockquote>`);
-        continue;
-      }
-      closeList();
-      paragraph.push(trimmed);
+      state.pos = end + 1;
+      return true;
     }
-    flushParagraph();
-    closeList();
-    return html.join("");
+
+    function mathBlock(state, startLine, endLine, silent) {
+      const lineStart = state.bMarks[startLine] + state.tShift[startLine];
+      const firstLine = state.src.slice(lineStart, state.eMarks[startLine]);
+      const openIdx = firstLine.indexOf("$$");
+      if (openIdx === -1) return false;
+      let content = "";
+      let nextLine = startLine;
+      let closed = false;
+      const sameClose = firstLine.indexOf("$$", openIdx + 2);
+      if (sameClose !== -1) {
+        content = firstLine.slice(openIdx + 2, sameClose);
+        nextLine = startLine + 1;
+        closed = true;
+      } else {
+        content = `${firstLine.slice(openIdx + 2)}\n`;
+        nextLine = startLine + 1;
+        while (nextLine < endLine) {
+          const line = state.src.slice(state.bMarks[nextLine] + state.tShift[nextLine], state.eMarks[nextLine]);
+          const closeIdx = line.indexOf("$$");
+          if (closeIdx !== -1) {
+            content += line.slice(0, closeIdx);
+            nextLine += 1;
+            closed = true;
+            break;
+          }
+          content += `${line}\n`;
+          nextLine += 1;
+        }
+      }
+      if (!closed) return false;
+      content = content.replace(/^\s*\n/, "").replace(/\n\s*$/, "").trim();
+      if (!content) return false;
+      if (silent) {
+        state.line = nextLine;
+        return true;
+      }
+      const token = state.push("math_block", "math", 0);
+      token.block = true;
+      token.content = content;
+      token.map = [startLine, nextLine];
+      state.line = nextLine;
+      return true;
+    }
+
+    md.inline.ruler.before("escape", "math_inline", mathInline);
+    md.block.ruler.after("fence", "math_block", mathBlock);
+    md.renderer.rules.math_inline = (tokens, idx) => renderKatex(tokens[idx].content, false);
+    md.renderer.rules.math_block = (tokens, idx) => `<div class="math-block">${renderKatex(tokens[idx].content, true)}</div>\n`;
+
+    const defaultFence = md.renderer.rules.fence
+      || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+      const token = tokens[idx];
+      const info = String(token.info || "").trim();
+      const lang = (info.split(/\s+/)[0] || "").toLowerCase();
+      const code = token.content.replace(/\n$/, "");
+      if (lang === "mermaid") return mermaidBlock(code, Boolean(env.streaming));
+      if (lang === "html") return htmlBlock(code, Boolean(env.streaming));
+      if (lang === "chart") {
+        try {
+          const spec = JSON.parse(code);
+          if (spec && Array.isArray(spec.data)) return chartMarkup(spec);
+        } catch {
+          // Invalid chart JSON falls back to a regular code block.
+        }
+      }
+      return renderCodeBox(code, lang);
+    };
+
+    const defaultLinkOpen = md.renderer.rules.link_open
+      || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+      const href = tokens[idx].attrGet("href") || "";
+      if (/^https?:\/\//i.test(href)) {
+        tokens[idx].attrSet("target", "_blank");
+        tokens[idx].attrSet("rel", "noopener noreferrer");
+      }
+      return defaultLinkOpen(tokens, idx, options, env, self);
+    };
+
+    const tableOpen = md.renderer.rules.table_open
+      || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    const tableClose = md.renderer.rules.table_close
+      || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    md.renderer.rules.table_open = (tokens, idx, options, env, self) =>
+      `<div class="md-table-wrap">${tableOpen(tokens, idx, options, env, self)}`;
+    md.renderer.rules.table_close = (tokens, idx, options, env, self) =>
+      `${tableClose(tokens, idx, options, env, self)}</div>`;
+
+    markdownIt = md;
+    return md;
+  }
+
+  function renderKatex(tex, displayMode) {
+    if (window.katex) {
+      try {
+        return window.katex.renderToString(tex, { throwOnError: false, displayMode, strict: false });
+      } catch {
+        // Fall through to escaped fallback.
+      }
+    }
+    return `<code>${escapeHtml(tex)}</code>`;
+  }
+
+  function mermaidBlock(code, streaming) {
+    if (!code.trim()) {
+      return '<div class="mermaid-generating"><span class="process-spinner"></span>图表生成中…</div>';
+    }
+    if (!window.mermaid) return renderCodeBox(code, "mermaid");
+    const id = `mermaid-${artifactKey(code)}`;
+    return `<div class="mermaid-block" data-mermaid-id="${id}" data-mermaid-streaming="${streaming ? "1" : "0"}" data-mermaid-pending="1">${escapeHtml(code)}</div>`;
+  }
+
+  function htmlBlock(code, streaming) {
+    if (streaming) {
+      return `
+        <div class="html-artifact generating">
+          <span class="html-artifact-icon">HTML</span>
+          <div class="html-artifact-body">
+            <strong>正在生成 HTML 页面…</strong>
+            <small>完成后可预览、查看代码、保存图片或发布</small>
+          </div>
+        </div>`;
+    }
+    return renderHtmlArtifact(code);
+  }
+
+  const mermaidCache = new Map();
+  let mermaidInitialized = false;
+
+  async function hydrateMermaid(root) {
+    if (!window.mermaid || !root?.querySelectorAll) return;
+    if (!mermaidInitialized) {
+      window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark", suppressErrorRendering: true });
+      mermaidInitialized = true;
+    }
+    const nodes = [...root.querySelectorAll("[data-mermaid-pending='1']")];
+    for (const node of nodes) {
+      node.removeAttribute("data-mermaid-pending");
+      const id = node.dataset.mermaidId;
+      const code = node.textContent;
+      try {
+        if (mermaidCache.has(code)) {
+          node.classList.add("mermaid-rendered");
+          node.innerHTML = mermaidCache.get(code);
+          continue;
+        }
+        if (node.dataset.mermaidStreaming === "1" && !(await window.mermaid.parse(code, { suppressErrors: true }))) {
+          node.innerHTML = '<div class="mermaid-generating"><span class="process-spinner"></span>图表生成中…</div>';
+          continue;
+        }
+        const result = await window.mermaid.render(`mm-${id}`, code);
+        if (mermaidCache.size >= 50) mermaidCache.delete(mermaidCache.keys().next().value);
+        mermaidCache.set(code, result.svg);
+        if (!node.isConnected) continue;
+        node.classList.add("mermaid-rendered");
+        node.innerHTML = result.svg;
+      } catch (error) {
+        if (!node.isConnected) continue;
+        if (node.dataset.mermaidStreaming === "1") {
+          node.innerHTML = '<div class="mermaid-generating"><span class="process-spinner"></span>图表生成中…</div>';
+          continue;
+        }
+        node.classList.add("mermaid-error");
+        node.innerHTML = `<div class="mermaid-error-note">图表渲染失败：${escapeHtml(error.message)}</div>${renderCodeBox(code, "mermaid")}`;
+      }
+    }
+  }
+
+  const CHART_TONES = {
+    green: "#27c96a",
+    amber: "#f0b451",
+    red: "#ef6470",
+    blue: "#65a9ff",
+    purple: "#b58cff",
+  };
+
+  function chartMarkup(spec) {
+    if (!spec || !Array.isArray(spec.data) || !spec.data.length) return "";
+    const type = ["bar", "line", "area", "pie", "donut"].includes(spec.type) ? spec.type : "bar";
+    const data = spec.data
+      .map((item) => ({
+        label: String(item?.label ?? "").slice(0, 80),
+        value: Number.isFinite(Number(item?.value)) ? Number(item.value) : 0,
+        tone: CHART_TONES[item?.tone] ? item.tone : "blue",
+      }))
+      .slice(0, 24);
+    const title = escapeHtml(String(spec.title || "数据图表").slice(0, 120));
+    const unit = escapeHtml(String(spec.unit || "").slice(0, 16));
+    const max = Math.max(1, ...data.map((item) => Math.abs(item.value)));
+    const id = `wa-chart-${++chartSequence}`;
+    const head = `
+      <figcaption>
+        <strong>${title}</strong>
+        <span>${unit ? `单位：${unit}` : ""}</span>
+      </figcaption>`;
+
+    if (type === "line" || type === "area") {
+      const width = 520;
+      const height = 166;
+      const pad = { left: 34, right: 12, top: 14, bottom: 28 };
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+      const values = data.map((item) => item.value);
+      let minValue = Math.min(...values);
+      let maxValue = Math.max(...values);
+      const spread = maxValue - minValue;
+      if (spread <= 0) {
+        minValue -= 1;
+        maxValue += 1;
+      } else {
+        minValue -= spread * 0.12;
+        maxValue += spread * 0.12;
+      }
+      const range = Math.max(1, maxValue - minValue);
+      const points = data.map((item, index) => {
+        const x = pad.left + (plotW / Math.max(1, data.length - 1)) * index;
+        const y = pad.top + plotH - ((item.value - minValue) / range) * plotH;
+        return [x, y];
+      });
+      const line = points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+      const area = `${pad.left},${pad.top + plotH} ${line} ${pad.left + plotW},${pad.top + plotH}`;
+      const grid = [0, 0.5, 1].map((ratio) => {
+        const y = pad.top + plotH * ratio;
+        return `<line class="chart-grid-line" x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}"/>`;
+      }).join("");
+      const step = Math.ceil(data.length / 7);
+      const labels = data.map((item, index) => {
+        if (index % step !== 0 && index !== data.length - 1) return "";
+        return `<text class="chart-axis-text" x="${points[index][0]}" y="${height - 7}" text-anchor="middle">${escapeHtml(item.label)}</text>`;
+      }).join("");
+      return `
+        <figure class="md-chart ${type === "area" ? "area" : "line"}">
+          ${head}
+          <svg class="chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${title}">
+            <defs>
+              <linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#65a9ff" stop-opacity=".26"/>
+                <stop offset="100%" stop-color="#65a9ff" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            ${grid}
+            ${type === "area" ? `<polygon points="${area}" fill="url(#${id})"></polygon>` : ""}
+            <polyline class="chart-trend" points="${line}"/>
+            ${points.map(([x, y], index) => `<circle class="chart-point" cx="${x}" cy="${y}" r="2.7"><title>${escapeHtml(data[index].label)}：${data[index].value}${unit}</title></circle>`).join("")}
+            ${labels}
+          </svg>
+        </figure>`;
+    }
+
+    if (type === "pie" || type === "donut") {
+      const total = data.reduce((sum, item) => sum + Math.max(0, item.value), 0) || 1;
+      const radius = 52;
+      const circumference = 2 * Math.PI * radius;
+      let offset = 0;
+      const rings = data.map((item) => {
+        const fraction = Math.max(0, item.value) / total;
+        const segment = `<circle class="chart-pie-seg" cx="70" cy="70" r="${radius}" stroke="${CHART_TONES[item.tone]}" stroke-dasharray="${(fraction * circumference).toFixed(2)} ${circumference.toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}"><title>${escapeHtml(item.label)}：${item.value}${unit}</title></circle>`;
+        offset += fraction * circumference;
+        return segment;
+      }).join("");
+      const legend = data.map((item) => `
+        <span><i style="--legend:${CHART_TONES[item.tone]}"></i>${escapeHtml(item.label)}<b>${item.value}${unit}</b></span>`).join("");
+      return `
+        <figure class="md-chart pie">
+          ${head}
+          <div class="chart-pie-wrap">
+            <svg class="chart-pie" viewBox="0 0 140 140" role="img" aria-label="${title}">
+              <circle cx="70" cy="70" r="${radius}" fill="none" stroke="#1c2430" stroke-width="${type === "donut" ? 20 : 26}"/>
+              <g transform="rotate(-90 70 70)" fill="none" stroke-width="${type === "donut" ? 20 : 26}">${rings}</g>
+              ${type === "donut" ? `<text x="70" y="68" text-anchor="middle" class="chart-total">${total}</text><text x="70" y="82" text-anchor="middle" class="chart-total-unit">${unit}</text>` : ""}
+            </svg>
+            <div class="chart-legend">${legend}</div>
+          </div>
+        </figure>`;
+    }
+
+    const rows = data.map((item) => `
+      <div class="md-bar-row">
+        <span class="md-bar-label">${escapeHtml(item.label)}</span>
+        <span class="md-bar-track"><i style="--value:${Math.max(2, Math.abs(item.value) / max * 100)}%;--bar:${CHART_TONES[item.tone]}"></i></span>
+        <strong>${item.value}${unit}</strong>
+      </div>`).join("");
+    return `
+      <figure class="md-chart bar">
+        ${head}
+        <div class="md-bars">${rows}</div>
+      </figure>`;
+  }
+
+  function artifactTitle(html) {
+    const source = String(html || "");
+    const match = source.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || source.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    const raw = match ? match[1].replace(/<[^>]+>/g, "") : "HTML 页面";
+    return raw.trim().slice(0, 120) || "HTML 页面";
+  }
+
+  function artifactKey(html) {
+    let hash = 2166136261;
+    for (const char of String(html)) {
+      hash ^= char.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `html_${(hash >>> 0).toString(36)}_${String(html).length}`;
+  }
+
+  function renderCodeBox(code, language = "", fileName = "") {
+    const id = `code_${++codeBoxSequence}`;
+    const text = String(code || "").replace(/\n$/, "");
+    codeBoxes.set(id, { code: text, language, fileName });
+    if (codeBoxCleanupTimer === null) {
+      codeBoxCleanupTimer = window.setTimeout(() => {
+        codeBoxCleanupTimer = null;
+        const connected = new Set($$("[data-code-id]").map((node) => node.dataset.codeId));
+        for (const key of codeBoxes.keys()) {
+          if (!connected.has(key)) codeBoxes.delete(key);
+        }
+      }, 0);
+    }
+    const lineCount = text ? text.split("\n").length : 0;
+    const size = new Blob([text]).size;
+    return `
+      <div class="code-box" data-code-box>
+        <div class="code-box-head">
+          <span class="code-box-lang">${escapeHtml((language || "text").toUpperCase())}</span>
+          <span class="code-box-meta">${Math.max(1, Math.round(size / 1024))} KB · ${lineCount} 行</span>
+          <span class="code-box-actions">
+            <button type="button" class="code-box-btn" data-code-action="copy" data-code-id="${id}">复制</button>
+            <button type="button" class="code-box-btn" data-code-action="download" data-code-id="${id}">下载</button>
+            <button type="button" class="code-box-btn" data-code-action="wrap" data-code-id="${id}">换行</button>
+          </span>
+        </div>
+        <pre class="code-box-body"><code>${escapeHtml(text)}</code></pre>
+      </div>`;
+  }
+
+  function renderHtmlArtifact(html) {
+    const id = artifactKey(html);
+    const title = artifactTitle(html);
+    htmlArtifacts.set(id, { html, title });
+    const size = new Blob([html]).size;
+    return `
+      <div class="html-artifact">
+        <span class="html-artifact-icon">HTML</span>
+        <div class="html-artifact-body">
+          <strong>${escapeHtml(title)}</strong>
+          <small>可交互网页 · ${Math.max(1, Math.round(size / 1024))} KB · 隔离沙箱预览</small>
+        </div>
+        <button class="html-artifact-open" type="button" data-artifact-open="${id}">
+          打开预览
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+        <button class="html-artifact-code" type="button" data-artifact-code="${id}">查看代码</button>
+      </div>`;
+  }
+
+  function openCodeModal(title, code, language = "html", fileName = "page.html") {
+    openModal(`
+      <div class="modal-head">
+        <div><h3>${escapeHtml(title || "查看代码")}</h3><p>只读代码，不会在聊天区执行。</p></div>
+        <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
+      </div>
+      <div class="modal-body">${renderCodeBox(code, language, fileName)}</div>`, { wide: true });
+  }
+
+  function renderMarkdown(raw, options = {}) {
+    if (!raw) return "";
+    const streaming = Boolean(options.streaming);
+    let source = String(raw);
+
+    // A full HTML document is never dumped into the transcript; turn it into
+    // an artifact instead. While streaming, show a generating placeholder.
+    if (/^\s*(<!doctype\s+html|<html[\s>])/i.test(source) && /<\/html>\s*$/i.test(source)) {
+      return renderHtmlArtifact(source.trim());
+    }
+    if (streaming && /^\s*(<!doctype\s+html|<html[\s>])/i.test(source)) {
+      return htmlBlock("", true);
+    }
+
+    // While streaming, markdown-it would parse an unclosed fence as a
+    // paragraph. Close it temporarily so code/mermaid blocks stay blocks.
+    const fenceCount = (source.match(/```/g) || []).length;
+    if (streaming && fenceCount % 2 === 1) {
+      source += "\n```";
+    }
+
+    if (!window.markdownit) {
+      return escapeHtml(source).replace(/\n/g, "<br>");
+    }
+    return markdownEngine().render(source, { streaming });
   }
 
   function prettyJson(value, fallback = "") {
@@ -296,6 +758,11 @@
     if (healthTimer) window.clearInterval(healthTimer);
     healthTimer = null;
     closeModal();
+    closeArtifactModal();
+    publicationsView = null;
+    htmlArtifacts.clear();
+    codeBoxes.clear();
+    transientReasoning.clear();
     state.user = null;
     state.sending = false;
     $("#app-view").classList.add("hidden");
@@ -317,11 +784,21 @@
     renderConversationList();
     renderChat();
     await loadTools();
+    await loadMyUsage();
     renderContextRail();
     loadHealth();
     if (healthTimer) window.clearInterval(healthTimer);
     healthTimer = window.setInterval(loadHealth, 30000);
     switchPage("ai");
+  }
+
+  async function loadMyUsage() {
+    try {
+      const data = await api("/api/agent/usage/me?days=7");
+      state.myUsage = data;
+    } catch {
+      state.myUsage = null;
+    }
   }
 
   function applyUserUI() {
@@ -428,13 +905,18 @@
     let failures = 0;
     if (results[0].status === "fulfilled") state.assistants = results[0].value.items || [];
     else failures += 1;
-    if (results[1].status === "fulfilled") state.models = results[1].value.items || [];
+    if (results[1].status === "fulfilled") state.models = (results[1].value.items || []).filter((model) => ["chat", "vision"].includes(model.model_kind || "chat"));
     else failures += 1;
     if (results[2].status === "fulfilled") state.skills = results[2].value.items || [];
     else failures += 1;
     if (results[3].status === "fulfilled") {
       state.status = results[3].value;
       state.demoMode = Boolean(results[3].value.demo_mode);
+      const storedApproval = localStorage.getItem(`wa_approval_${state.user.username}`);
+      const preferredApproval = storedApproval || results[3].value.default_approval_mode || "confirm";
+      state.approvalMode = preferredApproval === "full_access" && results[3].value.allow_full_access
+        ? "full_access"
+        : "confirm";
     } else failures += 1;
 
     const storedAssistant = Number(localStorage.getItem(`wa_assistant_${state.user.username}`));
@@ -449,6 +931,8 @@
     state.modelId = model ? Number(model.id) : null;
 
     renderModelSelect();
+    renderApprovalMode();
+    renderVoiceState();
     updateDemoBadge();
     updateSendState();
     if (failures) toast("部分 Agent 配置未能加载，请检查 8010 / 8020 服务", "warn");
@@ -474,16 +958,8 @@
 
   function renderWelcome() {
     const assistant = currentAssistant();
-    const root = $("#assistant-cards");
-    if (!root) return;
-    root.innerHTML = state.assistants.map((item) => `
-      <button type="button" class="assistant-card ${Number(item.id) === Number(state.assistantId) ? "active" : ""}" data-action="assistant-switch" data-id="${item.id}">
-        <span class="assistant-card-head"><span>${escapeHtml(item.icon || "✦")}</span>${escapeHtml(item.name)}</span>
-        <p>${escapeHtml(item.description || "通用业务助手")}</p>
-        <span class="card-mode">${escapeHtml(MODE_LABELS[item.mode] || item.mode)}${item.model_name ? ` · ${escapeHtml(item.model_name)}` : ""}</span>
-      </button>`).join("");
-    $("#welcome-title").textContent = assistant ? assistant.name : "有什么我能帮你的吗？";
-    $("#welcome-subtitle").textContent = assistant?.greeting
+    $("#welcome-title").textContent = state.status?.welcome_title || "有什么我能帮你的吗？";
+    $("#welcome-subtitle").textContent = state.status?.welcome_subtitle || assistant?.greeting
       || (can("device:update")
         ? "我可以查询设备、统计状态，并在你审批后执行修改或删除。"
         : "我可以查询设备、统计状态。当前账号没有写入权限，Agent 也不会越权。");
@@ -498,7 +974,13 @@
     if (!root) return;
     const assistant = currentAssistant();
     let chips = [];
-    if (assistant?.mode === "report") {
+    const configured = String(state.status?.welcome_prompts || "")
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (configured.length) {
+      chips = configured;
+    } else if (assistant?.mode === "report") {
       chips = [assistant.greeting || "生成设备健康报告", "开始生成报告"];
     } else if (assistant?.name?.includes("只读")) {
       chips = ["查看全部设备", "统计设备状态", "离线设备有哪些"];
@@ -530,12 +1012,92 @@
     const model = selectedModel();
     const note = $("#composer-model-note");
     if (note) note.textContent = model ? `${model.name} · ${model.model_id}${locked ? "（助手绑定）" : ""}` : "未配置模型";
+    renderReasoningSelect();
+  }
+
+  function renderReasoningSelect() {
+    const wrap = $("#reasoning-wrap");
+    const select = $("#reasoning-select");
+    const model = selectedModel();
+    if (!wrap || !select) return;
+    if (!model?.supports_reasoning) {
+      wrap.classList.add("hidden");
+      state.reasoningEffort = "";
+      return;
+    }
+    wrap.classList.remove("hidden");
+    const allowed = new Set(model.reasoning_efforts || []);
+    const options = REASONING_OPTIONS.filter(([value]) => !value || (allowed.has(value) && (value !== "off" || model.reasoning_can_disable)));
+    if (!options.some(([value]) => value === state.reasoningEffort)) state.reasoningEffort = "";
+    select.innerHTML = options.map(([value, label]) =>
+      `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
+    ).join("");
+    select.value = state.reasoningEffort || "";
+  }
+
+  function renderApprovalMode() {
+    const allowed = state.status?.allow_full_access !== false;
+    if (!allowed) state.approvalMode = "confirm";
+    const mode = state.approvalMode === "full_access" && allowed ? "full_access" : "confirm";
+    state.approvalMode = mode;
+    const label = $("#access-mode-label");
+    if (label) label.textContent = APPROVAL_MODE_LABELS[mode];
+    const button = $("#access-mode-btn");
+    if (button) {
+      button.classList.toggle("active-warning", mode === "full_access");
+      button.title = mode === "full_access"
+        ? "完全访问：改动类工具直接执行，但不会扩大你的工具权限"
+        : "变更前确认：改动类工具执行前需要你批准";
+    }
+    $$("[data-action='set-approval-mode']").forEach((option) => {
+      const active = option.dataset.mode === mode;
+      option.classList.toggle("active", active);
+      option.classList.toggle("disabled", option.dataset.mode === "full_access" && !allowed);
+      option.disabled = option.dataset.mode === "full_access" && !allowed;
+    });
+    const note = $("#access-popover > p");
+    if (note) {
+      note.textContent = allowed
+        ? "只跳过确认，不扩大工具权限；每次执行仍会写入审计和对话记录。"
+        : "管理员已关闭完全访问；当前保持不变前确认。";
+    }
+  }
+
+  function setApprovalMode(mode) {
+    if (mode === "full_access" && state.status?.allow_full_access === false) {
+      toast("管理员未开启完全访问", "warn");
+      return;
+    }
+    state.approvalMode = mode === "full_access" ? "full_access" : "confirm";
+    localStorage.setItem(`wa_approval_${state.user.username}`, state.approvalMode);
+    $("#access-popover")?.classList.add("hidden");
+    renderApprovalMode();
+    toast(
+      state.approvalMode === "full_access"
+        ? "已切换为完全访问：改动类工具将直接执行"
+        : "已切换为变更前确认",
+      state.approvalMode === "full_access" ? "warn" : "ok",
+      2600,
+    );
+  }
+
+  function renderVoiceState() {
+    const button = $("#voice-btn");
+    if (!button) return;
+    const configured = Boolean(state.status?.asr?.configured);
+    button.disabled = !configured || state.voiceBusy;
+    button.title = configured
+      ? `语音输入（${state.status.asr.model_name || "ASR"}）`
+      : (state.status?.asr?.reason || "管理员尚未配置语音识别模型");
+    const label = $("#voice-label");
+    if (label) label.textContent = state.recording ? "停止" : (state.voiceBusy ? "识别中" : "语音");
   }
 
   function changeModel(value) {
     const model = state.models.find((item) => Number(item.id) === Number(value));
     if (!model) return;
     state.modelId = Number(model.id);
+    state.reasoningEffort = "";
     localStorage.setItem(`wa_model_${state.user.username}`, String(state.modelId));
     renderModelSelect();
     renderContextRail();
@@ -553,15 +1115,19 @@
       toast(error.message, "warn");
     }
     const key = `wa_tools_${state.user.username}_${state.assistantId || "none"}`;
-    const available = new Set(state.tools.map((tool) => tool.name));
     let stored = null;
     try { stored = JSON.parse(localStorage.getItem(key) || "null"); } catch { stored = null; }
-    if (Array.isArray(stored)) {
-      state.selectedTools = new Set(stored.filter((name) => available.has(name)));
-      if (!state.selectedTools.size && state.tools.length) state.selectedTools = new Set(available);
-    } else {
-      state.selectedTools = new Set(available);
+    const selected = new Set();
+    for (const tool of state.tools) {
+      if (tool.selectable === false) {
+        selected.add(tool.name);
+      } else if (Array.isArray(stored)) {
+        if (stored.includes(tool.name)) selected.add(tool.name);
+      } else if (tool.default_selected !== false) {
+        selected.add(tool.name);
+      }
     }
+    state.selectedTools = selected;
     renderToolPopover();
     renderContextRail();
     updateSendState();
@@ -570,7 +1136,8 @@
   function saveToolSelection() {
     if (!state.user) return;
     const key = `wa_tools_${state.user.username}_${state.assistantId || "none"}`;
-    localStorage.setItem(key, JSON.stringify([...state.selectedTools]));
+    const selectable = new Set(state.tools.filter((tool) => tool.selectable !== false).map((tool) => tool.name));
+    localStorage.setItem(key, JSON.stringify([...state.selectedTools].filter((name) => selectable.has(name))));
   }
 
   function renderToolPopover() {
@@ -581,13 +1148,16 @@
     } else {
       list.innerHTML = state.tools.map((tool) => {
         const checked = state.selectedTools.has(tool.name);
+        const fixed = tool.selectable === false;
         return `
           <label class="tool-option ${checked ? "" : "off"}">
-            <input type="checkbox" data-tool-name="${escapeHtml(tool.name)}" ${checked ? "checked" : ""}>
+            <input type="checkbox" data-tool-name="${escapeHtml(tool.name)}" ${checked ? "checked" : ""} ${fixed ? "disabled" : ""}>
             <span class="tool-option-body">
               <span class="tool-option-title">
                 <strong>${escapeHtml(tool.name)}</strong>
                 <span class="risk-badge ${escapeHtml(tool.risk)}">${escapeHtml(RISK_LABELS[tool.risk] || tool.risk)}</span>
+                ${fixed ? '<span class="badge badge-blue">固定</span>' : ""}
+                ${tool.source === "dynamic" ? '<span class="badge">动态</span>' : ""}
               </span>
               <p>${escapeHtml(tool.description)}</p>
               <span class="tool-perm">${escapeHtml(tool.permission)}</span>
@@ -646,9 +1216,15 @@
       if (switchTo) {
         state.activeSessionId = session.id;
         state.messages = [];
+        state.contextInfo = null;
+        state.lastBudget = null;
+        state.lastRun = null;
+        state.usage = null;
+        state.sessionUsage = session;
         localStorage.setItem(`wa_session_${state.user.username}`, session.id);
         renderConversationList();
         renderChat();
+        renderContextRail();
       }
       return session;
     } catch (error) {
@@ -675,17 +1251,34 @@
     await loadMessages(id);
     renderConversationList();
     renderChat();
+    renderContextRail();
   }
 
-  async function loadMessages(sessionId) {
+  async function loadMessages(sessionId, { liveReasoning = "" } = {}) {
     try {
       const data = await api(`/api/agent/sessions/${encodeURIComponent(sessionId)}/messages`);
       state.messages = data.items || [];
+      const lastAssistant = [...state.messages].reverse().find((message) => message.role === "assistant" && message.metadata);
+      for (const message of state.messages) {
+        if (message.reasoning && message.metadata?.reasoning) message.metadata.reasoning.stored = true;
+      }
+      if (lastAssistant && liveReasoning && !lastAssistant.reasoning) {
+        if (transientReasoning.size >= 50) transientReasoning.delete(transientReasoning.keys().next().value);
+        transientReasoning.set(`${sessionId}:${lastAssistant.id}`, liveReasoning);
+      }
+      for (const message of state.messages) {
+        if (!message.reasoning) message.reasoning = transientReasoning.get(`${sessionId}:${message.id}`) || "";
+      }
+      state.contextInfo = lastAssistant?.metadata?.context || null;
+      state.lastRun = lastAssistant?.metadata?.run || null;
+      state.usage = lastAssistant?.metadata?.usage || null;
       const session = state.sessions.find((item) => item.id === sessionId);
       if (session && data.session) {
         session.title = data.session.title;
         session.message_count = data.session.message_count;
+        Object.assign(session, data.session);
       }
+      state.sessionUsage = data.session || null;
       if (data.session?.assistant_id && !state.assistantId) {
         state.assistantId = Number(data.session.assistant_id);
       }
@@ -720,6 +1313,85 @@
     }
   }
 
+  async function renameSession(id) {
+    const session = state.sessions.find((item) => item.id === id);
+    if (!session) return;
+    const title = await promptDialog({
+      title: "重命名会话",
+      message: "给这个对话起一个更易识别的名字。",
+      value: session.title || "",
+      placeholder: "例如：设备巡检报告",
+      confirmText: "保存",
+    });
+    if (!title) return;
+    try {
+      await api(`/api/agent/sessions/${encodeURIComponent(id)}`, { method: "PATCH", body: { title } });
+      session.title = title;
+      if (state.activeSessionId === id) $("#chat-heading").textContent = title;
+      renderConversationList();
+      toast("会话已重命名", "ok", 1600);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  async function forkSession(id, untilMessageId = null) {
+    const session = state.sessions.find((item) => item.id === id);
+    if (!session) return;
+    try {
+      const body = { until_message_id: untilMessageId || null, title: `分叉 · ${session.title || "新对话"}` };
+      const data = await api(`/api/agent/sessions/${encodeURIComponent(id)}/fork`, { method: "POST", body });
+      const branch = data.session;
+      state.sessions.unshift(branch);
+      state.activeSessionId = branch.id;
+      localStorage.setItem(`wa_session_${state.user.username}`, branch.id);
+      await loadMessages(branch.id);
+      renderConversationList();
+      renderChat();
+      renderContextRail();
+      toast("已从当前会话分叉", "ok", 1800);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  async function deleteMessage(messageId) {
+    if (!state.activeSessionId) return;
+    if (!(await confirmDialog({ title: "删除消息", message: "将删除这条消息，无法恢复。", confirmText: "删除", danger: true }))) return;
+    try {
+      await api(`/api/agent/sessions/${encodeURIComponent(state.activeSessionId)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
+      state.messages = state.messages.filter((item) => item.id !== messageId);
+      await loadSessions();
+      renderConversationList();
+      renderChat();
+      renderContextRail();
+      toast("消息已删除", "ok", 1600);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  async function editMessage(messageId) {
+    const message = state.messages.find((item) => item.id === messageId);
+    if (!message || !state.activeSessionId) return;
+    const content = await promptDialog({
+      title: "编辑消息",
+      message: "修改这条提问后，后续回答不会被自动重算。",
+      value: message.content || "",
+      placeholder: "输入新的问题内容",
+      confirmText: "保存",
+    });
+    if (!content) return;
+    try {
+      await api(`/api/agent/sessions/${encodeURIComponent(state.activeSessionId)}/messages/${encodeURIComponent(messageId)}`, { method: "PATCH", body: { content } });
+      message.content = content;
+      renderChat();
+      toast("消息已更新", "ok", 1600);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
   async function clearChat() {
     if (!state.activeSessionId) return;
     if (!state.messages.length) return;
@@ -734,6 +1406,50 @@
       toast("当前对话已清空", "ok", 1800);
     } catch (error) {
       toast(error.message, "error");
+    }
+  }
+
+  async function compactChat() {
+    if (!state.activeSessionId) {
+      toast("当前还没有会话", "warn");
+      return;
+    }
+    const button = $("#compact-chat-btn");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "压缩中…";
+    }
+    try {
+      const data = await api(`/api/agent/sessions/${encodeURIComponent(state.activeSessionId)}/compact`, {
+        method: "POST",
+        body: { model_row_id: state.modelId },
+      });
+      const compaction = data.compaction || {};
+      state.sessionUsage = data.session || state.sessionUsage;
+      state.contextInfo = {
+        ...(state.contextInfo || {}),
+        compacted: Boolean(compaction.ok),
+        compaction,
+        context_tokens: compaction.ok ? compaction.after_tokens : state.contextInfo?.context_tokens,
+        summarized_messages: compaction.summarized_messages || 0,
+      };
+      await loadMessages(state.activeSessionId);
+      await loadSessions();
+      renderConversationList();
+      renderChat();
+      renderContextRail();
+      if (compaction.ok) {
+        toast(`压缩完成，节省 ${formatTokens(compaction.saved_tokens || 0)} tokens`, "ok");
+      } else {
+        toast(compaction.reason || "当前没有需要压缩的内容", "warn");
+      }
+    } catch (error) {
+      toast(error.message, "error", 5000);
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "压缩上下文";
+      }
     }
   }
 
@@ -803,16 +1519,34 @@
     );
     root.innerHTML = items.length
       ? items.map((session) => `
-          <button class="conv-item ${session.id === state.activeSessionId ? "active" : ""}" data-action="session-open" data-id="${escapeHtml(session.id)}">
-            <span class="conv-title">${escapeHtml(session.title || "新对话")}</span>
-            <span class="conv-meta">${formatRelative(session.updated_at)} · ${session.message_count || 0} 条</span>
-            <span class="conv-del" data-action="session-delete" data-id="${escapeHtml(session.id)}" title="删除会话">×</span>
-          </button>`).join("")
+          <div class="conv-item ${session.id === state.activeSessionId ? "active" : ""}">
+            <button class="conv-open" type="button" data-action="session-open" data-id="${escapeHtml(session.id)}">
+              <span class="conv-title">${escapeHtml(session.title || "新对话")}</span>
+              <span class="conv-meta">${formatRelative(session.updated_at)} · ${session.message_count || 0} 条</span>
+            </button>
+            <span class="conv-actions">
+              <button class="conv-action" type="button" data-action="session-fork" data-id="${escapeHtml(session.id)}" title="分叉会话">${icon("refresh", 11)}</button>
+              <button class="conv-action" type="button" data-action="session-rename" data-id="${escapeHtml(session.id)}" title="重命名">${icon("edit", 11)}</button>
+              <button class="conv-action danger" type="button" data-action="session-delete" data-id="${escapeHtml(session.id)}" title="删除会话">${icon("trash", 11)}</button>
+            </span>
+          </div>`).join("")
       : '<div class="conv-empty">这个助手还没有对话<br>直接提问就会开始</div>';
   }
 
-  function renderChat() {
+  function isNearBottom() {
+    const scroll = $("#chat-scroll");
+    if (!scroll) return true;
+    return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 180;
+  }
+
+  function scrollToBottom() {
+    const scroll = $("#chat-scroll");
+    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+  }
+
+  function renderChat({ forceScroll = false } = {}) {
     const hasMessages = state.messages.length > 0;
+    const wasNearBottom = isNearBottom();
     $("#chat-welcome").classList.toggle("hidden", hasMessages);
     const session = state.sessions.find((item) => item.id === state.activeSessionId);
     $("#chat-heading").textContent = session?.title || "新对话";
@@ -823,83 +1557,214 @@
     $("#clear-chat-btn").disabled = !hasMessages;
     const messagesRoot = $("#messages");
     messagesRoot.innerHTML = state.messages.map(renderMessage).join("");
-    if (state.sending) {
+    hydrateMermaid(messagesRoot);
+    if (state.sending && !state.streamingMessage) {
       messagesRoot.insertAdjacentHTML("beforeend", `
         <div class="message assistant">
           <div class="msg-avatar">AI</div>
           <div class="msg-body">
             <div class="msg-meta"><strong>${escapeHtml(assistant?.name || "Agent")}</strong><span>正在处理</span></div>
-            <div class="typing"><span></span><span></span><span></span></div>
+            <div class="process-line running">
+              <span class="process-spinner"></span>
+              <span class="process-label">正在思考…</span>
+            </div>
           </div>
         </div>`);
     }
+    state.streamEl = state.streamingMessage
+      ? messagesRoot.lastElementChild
+      : null;
     requestAnimationFrame(() => {
-      const scroll = $("#chat-scroll");
-      if (scroll) scroll.scrollTop = scroll.scrollHeight;
+      if (forceScroll || wasNearBottom) scrollToBottom();
     });
   }
 
   function renderMessage(message) {
     const meta = message.metadata || {};
+    const real = Number.isInteger(message.id);
     if (message.role === "user") {
       const attachments = Array.isArray(message.attachments) ? message.attachments : [];
       return `
-        <div class="message user">
+        <div class="message user" data-message-id="${escapeHtml(message.id)}">
           <div class="msg-avatar">${escapeHtml(initials(state.user))}</div>
           <div class="msg-body">
             <div class="msg-meta"><span>${formatRelative(message.created_at)}</span><strong>你</strong></div>
             <div class="msg-content">${renderMarkdown(message.content)}</div>
             ${attachments.length ? `<div class="msg-attachments">${attachments.map((item) => `<span class="card-tag">${escapeHtml(item.name)}</span>`).join("")}</div>` : ""}
+            ${real ? `<div class="msg-actions"><button class="msg-action" type="button" data-action="message-edit" data-id="${message.id}">编辑</button><button class="msg-action danger" type="button" data-action="message-delete" data-id="${message.id}">删除</button></div>` : ""}
           </div>
         </div>`;
     }
     const modelName = meta.model?.name || selectedModel()?.name || "Agent";
     const runs = Array.isArray(message.tool_runs) ? message.tool_runs : [];
+    const streaming = state.streamingMessage && message.id === state.streamingMessage.id;
     const approval = meta.approval && !meta.approval_status ? meta.approval : null;
+    const contentHtml = streaming
+      ? `<div class="msg-content streaming-text" data-stream-markdown>${renderMarkdown(state.liveText, { streaming: true })}</div><span class="stream-cursor"></span>`
+      : (message.content ? `<div class="msg-content ${meta.status === "error" ? "is-error" : ""}">${renderMarkdown(message.content)}</div>` : "");
     return `
-      <div class="message assistant">
+      <div class="message assistant ${streaming ? "streaming" : ""}" data-message-id="${escapeHtml(message.id)}">
         <div class="msg-avatar">${escapeHtml((meta.assistant?.icon) || "AI")}</div>
         <div class="msg-body">
           <div class="msg-meta">
             <strong>${escapeHtml(meta.assistant?.name || currentAssistant()?.name || "Agent")}</strong>
             <span>${escapeHtml(modelName)}</span>
             ${meta.status === "error" ? '<span class="badge badge-red">失败</span>' : ""}
+            ${streaming ? '<span class="badge badge-blue">流式输出</span>' : ""}
           </div>
-          ${message.content ? `<div class="msg-content">${renderMarkdown(message.content)}</div>` : ""}
-          ${runs.length ? `<div class="tool-run-list">${runs.map(renderToolRun).join("")}</div>` : ""}
-          ${approval ? renderApproval(approval) : ""}
+          <div data-live-process>${renderProcess(message, { streaming })}</div>
+          <div data-live-content>${contentHtml}</div>
+          <div data-live-approval>${approval ? renderApproval(approval) : ""}</div>
           ${meta.context?.compressed ? `<div class="msg-context-note">上下文已压缩：${meta.context.summarized_messages} 条历史已摘要</div>` : ""}
+          <div class="msg-foot">
+            ${real ? `<span class="msg-actions"><button class="msg-action" type="button" data-action="message-fork" data-id="${message.id}">分叉自此</button><button class="msg-action danger" type="button" data-action="message-delete" data-id="${message.id}">删除</button></span>` : ""}
+          </div>
         </div>
       </div>`;
   }
 
-  function renderToolRun(run) {
+  function formatSeconds(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0) return "";
+    if (seconds < 10) return `${seconds.toFixed(1)}s`;
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  }
+
+  function runStatusLabel(status) {
+    return {
+      ok: "完成",
+      error: "失败",
+      pending: "待审批",
+      rejected: "已取消",
+      running: "执行中",
+    }[status] || status || "完成";
+  }
+
+  function renderProcess(message, { streaming = false } = {}) {
+    const meta = message.metadata || {};
+    const runs = streaming ? state.liveToolRuns : (Array.isArray(message.tool_runs) ? message.tool_runs : []);
+    const storedReasoning = String(message.reasoning || "").trim();
+    const hadReasoning = Boolean(meta.reasoning?.had_reasoning);
+    const storeReasoning = Boolean(meta.reasoning?.stored);
+    const thinkingText = streaming ? state.liveThinking : storedReasoning;
+    const hasThinking = Boolean(thinkingText) || hadReasoning || (streaming && Boolean(state.liveThinking));
+    const hasContent = streaming ? Boolean(state.liveText) : Boolean(message.content);
+    const pending = runs.filter((run) => run.status === "pending").length;
+    const running = runs.filter((run) => run.status === "running").length;
+    const errors = runs.filter((run) => ["error", "rejected"].includes(run.status)).length;
+    const liveError = streaming && state.liveError;
+    const failed = Boolean(liveError) || meta.status === "error" || errors > 0;
+    const busy = streaming && !state.liveCompleted && !liveError;
+    const stepCount = Math.max(1, runs.length + (hasThinking ? 1 : 0) + (hasContent || !busy ? 1 : 0));
+    let stateClass = "done";
+    let label = `已完成 · ${stepCount} 个步骤`;
+    if (pending) {
+      stateClass = "pending";
+      label = `等待你确认 · ${pending} 个操作`;
+    } else if (failed) {
+      stateClass = "error";
+      label = liveError ? "执行中断" : `执行结束 · ${errors || 1} 个步骤未完成`;
+    } else if (busy) {
+      stateClass = "running";
+      if (running) {
+        const activeRun = runs.find((run) => run.status === "running");
+        label = `正在调用 ${activeRun?.tool || "工具"}…`;
+      } else if (hasThinking) {
+        label = "正在思考…";
+      } else if (hasContent) {
+        label = "正在生成回答…";
+      } else {
+        label = "正在准备…";
+      }
+    }
+    let seconds = meta.run?.elapsed_seconds;
+    if (streaming) {
+      seconds = state.liveElapsed ?? (state.liveStartedAt ? (Date.now() - state.liveStartedAt) / 1000 : 0);
+    }
+    const secondsLabel = busy || seconds ? formatSeconds(seconds) : "";
+    const usage = meta.usage || {};
+    const usageLabel = usage.total_tokens
+      ? `${formatTokens(usage.prompt_tokens)} in · ${formatTokens(usage.completion_tokens)} out · ${formatCost(usage.cost_usd)}${usage.latency_ms ? ` · ${usage.latency_ms}ms` : ""}`
+      : "";
+    const stateIcon = busy
+      ? '<span class="process-spinner"></span>'
+      : failed || pending
+        ? `<span class="process-alert">${pending ? "!" : "×"}</span>`
+        : `<span class="process-check">${icon("check", 11)}</span>`;
+    const toolSteps = runs.map((run, index) => renderProcessToolStep(run, index)).join("");
+    const thinkingSummary = streaming
+      ? (state.liveThinking ? "正在推理…" : "等待思考…")
+      : (storedReasoning
+        ? (storeReasoning ? "思考已保存 · 点开查看" : "思考已完成 · 仅本次页面可见")
+        : (hadReasoning && !storeReasoning
+          ? "思考原文未保存（管理员可在运行设置开启）"
+          : "思考原文已保存"));
+    const thinkingFallback = hadReasoning && !storeReasoning
+      ? "思考原文未保存（管理员可在运行设置开启）"
+      : "模型思考内容未保存。";
+    const thinkingStep = hasThinking ? `
+      <details class="process-step think-step">
+        <summary>
+          <span class="process-step-icon think">${icon("brain", 12)}</span>
+          <span class="process-step-name">分析问题</span>
+          <span class="process-step-summary">${thinkingSummary}</span>
+          <span class="process-step-status">${busy && !runs.length ? "进行中" : "完成"}</span>
+          <span class="process-step-chevron">›</span>
+        </summary>
+        <div class="process-raw"><pre class="thinking-text">${escapeHtml(thinkingText || thinkingFallback)}</pre></div>
+      </details>` : "";
+    const answerStep = hasContent ? `
+      <div class="process-step static-step">
+        <span class="process-step-icon answer">${icon("spark", 12)}</span>
+        <span class="process-step-name">生成回答</span>
+        <span class="process-step-summary">${busy ? "生成中…" : "已输出"}</span>
+        <span class="process-step-status">${busy ? "进行中" : "完成"}</span>
+      </div>` : "";
+    const empty = !thinkingStep && !toolSteps && !answerStep
+      ? '<div class="process-empty">本次没有调用工具，模型直接给出了回答。</div>'
+      : "";
+    return `
+      <details class="process-line ${stateClass}">
+        <summary>
+          <span class="process-state-icon">${stateIcon}</span>
+          <span class="process-label">${escapeHtml(label)}</span>
+          ${secondsLabel ? `<span class="process-time" data-process-time>${escapeHtml(secondsLabel)}</span>` : ""}
+          ${!busy && usageLabel ? `<span class="process-usage">${escapeHtml(usageLabel)}</span>` : ""}
+          <span class="process-chevron">›</span>
+        </summary>
+        <div class="process-body">
+          ${thinkingStep}${toolSteps}${answerStep}${empty}
+          ${liveError ? `<div class="process-error">${escapeHtml(liveError)}</div>` : ""}
+        </div>
+      </details>`;
+  }
+
+  function renderProcessToolStep(run, index = 0) {
     const risk = run.risk || "write";
     const iconName = risk === "read" ? "eye" : risk === "delete" ? "trash" : "edit";
     const status = run.status || "ok";
-    const statusLabel = { ok: "完成", error: "失败", pending: "等待审批", rejected: "已取消" }[status] || status;
     const resultText = run.result !== null && run.result !== undefined
       ? prettyJson(run.result, run.result_text || "")
       : (run.result_text || "");
+    const callId = run.call_id || `${run.tool || "tool"}_${index}`;
+    const resultView = status === "pending" ? "等待你批准后执行" : (resultText || "无返回内容");
     return `
-      <div class="tool-run">
-        <div class="tool-run-head">
-          <span class="tool-kind ${escapeHtml(risk)}">${icon(iconName, 13)}</span>
-          <span class="tool-run-name">${escapeHtml(run.tool)}</span>
-          <span class="risk-badge ${escapeHtml(risk)}">${escapeHtml(RISK_LABELS[risk] || risk)}</span>
-          <span class="tool-run-summary">${escapeHtml(run.summary || "")}</span>
-          <span class="run-status ${escapeHtml(status)}">${statusLabel}</span>
+      <details class="process-step tool-step ${escapeHtml(status)}" data-call-id="${escapeHtml(callId)}">
+        <summary>
+          <span class="process-step-icon ${escapeHtml(risk)}">${icon(iconName, 12)}</span>
+          <span class="process-step-name">${escapeHtml(run.tool || "tool")}</span>
+          <span class="process-step-summary">${escapeHtml(run.summary || "")}</span>
+          <span class="process-step-status ${escapeHtml(status)}">${escapeHtml(runStatusLabel(status))}</span>
+          <span class="process-step-chevron">›</span>
+        </summary>
+        <div class="process-raw">
+          <div class="raw-caption">调用参数</div>
+          <pre>${escapeHtml(prettyJson(run.arguments || {}))}</pre>
+          <div class="raw-caption">原始结果</div>
+          <pre>${escapeHtml(resultView)}</pre>
         </div>
-        <details class="run-details">
-          <summary>查看调用参数与结果</summary>
-          <div class="run-details-body">
-            <div class="run-result-label">参数</div>
-            <pre class="run-args">${escapeHtml(prettyJson(run.arguments || {}))}</pre>
-            <div class="run-result-label">结果</div>
-            <pre class="run-result">${escapeHtml(resultText || (status === "pending" ? "等待用户审批后执行" : "无返回内容"))}</pre>
-          </div>
-        </details>
-      </div>`;
+      </details>`;
   }
 
   function renderApproval(approval) {
@@ -919,6 +1784,674 @@
           <button class="danger-btn" data-action="approval-approve" data-id="${escapeHtml(approval.id)}" ${loading ? "disabled" : ""}>${loading ? "执行中…" : "批准执行"}</button>
         </div>
       </div>`;
+  }
+
+  /* ---------- HTML artifact preview ---------- */
+  function sandboxDocument(html) {
+    const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob: https:; style-src 'unsafe-inline' https:; font-src data: https:; script-src 'unsafe-inline' https:; connect-src 'none'; form-action 'none'; base-uri 'none'">`;
+    const source = String(html || "");
+    if (/<head[^>]*>/i.test(source)) {
+      return source.replace(/<head([^>]*)>/i, `<head$1>${csp}`);
+    }
+    if (/<html[^>]*>/i.test(source)) {
+      return source.replace(/<html([^>]*)>/i, `<html$1><head>${csp}</head>`);
+    }
+    return `<!doctype html><html><head>${csp}<meta charset="utf-8"></head><body>${source}</body></html>`;
+  }
+
+  function openArtifactModal(id) {
+    const artifact = htmlArtifacts.get(id);
+    if (!artifact) {
+      toast("HTML 产物已失效，请重新生成", "warn");
+      return;
+    }
+    activeArtifact = artifact;
+    artifactPublishStatus = null;
+    const modal = $("#artifact-modal");
+    $("#artifact-title").textContent = artifact.title;
+    const size = new Blob([artifact.html]).size;
+    $("#artifact-meta").textContent = `隔离沙箱 · ${Math.max(1, Math.round(size / 1024))} KB · 不可访问系统登录态`;
+    $("#artifact-hint").textContent = "模型生成的 HTML 在独立沙箱中运行，无法读取业务系统登录态。";
+    $("#artifact-frame").srcdoc = sandboxDocument(artifact.html);
+    $("#artifact-publish-panel").classList.add("hidden");
+    $("#artifact-publish-result").classList.add("hidden");
+    $("#artifact-publish-result").innerHTML = "";
+    $("#artifact-publish-status").className = "publish-status";
+    $("#artifact-publish-status").textContent = "正在检查 PagePilot 连接器…";
+    $("#artifact-publish-submit").disabled = true;
+    $("#artifact-publish-form").title.value = artifact.title;
+    $("#artifact-publish-form").description.value = "";
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    document.body.classList.add("artifact-open");
+    loadArtifactPublishStatus();
+  }
+
+  function closeArtifactModal() {
+    const modal = $("#artifact-modal");
+    if (!modal || modal.classList.contains("hidden")) return;
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("artifact-open");
+    $("#artifact-frame").srcdoc = "";
+    $("#artifact-publish-panel").classList.add("hidden");
+    activeArtifact = null;
+  }
+
+  async function loadArtifactPublishStatus() {
+    const button = $("#artifact-publish-btn");
+    const status = $("#artifact-publish-status");
+    try {
+      const data = await api("/api/agent/pagepilot/status");
+      artifactPublishStatus = data;
+      button.disabled = !data.publish_allowed;
+      $("#artifact-publish-submit").disabled = !data.publish_allowed;
+      button.title = data.publish_allowed
+        ? "通过业务后端发布当前 HTML 到 PagePilot"
+        : "管理员尚未启用 PagePilot 发布连接器";
+      if (!data.publish_allowed) {
+        status.className = "publish-status warn";
+        status.textContent = data.configured
+          ? "PagePilot 已配置但连接器未启用，请联系管理员在「AI 配置 → 工具」中开启。"
+          : "PagePilot 尚未配置。管理员可在「AI 配置 → 工具 → PagePilot 连接器」中接入。";
+        $("#artifact-hint").textContent = "PagePilot 尚未接入。你仍可保存图片；管理员配置后即可一键发布。";
+      } else {
+        status.className = "publish-status ok";
+        status.textContent = `已连接 ${data.base_url} · Token ${data.token_masked}`;
+        $("#artifact-hint").textContent = "模型生成的 HTML 在独立沙箱中运行，无法读取业务系统登录态。";
+      }
+    } catch (error) {
+      artifactPublishStatus = { publish_allowed: false };
+      button.disabled = true;
+      status.className = "publish-status fail";
+      status.textContent = `无法读取 PagePilot 状态：${error.message}`;
+    }
+  }
+
+  async function openArtifactPublishPanel() {
+    if (!activeArtifact) return;
+    const artifact = activeArtifact;
+    if (!artifactPublishStatus) await loadArtifactPublishStatus();
+    if (activeArtifact !== artifact) return;
+    $("#artifact-publish-panel").classList.remove("hidden");
+    $("#artifact-publish-result").classList.add("hidden");
+    $("#artifact-publish-result").innerHTML = "";
+    const form = $("#artifact-publish-form");
+    form.publication_id.innerHTML = '<option value="">新建页面</option>';
+    form.title.value = artifact.title;
+    form.description.value = artifact.publication?.description || artifactPublishStatus?.default_description || "";
+    form.access_password.value = "";
+    form.visibility.value = artifact.publication?.visibility || artifactPublishStatus?.default_visibility || "unlisted";
+    form.publication_id.disabled = true;
+    $("#artifact-publish-submit").disabled = true;
+    try {
+      const data = await api("/api/agent/pagepilot/publications?limit=100");
+      if (activeArtifact !== artifact) return;
+      const items = [...(data.items || [])];
+      if (artifact.publication && !items.some((item) => item.id === artifact.publication.id)) items.unshift(artifact.publication);
+      form.publication_id.innerHTML = '<option value="">新建页面</option>' + items.filter((item) => item.code).map((item) => `<option value="${item.id}">${escapeHtml(item.title)} · v${item.version || 1}</option>`).join("");
+      form.publication_id.value = artifact.publication?.id || "";
+    } catch (error) {
+      if (artifact.publication) {
+        $("#artifact-publish-status").className = "publish-status fail";
+        $("#artifact-publish-status").textContent = `无法读取更新目标：${error.message}。请关闭后重试。`;
+        return;
+      }
+      toast(`暂时无法读取更新目标，仍可新建：${error.message}`, "warn");
+    }
+    form.publication_id.disabled = false;
+    $("#artifact-publish-submit").disabled = !artifactPublishStatus?.publish_allowed;
+    window.setTimeout(() => form.title.focus(), 40);
+  }
+
+  async function publishArtifact() {
+    if (!activeArtifact) return;
+    const artifact = activeArtifact;
+    const form = $("#artifact-publish-form");
+    const submit = $("#artifact-publish-submit");
+    const result = $("#artifact-publish-result");
+    const status = $("#artifact-publish-status");
+    submit.disabled = true;
+    const original = submit.textContent;
+    submit.textContent = "发布中…";
+    status.className = "publish-status";
+    status.textContent = "正在上传到 PagePilot，请稍候…";
+    try {
+      const data = await api("/api/agent/pagepilot/publish", {
+        method: "POST",
+        body: {
+          html: artifact.html,
+          title: form.title.value.trim() || artifact.title,
+          description: form.description.value.trim(),
+          publication_id: form.publication_id.value ? Number(form.publication_id.value) : null,
+          session_id: form.publication_id.value ? null : state.activeSessionId,
+          access_password: form.access_password.value,
+          visibility: form.visibility.value,
+        },
+      });
+      artifact.publication = { ...data, id: data.publication_id };
+      if (activeArtifact !== artifact) return;
+      const complete = data.ok !== false && data.status !== "partial";
+      status.className = `publish-status ${complete ? "ok" : "warn"}`;
+      status.textContent = complete
+        ? `${data.updated ? "更新" : "发布"}成功 · 版本 ${data.version ?? 1} · ${Math.max(1, Math.round(Number(data.size || 0) / 1024))} KB${data.password_set ? " · 已设置访问密码" : " · 无密码（持链接可访问）"}`
+        : (data.warning || "内容已发布，部分设置未生效，请核对后更新，不要重复新建。");
+      const published = { ...data, id: data.publication_id };
+      artifact.publication = published;
+      if (data.publication_id) {
+        if (!Array.from(form.publication_id.options).some((option) => option.value === String(data.publication_id))) {
+          form.publication_id.add(new Option(data.title || activeArtifact.title, String(data.publication_id)));
+        }
+        form.publication_id.value = String(data.publication_id);
+      }
+      form.access_password.value = "";
+      const url = safeWebUrl(data.url || data.detail_url);
+      result.classList.remove("hidden");
+      result.innerHTML = `
+        <span>页面地址</span>
+        ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a><button type="button" class="text-btn" data-action="artifact-copy-url" data-url="${escapeHtml(url)}">复制链接</button>` : '<span>未返回链接，请核对远端发布结果</span>'}
+        <button type="button" class="text-btn" data-action="publications-open">查看我的发布记录</button>`;
+    } catch (error) {
+      if (activeArtifact !== artifact) return;
+      status.className = "publish-status fail";
+      status.textContent = `发布失败：${error.message}`;
+    } finally {
+      if (activeArtifact === artifact) {
+        submit.textContent = original;
+        submit.disabled = !artifactPublishStatus?.publish_allowed;
+      }
+    }
+  }
+
+  function safeWebUrl(value) {
+    try {
+      const url = new URL(String(value || ""));
+      return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function publicationStatus(item) {
+    if (item.status === "failed" && item.publish_count > 0) return "操作中断或失败 · 链接保留";
+    return ({ publishing: "发布中", published: "已发布", partial: "部分完成", failed: "发布失败" })[item.status] || item.status;
+  }
+
+  function publicationMeta(item) {
+    return `<span class="publication-state ${escapeHtml(item.status)}">${escapeHtml(publicationStatus(item))}</span><span>${item.visibility === "public" ? "创作广场可见" : "仅链接可见"}</span><span>${item.password_set ? "密码保护" : "无密码"}</span><span>${Math.max(1, Math.round(Number(item.size || 0) / 1024))} KB</span>`;
+  }
+
+  function openPublishedPages() {
+    closeArtifactModal();
+    publicationsView = { q: "", sessionOnly: false, offset: 0, total: 0, items: [], detail: null, version: null, view: "preview", request: 0 };
+    openModal(`
+      <header class="modal-head">
+        <div><h3 id="publications-heading">我的已发布</h3><p>按当前业务账号归属保存，不读取共享 PagePilot 下其他用户的页面。</p></div>
+        <button type="button" class="icon-btn" data-action="modal-close" aria-label="关闭已发布">${icon("x")}</button>
+      </header>
+      <div class="modal-body publication-body">
+        <form id="publications-search" class="publication-toolbar">
+          <label class="publication-search">${icon("search")}<input name="q" type="search" maxlength="200" aria-label="搜索页面标题或说明" placeholder="搜索标题、发布说明…"></label>
+          <label class="publication-session-filter"><input name="session_only" type="checkbox" ${state.activeSessionId ? "" : "disabled"}> 仅当前会话</label>
+          <button type="submit" class="ghost-btn">查询</button>
+        </form>
+        <div id="publications-content" aria-live="polite"></div>
+      </div>
+      <footer class="publication-footer"><span id="publications-count">正在读取本地记录…</span><div><button class="ghost-btn" type="button" data-action="publications-prev" disabled>上一页</button><button class="ghost-btn" type="button" data-action="publications-next" disabled>下一页</button></div></footer>`, { wide: true });
+    $("#modal-root .modal").classList.add("publications-dialog");
+    $("#modal-root .modal").setAttribute("aria-labelledby", "publications-heading");
+    $("#publications-search").addEventListener("submit", (event) => {
+      event.preventDefault();
+      publicationsView.q = event.currentTarget.q.value.trim();
+      publicationsView.sessionOnly = event.currentTarget.session_only.checked;
+      publicationsView.offset = 0;
+      loadPublicationsPage();
+    });
+    $("#publications-search").session_only.addEventListener("change", () => $("#publications-search").requestSubmit());
+    loadPublicationsPage();
+  }
+
+  async function loadPublicationsPage() {
+    const view = publicationsView;
+    const root = $("#publications-content");
+    if (!view || !root) return;
+    const request = ++view.request;
+    root.innerHTML = '<div class="publication-empty" role="status">正在读取你的发布记录…</div>';
+    $("#publications-search").classList.remove("hidden");
+    $(".publication-footer > div").classList.remove("hidden");
+    const params = new URLSearchParams({ q: view.q, limit: "12", offset: String(view.offset) });
+    if (view.sessionOnly && state.activeSessionId) params.set("session_id", state.activeSessionId);
+    try {
+      const data = await api(`/api/agent/pagepilot/publications?${params}`);
+      if (view !== publicationsView || request !== view.request || !root.isConnected) return;
+      view.items = data.items || [];
+      view.total = data.total || 0;
+      view.detail = null;
+      root.innerHTML = view.items.length ? `<div class="publication-list">${view.items.map((item) => {
+        const url = safeWebUrl(item.url || item.detail_url);
+        return `<article class="publication-card">
+          <div class="publication-card-main"><button type="button" class="publication-title" data-action="publication-detail" data-id="${item.id}">${icon("book", 17)}<strong>${escapeHtml(item.title)}</strong></button><p>${escapeHtml(item.description || "未填写发布说明")}</p><div class="publication-meta">${publicationMeta(item)}<span>${escapeHtml(formatTime(item.updated_at))}</span></div>${item.last_error ? `<div class="publication-warning">${escapeHtml(item.last_error)}</div>` : ""}${url ? `<a class="publication-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>` : ""}</div>
+          <div class="publication-card-actions"><button type="button" class="ghost-btn" data-action="publication-detail" data-id="${item.id}">查看 / 版本</button>${url ? `<button type="button" class="text-btn" data-action="artifact-copy-url" data-url="${escapeHtml(url)}">复制链接</button>` : ""}</div>
+        </article>`;
+      }).join("")}</div>` : '<div class="publication-empty">还没有符合条件的发布记录。<small>从聊天中的 HTML 预览发布后，内容和链接会自动保存到这里。历史远端页面不会被自动导入。</small></div>';
+      $("#publications-count").textContent = `共 ${view.total} 个页面 · ${state.user?.display_name || state.user?.username || "当前账号"}`;
+      $("[data-action='publications-prev']").disabled = view.offset <= 0;
+      $("[data-action='publications-next']").disabled = view.offset + 12 >= view.total;
+    } catch (error) {
+      if (view !== publicationsView || !root.isConnected) return;
+      root.innerHTML = `<div class="publication-empty"><p class="publication-warning">${escapeHtml(error.message)}</p><button type="button" class="ghost-btn" data-action="publications-reload">重新读取</button></div>`;
+      $("#publications-count").textContent = "读取失败，不影响已发布的远端页面";
+    }
+  }
+
+  async function openPublicationDetail(id) {
+    const view = publicationsView;
+    const root = $("#publications-content");
+    if (!view || !root) return;
+    const request = ++view.request;
+    root.innerHTML = '<div class="publication-empty" role="status">正在读取已保存的内容和版本…</div>';
+    try {
+      const data = await api(`/api/agent/pagepilot/publications/${Number(id)}`);
+      if (view !== publicationsView || request !== view.request || !root.isConnected) return;
+      view.detail = data.publication;
+      view.version = null;
+      view.view = "preview";
+      renderPublicationDetail();
+    } catch (error) {
+      if (view !== publicationsView || request !== view.request || !root.isConnected) return;
+      root.innerHTML = `<div class="publication-empty"><p class="publication-warning">${escapeHtml(error.message)}</p><button type="button" class="ghost-btn" data-action="publications-reload">返回列表</button></div>`;
+    }
+  }
+
+  function renderPublicationDetail() {
+    const view = publicationsView;
+    const item = view?.detail;
+    const root = $("#publications-content");
+    if (!item || !root) return;
+    const shown = view.version || item;
+    const url = safeWebUrl(item.url || item.detail_url);
+    $("#publications-search").classList.add("hidden");
+    $(".publication-footer > div").classList.add("hidden");
+    $("[data-action='publications-prev']").disabled = true;
+    $("[data-action='publications-next']").disabled = true;
+    $("#publications-count").textContent = `已保存 ${item.versions?.length || 0} 次发布记录 · 内容不随会话清理删除`;
+    root.innerHTML = `<div class="publication-detail">
+      <div class="publication-detail-top"><button class="text-btn" type="button" data-action="publications-reload">‹ 返回列表</button><span>${escapeHtml(item.code || "尚未成功发布")}</span></div>
+      <h3>${escapeHtml(shown.title || item.title)}</h3><p class="publication-description">${escapeHtml(shown.description || "未填写发布说明")}</p>
+      <div class="publication-meta">${publicationMeta(shown)}<span>${escapeHtml(formatTime(shown.created_at || item.updated_at))}</span></div>
+      ${(shown.error || item.last_error) ? `<div class="publication-warning">${escapeHtml(shown.error || item.last_error)}</div>` : ""}
+      ${url ? `<a class="publication-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>` : ""}
+      <div class="publication-detail-controls"><div class="publication-tabs"><button class="ghost-btn ${view.view === "preview" ? "active" : ""}" type="button" data-action="publication-preview">预览</button><button class="ghost-btn ${view.view === "code" ? "active" : ""}" type="button" data-action="publication-code">代码</button></div>
+        <label class="publication-version-label">版本<select id="publication-version" aria-label="选择已保存版本"><option value="">当前内容</option>${(item.versions || []).map((version) => `<option value="${version.id}" ${view.version?.id === version.id ? "selected" : ""}>${version.version ? `v${version.version}` : "尝试记录"} · ${escapeHtml(publicationStatus(version))} · ${escapeHtml(formatTime(version.created_at))}</option>`).join("")}</select></label>
+      </div>
+      <div id="publication-preview-content" class="publication-preview-content">${view.view === "code" ? `<pre class="publication-code"><code>${escapeHtml(shown.html || "")}</code></pre>` : '<iframe class="publication-preview" sandbox="allow-scripts" referrerpolicy="no-referrer" title="已保存页面的隔离预览"></iframe>'}</div>
+      <div class="publication-detail-actions"><button class="ghost-btn" type="button" data-action="publication-download">下载 HTML</button>${item.session_id ? '<button class="ghost-btn" type="button" data-action="publication-session">来源会话</button>' : ""}${item.code ? '<button class="primary-btn" type="button" data-action="publication-update">更新此页面</button>' : '<button class="primary-btn" type="button" data-action="publication-update">重新发布为新页面</button>'}</div>
+      <p class="publication-isolation-note">内容来自本系统的本地快照；外部预览与更新使用共享服务，但记录与操作归属始终绑定你的业务账号。</p>
+    </div>`;
+    const frame = $(".publication-preview", root);
+    if (frame) frame.srcdoc = sandboxDocument(shown.html || "");
+    $("#publication-version").addEventListener("change", async (event) => {
+      const versionId = Number(event.target.value);
+      if (!versionId) { view.version = null; renderPublicationDetail(); return; }
+      event.target.disabled = true;
+      try {
+        const data = await api(`/api/agent/pagepilot/publications/${item.id}/versions/${versionId}`);
+        if (publicationsView !== view || view.detail !== item) return;
+        view.version = data.version;
+        renderPublicationDetail();
+      } catch (error) {
+        event.target.disabled = false;
+        event.target.value = view.version?.id || "";
+        toast(`读取版本失败：${error.message}`, "error");
+      }
+    });
+  }
+
+  function downloadPublication() {
+    const item = publicationsView?.version || publicationsView?.detail;
+    if (!item?.html) return;
+    const url = URL.createObjectURL(new Blob([item.html], { type: "text/html;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${String(item.title || "page").replace(/[\\/:*?"<>|]/g, "-")}.html`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function updatePublicationFromLibrary() {
+    const item = publicationsView?.detail;
+    const shown = publicationsView?.version || item;
+    if (!item || !shown?.html) return;
+    const id = `publication-${item.id}-${shown.id}`;
+    htmlArtifacts.set(id, { html: shown.html, title: shown.title || item.title, publication: item.code ? item : null });
+    closeModal();
+    openArtifactModal(id);
+    await openArtifactPublishPanel();
+  }
+
+  async function saveArtifactImage(target) {
+    if (!activeArtifact || target.disabled) return;
+    const original = target.textContent;
+    target.disabled = true;
+    target.textContent = "正在截图…";
+    try {
+      const response = await fetch("/api/agent/artifacts/screenshot", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ html: activeArtifact.html }),
+      });
+      if (!response.ok) {
+        let detail = `截图失败（${response.status}）`;
+        try {
+          const data = await response.json();
+          detail = data.detail || detail;
+        } catch {
+          // keep the status-based message
+        }
+        throw new Error(detail);
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = new Intl.DateTimeFormat("sv-SE").format(new Date());
+      link.href = objectUrl;
+      link.download = `${activeArtifact.title.replace(/[\\/:*?"<>|]/g, "-")}-${stamp}.png`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1200);
+      toast("PNG 已生成并开始下载");
+    } catch (error) {
+      toast(`截图失败：${error.message}`, "error", 5000);
+    } finally {
+      target.disabled = false;
+      target.textContent = original;
+    }
+  }
+
+  function scheduleLiveRender() {
+    if (state.liveUpdateTimer) return;
+    state.liveUpdateTimer = window.setTimeout(() => {
+      state.liveUpdateTimer = null;
+      applyLiveUI();
+    }, 45);
+  }
+
+  function startProcessTicker() {
+    if (state.processTimer) window.clearInterval(state.processTimer);
+    state.processTimer = window.setInterval(() => {
+      if (!state.sending || state.liveCompleted) return;
+      applyLiveUI();
+    }, 500);
+  }
+
+  function stopProcessTicker() {
+    if (state.processTimer) window.clearInterval(state.processTimer);
+    state.processTimer = null;
+  }
+
+  function applyLiveUI() {
+    const message = state.streamingMessage;
+    const el = state.streamEl || (message
+      ? $(`[data-message-id="${CSS.escape(String(message.id))}"]`)
+      : null);
+    if (!message || !el) return;
+    const stick = isNearBottom();
+
+    const markdownNode = el.querySelector("[data-stream-markdown]");
+    if (markdownNode && state.liveText !== state.liveRenderedText) {
+      state.liveRenderedText = state.liveText;
+      const html = renderMarkdown(state.liveText, { streaming: true });
+      if (html !== state.liveRenderedHtml) {
+        state.liveRenderedHtml = html;
+        markdownNode.innerHTML = html;
+        hydrateMermaid(markdownNode);
+      }
+    }
+
+    const processRoot = el.querySelector("[data-live-process]");
+    if (processRoot) {
+      const signature = JSON.stringify(
+        [
+          state.liveToolRuns.map((run) => [run.call_id, run.tool, run.status, run.summary]),
+          Boolean(state.liveThinking),
+          Boolean(state.liveText),
+          Boolean(state.liveCompleted),
+          state.liveError,
+        ]
+      );
+      if (signature !== state.liveToolsSignature) {
+        state.liveToolsSignature = signature;
+        const oldLine = processRoot.querySelector(".process-line");
+        const wasOpen = Boolean(oldLine?.open);
+        const openTools = new Set(
+          [...processRoot.querySelectorAll(".tool-step[open]")].map((node) => node.dataset.callId)
+        );
+        processRoot.innerHTML = renderProcess(message, { streaming: true });
+        const newLine = processRoot.querySelector(".process-line");
+        if (newLine) newLine.open = wasOpen;
+        [...processRoot.querySelectorAll(".tool-step")].forEach((node) => {
+          if (openTools.has(node.dataset.callId)) node.open = true;
+        });
+      }
+      const thinkingNode = processRoot.querySelector(".thinking-text");
+      if (thinkingNode) thinkingNode.textContent = state.liveThinking || "模型思考内容未保存。";
+      const timeNode = processRoot.querySelector("[data-process-time]");
+      const seconds = state.liveElapsed ?? (state.liveStartedAt ? (Date.now() - state.liveStartedAt) / 1000 : 0);
+      const timeLabel = formatSeconds(seconds);
+      if (timeNode && timeLabel && !state.liveCompleted) timeNode.textContent = timeLabel;
+    }
+
+    const approvalRoot = el.querySelector("[data-live-approval]");
+    const approval = message.metadata?.approval && !message.metadata?.approval_status
+      ? message.metadata.approval
+      : null;
+    if (approvalRoot) {
+      const signature = approval ? JSON.stringify(approval) : "";
+      if (signature !== state.liveApprovalSignature) {
+        state.liveApprovalSignature = signature;
+        approvalRoot.innerHTML = approval ? renderApproval(approval) : "";
+      }
+    }
+
+    if (stick) requestAnimationFrame(scrollToBottom);
+  }
+
+  function appendLiveThinking(delta) {
+    state.liveThinking += delta;
+    if (state.streamingMessage) {
+      state.streamingMessage.metadata = {
+        ...(state.streamingMessage.metadata || {}),
+        reasoning: { had_reasoning: true },
+      };
+    }
+    scheduleLiveRender();
+  }
+
+  function applyLiveEvent(eventName, data, eventId) {
+    if (eventId) state.lastEventId = Number(eventId);
+    const message = state.streamingMessage;
+    if (eventName === "run.started") {
+      if (data.approval_mode) {
+        state.approvalMode = data.approval_mode === "full_access" ? "full_access" : "confirm";
+        renderApprovalMode();
+      }
+      return;
+    }
+    if (eventName === "text.delta") {
+      state.liveText += data.delta || "";
+      if (message) message.content = state.liveText;
+      scheduleLiveRender();
+      return;
+    }
+    if (eventName === "thinking.delta") {
+      appendLiveThinking(data.delta || "");
+      return;
+    }
+    if (eventName === "tool.started") {
+      state.liveToolRuns.push({
+        call_id: data.call_id,
+        tool: data.tool,
+        arguments: data.arguments || {},
+        risk: data.risk || "write",
+        status: "running",
+        summary: "执行中…",
+      });
+      if (message) message.tool_runs = state.liveToolRuns;
+      scheduleLiveRender();
+      return;
+    }
+    if (eventName === "tool.finished") {
+      const run = data.call_id
+        ? state.liveToolRuns.find((item) => item.call_id === data.call_id)
+        : [...state.liveToolRuns].reverse().find((item) => item.tool === data.tool && item.status === "running");
+      if (run) Object.assign(run, data);
+      if (message) message.tool_runs = state.liveToolRuns;
+      scheduleLiveRender();
+      return;
+    }
+    if (eventName === "tool.approval_required") {
+      state.liveToolRuns.push({
+        tool: data.tool,
+        arguments: data.arguments || {},
+        risk: data.risk || "write",
+        status: "pending",
+        summary: data.summary || "等待审批",
+      });
+      if (message) {
+        message.tool_runs = state.liveToolRuns;
+        message.metadata = { ...(message.metadata || {}), approval: data };
+      }
+      scheduleLiveRender();
+      return;
+    }
+    if (eventName === "usage") {
+      state.usage = data.usage || state.usage;
+      if (message) message.metadata = { ...(message.metadata || {}), usage: state.usage };
+      renderContextRail();
+      return;
+    }
+    if (eventName === "context") {
+      state.contextInfo = data;
+      renderContextRail();
+      return;
+    }
+    if (eventName === "retry") {
+      state.lastRun = { ...(state.lastRun || {}), retry_count: (state.lastRun?.retry_count || 0) + 1 };
+      toast(`模型调用暂时失败，${Math.round((data.delay_ms || 0) / 100) / 10}s 后自动重试`, "warn", 2400);
+      return;
+    }
+    if (eventName === "model.fallback") {
+      toast(`主模型失败，已降级到 ${data.to || "备用模型"}`, "warn", 4200);
+      return;
+    }
+    if (eventName === "session.title") {
+      const session = state.sessions.find((item) => item.id === state.activeSessionId);
+      if (session) session.title = data.title;
+      $("#chat-heading").textContent = data.title || $("#chat-heading").textContent;
+      renderConversationList();
+      return;
+    }
+    if (eventName === "run.completed") {
+      state.liveCompleted = data;
+      state.liveElapsed = Number(data.run?.elapsed_seconds) || null;
+      if (message && data.answer) message.content = data.answer;
+      if (data.approval_mode) {
+        state.approvalMode = data.approval_mode === "full_access" ? "full_access" : "confirm";
+        renderApprovalMode();
+      }
+      scheduleLiveRender();
+      return;
+    }
+    if (eventName === "run.failed") {
+      state.liveError = data.message || "运行失败";
+      scheduleLiveRender();
+      throw new Error(data.message || "运行失败");
+    }
+  }
+
+  async function consumeSSE(response, onEvent) {
+    if (!response.body) throw new Error("浏览器不支持流式响应");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replaceAll("\r\n", "\n");
+      let index = buffer.indexOf("\n\n");
+      while (index >= 0) {
+        const block = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        if (block.trim()) {
+          let id = 0;
+          let eventName = "message";
+          const dataLines = [];
+          for (const line of block.split("\n")) {
+            if (line.startsWith("id:")) id = Number(line.slice(3).trim()) || 0;
+            else if (line.startsWith("event:")) eventName = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+          }
+          let data = {};
+          if (dataLines.length) {
+            try { data = JSON.parse(dataLines.join("\n")); } catch { data = { raw: dataLines.join("\n") }; }
+          }
+          await onEvent(eventName, data, id);
+        }
+        index = buffer.indexOf("\n\n");
+      }
+    }
+  }
+
+  async function streamChat(body) {
+    const response = await fetch("/api/agent/chat/stream", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      let detail = `请求失败（${response.status}）`;
+      try {
+        const data = await response.json();
+        detail = data.detail || detail;
+      } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    const runId = response.headers.get("X-Run-Id");
+    if (runId) state.activeRunId = runId;
+    try {
+      await consumeSSE(response, async (eventName, data, eventId) => {
+        applyLiveEvent(eventName, data, eventId);
+      });
+    } catch (error) {
+      if (!state.activeRunId) throw error;
+    }
+    if (state.liveError) throw new Error(state.liveError);
+    let reconnectAttempts = 0;
+    while (!state.liveCompleted && state.activeRunId && reconnectAttempts < 3) {
+      reconnectAttempts += 1;
+      await new Promise((resolve) => window.setTimeout(resolve, 500 * reconnectAttempts));
+      const resumed = await fetch(`/api/agent/chat/stream/${encodeURIComponent(state.activeRunId)}`, {
+        credentials: "same-origin",
+        headers: { Accept: "text/event-stream", "Last-Event-ID": String(state.lastEventId || 0) },
+      });
+      if (resumed.status === 404) break;
+      if (!resumed.ok) continue;
+      try {
+        await consumeSSE(resumed, async (eventName, data, eventId) => {
+          applyLiveEvent(eventName, data, eventId);
+        });
+      } catch {
+        if (state.liveError) throw new Error(state.liveError);
+        continue;
+      }
+    }
+    if (!state.liveCompleted) {
+      throw new Error("连接中断，且未能恢复本次运行。请稍后在会话记录中查看结果。");
+    }
+    return state.liveCompleted;
   }
 
   async function sendMessage(prompt = null) {
@@ -948,6 +2481,19 @@
       return;
     }
     state.sending = true;
+    state.activeRunId = null;
+    state.lastEventId = 0;
+    state.liveThinking = "";
+    state.liveText = "";
+    state.liveRenderedHtml = "";
+    state.liveRenderedText = "";
+    state.liveToolRuns = [];
+    state.liveToolsSignature = "";
+    state.liveApprovalSignature = "";
+    state.liveCompleted = null;
+    state.liveStartedAt = Date.now();
+    state.liveElapsed = null;
+    state.liveError = "";
     if (prompt === null) {
       input.value = "";
       input.style.height = "auto";
@@ -960,33 +2506,49 @@
       metadata: {},
       created_at: new Date().toISOString(),
     });
-    renderChat();
+    state.streamingMessage = {
+      id: `stream-${Date.now()}`,
+      role: "assistant",
+      content: "",
+      tool_runs: [],
+      metadata: { status: "streaming", assistant: currentAssistant(), model: selectedModel() },
+      created_at: new Date().toISOString(),
+    };
+    state.messages.push(state.streamingMessage);
+    renderChat({ forceScroll: true });
+    startProcessTicker();
     updateSendState();
     try {
-      const data = await api("/api/agent/chat", {
-        method: "POST",
-        body: {
-          message: text,
-          session_id: state.activeSessionId,
-          assistant_id: state.assistantId,
-          model_row_id: state.modelId,
-          enabled_tools: [...state.selectedTools],
-          attachments,
-        },
+      const data = await streamChat({
+        message: text,
+        session_id: state.activeSessionId,
+        assistant_id: state.assistantId,
+        model_row_id: state.modelId,
+        enabled_tools: [...state.selectedTools],
+        reasoning_effort: state.reasoningEffort || null,
+        approval_mode: state.approvalMode,
+        attachments,
       });
       state.demoMode = Boolean(data.demo_mode);
       if (data.model?.id) state.modelId = Number(data.model.id);
       state.lastBudget = data.budget || null;
+      state.lastRun = data.run || null;
       state.contextInfo = data.context || null;
+      state.usage = data.usage || null;
+      state.sessionUsage = data.session_usage || state.sessionUsage;
+      loadMyUsage().then(renderContextRail);
       state.attachments = [];
       renderAttachments();
-      await loadMessages(state.activeSessionId);
+      state.streamingMessage = null;
+      state.activeRunId = null;
+      await loadMessages(state.activeSessionId, { liveReasoning: state.liveThinking });
       await loadSessions();
       renderConversationList();
       renderChat();
       renderContextRail();
       updateDemoBadge();
     } catch (error) {
+      state.streamingMessage = null;
       state.messages.push({
         id: `local-error-${Date.now()}`,
         role: "assistant",
@@ -999,6 +2561,8 @@
       toast(error.message, "error", 5000);
     } finally {
       state.sending = false;
+      state.streamingMessage = null;
+      stopProcessTicker();
       renderChat();
       updateSendState();
       window.setTimeout(() => input.focus(), 30);
@@ -1025,7 +2589,7 @@
 
   /* ---------- Attachments ---------- */
   function attachFiles(files) {
-    const remaining = 4 - state.attachments.length;
+    const remaining = 4 - state.attachments.length - state.attachmentReads;
     if (remaining <= 0) {
       toast("最多添加 4 张图片", "warn");
       return;
@@ -1040,9 +2604,21 @@
         continue;
       }
       const reader = new FileReader();
+      const userId = state.user?.id;
+      const sessionId = state.activeSessionId;
+      state.attachmentReads += 1;
+      reader.onloadend = () => { state.attachmentReads = Math.max(0, state.attachmentReads - 1); };
+      reader.onerror = () => toast(`无法读取 ${file.name}`, "error");
       reader.onload = () => {
+        if (state.user?.id !== userId || state.activeSessionId !== sessionId || state.sending) return;
+        const existingSize = state.attachments.reduce((total, item) => total + (item.size || atob(item.data_url.split(",")[1] || "").length), 0);
+        if (existingSize + file.size > 8 * 1024 * 1024) {
+          toast("本轮图片总大小不能超过 8 MB", "warn");
+          return;
+        }
         state.attachments.push({
           name: file.name,
+          size: file.size,
           mime_type: file.type,
           data_url: String(reader.result),
         });
@@ -1069,9 +2645,87 @@
     renderAttachments();
   }
 
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error || new Error("读取录音失败"));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function toggleVoice() {
+    if (state.voiceBusy) return;
+    if (!state.status?.asr?.configured) {
+      toast("管理员还没有配置语音识别模型", "warn");
+      return;
+    }
+    if (state.recording) {
+      state.mediaRecorder?.stop();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+      toast("当前浏览器不支持录音，请使用 HTTPS 或 localhost 打开", "warn");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"]
+        .find((item) => MediaRecorder.isTypeSupported(item)) || "";
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      state.mediaRecorder = recorder;
+      state.mediaChunks = [];
+      state.recording = true;
+      renderVoiceState();
+      $("#voice-btn")?.classList.add("recording");
+      const timeout = window.setTimeout(() => {
+        if (state.recording) recorder.stop();
+      }, 60_000);
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data?.size) state.mediaChunks.push(event.data);
+      });
+      recorder.addEventListener("stop", async () => {
+        window.clearTimeout(timeout);
+        stream.getTracks().forEach((track) => track.stop());
+        state.recording = false;
+        $("#voice-btn")?.classList.remove("recording");
+        const blob = new Blob(state.mediaChunks, { type: recorder.mimeType || "audio/webm" });
+        if (!blob.size) {
+          renderVoiceState();
+          return;
+        }
+        state.voiceBusy = true;
+        renderVoiceState();
+        try {
+          const dataUrl = await blobToDataUrl(blob);
+          const result = await api("/api/agent/transcribe", {
+            method: "POST",
+            body: { audio_data_url: dataUrl, language: "zh" },
+          });
+          const text = String(result.text || "").trim();
+          if (!text) throw new Error("没有识别到语音内容");
+          $("#chat-input").value = text;
+          toast("语音识别完成，正在发送", "ok", 1600);
+          await sendMessage(text);
+        } catch (error) {
+          toast(error.message, "error", 5000);
+        } finally {
+          state.voiceBusy = false;
+          renderVoiceState();
+        }
+      });
+      recorder.start();
+    } catch (error) {
+      state.recording = false;
+      renderVoiceState();
+      toast(`无法启动录音：${error.message}`, "error", 5000);
+    }
+  }
+
   /* ---------- Context rail ---------- */
   function renderContextRail() {
     const model = selectedModel();
+    const assistant = currentAssistant();
     const modelNode = $("#context-model");
     if (modelNode) {
       modelNode.innerHTML = `<span class="model-dot"></span><span>${escapeHtml(model ? `${model.name} · ${model.model_id}` : "未配置模型")}</span>`;
@@ -1087,7 +2741,6 @@
     if (toolTotal) {
       toolTotal.textContent = `${state.tools.filter((tool) => state.selectedTools.has(tool.name)).length}/${state.tools.length}`;
     }
-    const assistant = currentAssistant();
     const skillRoot = $("#context-skill-list");
     if (skillRoot) {
       const wanted = assistant?.skill_ids || [];
@@ -1097,15 +2750,71 @@
         : '<div class="mini-empty">暂无启用技能</div>';
     }
     const budget = state.lastBudget || {};
+    const context = state.contextInfo || {};
+    const run = state.lastRun || {};
+    const usedTokens = Number(
+      context.context_tokens || state.usage?.prompt_tokens || 0
+    );
+    const modelWindow = Number(model?.context_window) || 0;
+    const reserve = Number(context.reserve_tokens || state.status?.context_reserve_tokens || 1600);
+    const explicitBudget = Number(assistant?.context_max_tokens || state.status?.context_max_tokens || 0);
+    const windowTokens = Number(modelWindow || context.context_window || 0);
+    const cappedWindow = Math.max(2048, explicitBudget > 0 ? Math.min(windowTokens || explicitBudget, explicitBudget) : (windowTokens || 32768));
+    const outputReserve = Math.min(Number(model?.max_output_tokens || 0), Math.floor(cappedWindow / 2));
+    const budgetTokens = Math.max(1200, cappedWindow - outputReserve - reserve);
+    const ratio = budgetTokens > 0 ? Math.min(1, usedTokens / budgetTokens) : 0;
+    const meter = $("#composer-context-fill");
+    if (meter) {
+      meter.style.width = `${Math.round(ratio * 100)}%`;
+      meter.parentElement.classList.toggle("warn", ratio >= 0.8 && ratio < 0.95);
+      meter.parentElement.classList.toggle("danger", ratio >= 0.95);
+    }
+    const contextValue = $("#composer-context-value");
+    if (contextValue) {
+      const usage = state.usage || {};
+      const parts = state.activeSessionId
+        ? [`${formatTokens(usedTokens)} / ${formatTokens(budgetTokens)} · ${Math.round(ratio * 100)}%`]
+        : ["尚未开始对话"];
+      if (usage.retry_count) parts.push(`${usage.retry_count} 次重试`);
+      contextValue.textContent = parts.join(" · ");
+      contextValue.title = state.activeSessionId
+        ? `模型窗口 ${formatTokens(windowTokens)} · 本轮输入 ${formatTokens(usage.prompt_tokens || 0)} · 输出 ${formatTokens(usage.completion_tokens || 0)}`
+        : "发送第一条消息后显示上下文预算";
+    }
     const budgetRoot = $("#context-budget");
     if (budgetRoot) {
       const cells = [
-        ["推理轮次", assistant?.max_steps || state.status?.max_iterations || budget.max_steps || 6],
-        ["工具调用", assistant?.max_tool_calls || state.status?.max_tool_calls || budget.max_tool_calls || 12],
-        ["运行超时", `${assistant?.max_run_seconds || state.status?.max_run_seconds || budget.max_run_seconds || 120}s`],
-        ["上下文", `${Math.round((state.contextInfo?.context_tokens || 0) / 1000)}k / ${Math.round((state.contextInfo?.budget_tokens || assistant?.context_max_tokens || state.status?.context_max_tokens || 32000) / 1000)}k`],
+        ["推理轮次", `${run.steps_used || 0}/${assistant?.max_steps || state.status?.max_iterations || budget.max_steps || 6}`],
+        ["工具调用", `${run.tool_calls_used || 0}/${assistant?.max_tool_calls || state.status?.max_tool_calls || budget.max_tool_calls || 12}`],
+        ["运行超时", `${Math.round(run.elapsed_seconds || 0)}s/${assistant?.max_run_seconds || state.status?.max_run_seconds || budget.max_run_seconds || 120}s`],
       ];
       budgetRoot.innerHTML = cells.map(([label, value]) => `<div class="budget-cell"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+    }
+    const sessionUsage = state.sessionUsage || {};
+    const sessionRoot = $("#context-session-usage");
+    if (sessionRoot) {
+      const rows = [
+        ["累计 tokens", formatTokens(sessionUsage.total_tokens || 0)],
+        ["估算费用", formatCost(sessionUsage.total_cost_usd || 0)],
+        ["消息数", String(sessionUsage.message_count || 0)],
+        ["压缩次数", String(sessionUsage.compaction_count || 0)],
+      ];
+      sessionRoot.innerHTML = rows.map(([label, value]) => `<div class="usage-row"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+    }
+    const compactionNode = $("#context-compaction");
+    if (compactionNode) {
+      const notes = [];
+      if (context.compacted || context.compaction?.ok) {
+        notes.push(`上次压缩节省 ${formatTokens(context.compaction?.saved_tokens || 0)} tokens`);
+      }
+      if (state.myUsage?.daily_limit) {
+        notes.push(`今日 ${formatTokens(state.myUsage.used_today || 0)} / ${formatTokens(state.myUsage.daily_limit)}`);
+      }
+      compactionNode.textContent = notes.join(" · ") || "超出预算时会自动摘要较早对话";
+    }
+    const compactionCount = $("#context-compaction-count");
+    if (compactionCount) {
+      compactionCount.textContent = sessionUsage.compaction_count ? `${sessionUsage.compaction_count} 次` : "";
     }
     const memoryCount = $("#context-memory-count");
     if (memoryCount) memoryCount.textContent = state.memoryCount ? `${state.memoryCount} 条` : "";
@@ -1261,6 +2970,7 @@
   /* ---------- Modal ---------- */
   function openModal(html, options = {}) {
     closeModal();
+    modalReturnFocus = document.activeElement;
     const root = $("#modal-root");
     root.innerHTML = `
       <div class="modal-backdrop">
@@ -1270,20 +2980,32 @@
     modalTarget.addEventListener("click", (event) => {
       if (event.target === modalTarget) closeModal();
     });
-    const onKey = (event) => {
+    modalKeyHandler = (event) => {
       if (event.key === "Escape") {
         closeModal();
-        document.removeEventListener("keydown", onKey);
+      } else if (event.key === "Tab" && modalTarget) {
+        const controls = $$("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]", modalTarget).filter((control) => control.getClientRects().length);
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (!first) return;
+        if (event.shiftKey && (document.activeElement === first || !modalTarget.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && (document.activeElement === last || !modalTarget.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
       }
     };
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", modalKeyHandler);
+    const focusTarget = $("input:not(:disabled), button:not(:disabled)", modalTarget);
+    window.requestAnimationFrame(() => { if (focusTarget?.isConnected) focusTarget.focus(); });
     return root;
   }
 
   function closeModal() {
+    if (modalKeyHandler) document.removeEventListener("keydown", modalKeyHandler);
+    modalKeyHandler = null;
     const root = $("#modal-root");
     if (root) root.innerHTML = "";
     modalTarget = null;
+    if (modalReturnFocus?.isConnected) modalReturnFocus.focus();
+    modalReturnFocus = null;
   }
 
   function confirmDialog({ title, message, confirmText = "确认", danger = false }) {
@@ -1314,6 +3036,48 @@
     });
   }
 
+  function promptDialog({ title, message = "", value = "", placeholder = "", confirmText = "确认" }) {
+    return new Promise((resolve) => {
+      openModal(`
+        <div class="modal-head">
+          <div><h3>${escapeHtml(title)}</h3>${message ? `<p>${escapeHtml(message)}</p>` : ""}</div>
+          <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
+        </div>
+        <div class="modal-body">
+          <label class="field"><input id="prompt-input" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" maxlength="200"></label>
+        </div>
+        <div class="modal-foot">
+          <button class="ghost-btn" data-action="modal-close">取消</button>
+          <button class="primary-btn" id="prompt-ok">${escapeHtml(confirmText)}</button>
+        </div>`);
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+      const overlay = $("#modal-root .modal-backdrop");
+      $("#prompt-ok").addEventListener("click", () => {
+        const value = $("#prompt-input").value.trim();
+        closeModal();
+        finish(value || null);
+      });
+      const input = $("#prompt-input");
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          const value = input.value.trim();
+          closeModal();
+          finish(value || null);
+        }
+      });
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay || event.target.closest('[data-action="modal-close"]')) finish(null);
+      });
+      window.setTimeout(() => input.focus(), 40);
+    });
+  }
+
   /* ---------- Config page ---------- */
   async function loadConfigPage(force = false) {
     const guest = $("#config-guest");
@@ -1330,6 +3094,7 @@
   }
 
   async function switchConfigTab(tab, force = false) {
+    if (tab === "providers") tab = "models";
     state.configTab = tab;
     $$("#config-nav .config-nav-item").forEach((button) => {
       button.classList.toggle("active", button.dataset.tab === tab);
@@ -1366,8 +3131,14 @@
         state.config.models = models.items || [];
         renderAssistants();
       } else if (tab === "tools") {
-        const data = await api("/api/agent/admin/tools");
+        const [data, dynamic, pilot] = await Promise.all([
+          api("/api/agent/admin/tools"),
+          api("/api/agent/admin/dynamic-tools"),
+          api("/api/agent/admin/pagepilot"),
+        ]);
         state.config.tools = data.items || [];
+        state.config.dynamicTools = dynamic.items || [];
+        state.config.pagepilot = pilot.config || null;
         renderToolsConfig(data);
       } else if (tab === "skills") {
         const data = await api("/api/agent/admin/skills");
@@ -1385,8 +3156,27 @@
         state.config.audit = biz.items || [];
         state.config.agentAudit = agent.items || [];
         renderAuditConfig();
+      } else if (tab === "sessions") {
+        const params = new URLSearchParams();
+        for (const key of ["username", "model", "status", "q"]) {
+          const value = String(state.sessionFilter[key] || "").trim();
+          if (value) params.set(key, value);
+        }
+        params.set("limit", "100");
+        const [sessionsData, usageData] = await Promise.all([
+          api(`/api/agent/admin/sessions?${params.toString()}`),
+          api(`/api/agent/admin/usage/summary?days=${state.sessionFilter.days || 7}`),
+        ]);
+        state.config.sessions = sessionsData.items || [];
+        state.config.sessionTotal = sessionsData.total || 0;
+        state.config.usageSummary = usageData;
+        renderSessionsConfig();
       } else if (tab === "settings") {
-        const data = await api("/api/agent/config");
+        const [data, models] = await Promise.all([
+          api("/api/agent/config"),
+          api("/api/agent/admin/models"),
+        ]);
+        state.config.models = models.items || [];
         state.config.settings = data;
         renderSettingsConfig();
       }
@@ -1540,7 +3330,7 @@
           toast("供应商已创建");
         }
         closeModal();
-        await loadConfigTab("providers");
+        await loadConfigTab("models");
       } catch (error) {
         toast(error.message, "error");
       }
@@ -1562,22 +3352,80 @@
     }
   }
 
+  async function testModel(id, button) {
+    const model = state.config.models.find((item) => Number(item.id) === Number(id));
+    const kind = model?.model_kind || "chat";
+    const label = MODEL_KIND_LABELS[kind] || kind;
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = "测试中…";
+    openModal(`
+      <div class="modal-head">
+        <div><h3>测试模型</h3><p>${escapeHtml(model?.name || "")} · ${escapeHtml(label)}</p></div>
+        <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="test-result" id="model-test-result">正在按「${escapeHtml(label)}」类型测试，请稍候…</div>
+      </div>`, { wide: false });
+    try {
+      const data = await api(`/api/agent/admin/models/${id}/test`, { method: "POST" });
+      const node = $("#model-test-result");
+      if (node) {
+        node.className = `test-result ${data.ok ? "ok" : "fail"}`;
+        node.innerHTML = `
+          <div class="model-test-row"><span>结果</span><strong>${data.ok ? "通过" : "失败"}</strong></div>
+          <div class="model-test-row"><span>类型</span><strong>${escapeHtml(MODEL_KIND_LABELS[data.kind] || data.kind || label)}</strong></div>
+          ${data.latency_ms != null ? `<div class="model-test-row"><span>耗时</span><strong>${data.latency_ms}ms</strong></div>` : ""}
+          <div class="model-test-reply">${escapeHtml(data.message || "没有返回内容")}</div>`;
+      }
+    } catch (error) {
+      const node = $("#model-test-result");
+      if (node) {
+        node.className = "test-result fail";
+        node.textContent = error.message;
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+
   async function openDiscoverModal(provider) {
     openModal(`
       <div class="modal-head">
         <div><h3>拉取模型</h3><p>${escapeHtml(provider.name)} · ${escapeHtml(provider.base_url)}</p></div>
         <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
       </div>
-      <div class="modal-body"><div class="empty-config">正在读取供应商模型列表…</div></div>`, { wide: true });
+      <div class="modal-body">
+        <div class="empty-config">正在读取供应商模型列表… <span id="discover-elapsed">0s</span></div>
+        <div class="discover-actions">
+          <button class="ghost-btn" type="button" data-action="modal-close">取消</button>
+          <button class="text-btn" type="button" data-action="model-new">跳过拉取，手工添加模型</button>
+        </div>
+      </div>`, { wide: true });
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const node = $("#discover-elapsed");
+      if (node) node.textContent = `${Math.floor((Date.now() - startedAt) / 1000)}s`;
+    }, 500);
     try {
       const data = await api(`/api/agent/admin/providers/${provider.id}/discover-models`);
+      if (!$("#discover-elapsed")) {
+        window.clearInterval(timer);
+        return;
+      }
       const items = data.items || [];
+      window.clearInterval(timer);
       openModal(`
         <div class="modal-head">
           <div><h3>拉取模型</h3><p>${escapeHtml(provider.name)} · 共 ${items.length} 个模型，已导入的会标记。</p></div>
           <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
         </div>
         <form id="import-form" class="modal-body">
+          <div class="discover-toolbar">
+            <input id="discover-filter" placeholder="搜索模型 ID 或归属…" autocomplete="off">
+            <span class="discover-count">${items.length} 个模型</span>
+          </div>
           <div class="import-list">
             ${items.map((item) => `
               <label class="import-row">
@@ -1591,6 +3439,13 @@
             <button type="submit" class="primary-btn">导入所选模型</button>
           </div>
         </form>`, { wide: true });
+      $("#discover-filter").addEventListener("input", (event) => {
+        const query = event.target.value.trim().toLowerCase();
+        $$(".import-row", $("#import-form")).forEach((row) => {
+          const text = row.textContent.toLowerCase();
+          row.classList.toggle("hidden", Boolean(query) && !text.includes(query));
+        });
+      });
       $("#import-form").addEventListener("submit", async (event) => {
         event.preventDefault();
         const selected = $$('input[name="model_ids"]:checked', event.target).map((item) => item.value);
@@ -1605,12 +3460,13 @@
           });
           toast(`已导入 ${result.imported.length} 个模型，跳过 ${result.skipped.length} 个`);
           closeModal();
-          await loadConfigTab("providers");
+          await loadConfigTab("models");
         } catch (error) {
           toast(error.message, "error", 5000);
         }
       });
     } catch (error) {
+      window.clearInterval(timer);
       openModal(`
         <div class="modal-head"><div><h3>拉取失败</h3><p>${escapeHtml(error.message)}</p></div>
         <button class="icon-btn" data-action="modal-close">${icon("x")}</button></div>
@@ -1621,10 +3477,32 @@
   /* ----- Models ----- */
   function renderModels() {
     const items = state.config.models;
+    const providers = state.config.providers;
     $("#config-content").innerHTML = `
-      ${sectionHead("模型", "设置上下文窗口、输出上限、采样参数、图像能力和额外请求参数。", `
+      ${sectionHead("模型与供应商", "供应商连接和模型条目在同一页维护。新增模型时选择供应商，参数可从 models.dev 或供应商接口自动预填，管理员仍可覆盖。", `
         <span class="count-pill">${items.length} 个</span>
+        <button class="ghost-btn" data-action="provider-new">${icon("plus", 14)} 新增供应商</button>
         <button class="primary-btn" data-action="model-new">${icon("plus", 14)} 新增模型</button>`)}
+      <div class="provider-strip">
+        ${providers.length ? providers.map((provider) => `
+          <div class="provider-card ${provider.enabled ? "" : "off"}">
+            <div class="provider-card-head">
+              <span class="assistant-icon">${icon("server", 13)}</span>
+              <div><strong>${escapeHtml(provider.name)}</strong><code>${escapeHtml(provider.base_url)}</code></div>
+              ${provider.api_key_set ? '<span class="badge badge-blue">Key</span>' : '<span class="badge badge-warn">缺 Key</span>'}
+            </div>
+            <div class="provider-card-meta">
+              <span>${provider.model_count} 个模型</span>
+              <span>超时 ${provider.timeout_seconds}s</span>
+            </div>
+            <div class="provider-card-actions">
+              <button class="text-btn" data-action="provider-test" data-id="${provider.id}">测试</button>
+              <button class="text-btn" data-action="provider-discover" data-id="${provider.id}">拉取模型</button>
+              <button class="text-btn" data-action="provider-edit" data-id="${provider.id}">编辑</button>
+              <button class="text-btn danger-text" data-action="provider-delete" data-id="${provider.id}">删除</button>
+            </div>
+          </div>`).join("") : '<div class="empty-config">还没有供应商。先添加一个 OpenAI 兼容服务。</div>'}
+      </div>
       <div class="list-panel">${items.length ? items.map((item) => `
         <div class="list-row ${item.enabled && item.provider_enabled ? "" : "off"}">
           <span class="assistant-icon">${icon("brain", 14)}</span>
@@ -1632,14 +3510,18 @@
             <div class="list-row-title">
               <strong>${escapeHtml(item.name)}</strong>
               <code>${escapeHtml(item.model_id)}</code>
+              <span class="badge">${escapeHtml(MODEL_KIND_LABELS[item.model_kind] || item.model_kind || "对话")}</span>
               ${item.is_default ? '<span class="badge badge-green">默认</span>' : ""}
               ${item.supports_tools ? '<span class="badge badge-blue">工具</span>' : '<span class="badge">无工具</span>'}
               ${(item.capabilities || []).includes("image") ? '<span class="badge badge-blue">图像</span>' : ""}
+              ${item.supports_reasoning ? '<span class="badge badge-blue">思考</span>' : ""}
+              ${item.supports_transcription ? '<span class="badge badge-green">语音转写</span>' : ""}
             </div>
             <p>供应商：${escapeHtml(item.provider_name || "—")} · 温度 ${item.temperature} · top_p ${item.top_p}</p>
             <div class="list-row-meta">
               <span>上下文 ${item.context_window || 0}</span>
               <span>输出 ${item.max_output_tokens || 0}</span>
+              <span>价格 ${formatPrice(item.input_price_per_1m)} / ${formatPrice(item.output_price_per_1m)} 每 1M</span>
               <span>${Object.keys(item.extra_params || {}).length} 个额外参数</span>
             </div>
           </div>
@@ -1648,7 +3530,7 @@
             <button class="mini-action" data-action="model-edit" data-id="${item.id}" title="编辑">${icon("edit", 12)}</button>
             <button class="mini-action danger" data-action="model-delete" data-id="${item.id}" title="删除">${icon("trash", 12)}</button>
           </div>
-        </div>`).join("") : '<div class="empty-config">还没有模型。先在供应商页拉取，或手动新增。</div>'}</div>`;
+        </div>`).join("") : '<div class="empty-config">还没有模型。先新增供应商并拉取模型，或手动新增。</div>'}</div>`;
   }
 
   function openModelModal(model = null) {
@@ -1669,17 +3551,49 @@
             <select name="provider_id">${state.config.providers.map((provider) => `<option value="${provider.id}" ${Number(model?.provider_id) === Number(provider.id) ? "selected" : ""}>${escapeHtml(provider.name)}</option>`).join("")}</select>
           </label>
           <label class="field"><span>显示名称</span><input name="name" value="${escapeHtml(model?.name || "")}" placeholder="DeepSeek Chat" required></label>
-          <label class="field span-2"><span>模型 ID</span><input name="model_id" value="${escapeHtml(model?.model_id || "")}" placeholder="deepseek-chat" required></label>
+          <label class="field span-2"><span>模型 ID</span>
+            <div class="model-id-row">
+              <input name="model_id" id="model-id-input" list="model-id-options" value="${escapeHtml(model?.model_id || "")}" placeholder="deepseek-chat" autocomplete="off" required>
+              <datalist id="model-id-options"></datalist>
+              ${editing ? `<button type="button" class="ghost-btn" id="model-sync-btn" title="从供应商接口 / models.dev 同步参数">${icon("refresh", 13)} 同步模型信息</button>` : ""}
+            </div>
+          </label>
+          <label class="field"><span>模型类型</span>
+            <select name="model_kind">
+              ${Object.entries(MODEL_KIND_LABELS).map(([kind, label]) => `<option value="${kind}" ${(model?.model_kind || "chat") === kind ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <div class="model-audio-settings span-2" id="model-audio-settings">
+            <div class="form-grid">
+              <label class="field"><span>语音接入协议</span><select name="asr_protocol">
+                ${[["auto", "自动识别"], ["transcriptions", "OpenAI 文件转写"], ["chat_audio", "Chat Completions 音频"], ["dashscope", "DashScope 原生 ASR"]].map(([value, label]) => `<option value="${value}" ${(model?.extra_params?._asr?.protocol || "auto") === value ? "selected" : ""}>${label}</option>`).join("")}
+              </select></label>
+              <label class="field"><span>音频数据格式</span><select name="asr_data_format"><option value="" ${!model?.extra_params?._asr?.data_format ? "selected" : ""}>按模型自动选择</option><option value="data_uri" ${model?.extra_params?._asr?.data_format === "data_uri" ? "selected" : ""}>Data URI（Qwen）</option><option value="base64" ${model?.extra_params?._asr?.data_format === "base64" ? "selected" : ""}>纯 Base64</option></select></label>
+              <label class="field span-2"><span>自定义语音端点（可选）</span><input name="asr_endpoint" value="${escapeHtml(model?.extra_params?._asr?.endpoint || "")}" placeholder="留空自动；也可填同源 /api/... 路径"><small>不会把所有语音模型发到 /audio/transcriptions。实时 WebSocket 模型不能用于录音上传；不同域名请另建供应商。</small></label>
+            </div>
+          </div>
+          <div class="field span-2 model-suggest-hint" id="model-suggest-hint">${icon("activity", 13)} 输入模型 ID 后会自动读取 models.dev / 供应商元数据，仍可手工覆盖。</div>
           <label class="field"><span>上下文窗口</span><input name="context_window" type="number" min="0" value="${model?.context_window ?? 32768}"></label>
           <label class="field"><span>最大输出</span><input name="max_output_tokens" type="number" min="0" value="${model?.max_output_tokens ?? 8192}"></label>
           <label class="field"><span>temperature</span><input name="temperature" type="number" step="0.1" min="0" max="2" value="${model?.temperature ?? 0.3}"></label>
           <label class="field"><span>top_p</span><input name="top_p" type="number" step="0.05" min="0" max="1" value="${model?.top_p ?? 1}"></label>
+          <label class="field"><span>输入价格 / 1M tokens（USD）</span><input name="input_price_per_1m" type="number" step="0.0001" min="0" value="${model?.input_price_per_1m ?? 0}"></label>
+          <label class="field"><span>输出价格 / 1M tokens（USD）</span><input name="output_price_per_1m" type="number" step="0.0001" min="0" value="${model?.output_price_per_1m ?? 0}"></label>
           <label class="field span-2"><span>额外请求参数（JSON）</span><input name="extra_params" value="${escapeHtml(JSON.stringify(model?.extra_params || {}))}" placeholder='{"reasoning_effort":"low"}'></label>
+          <label class="field"><span>思考强度选项（逗号分隔）</span><input name="reasoning_efforts" value="${escapeHtml((model?.reasoning_efforts || []).join(","))}" placeholder="minimal,low,medium,high,xhigh"></label>
+          <label class="field"><span>默认思考强度</span>
+            <select name="default_reasoning_effort">
+              ${REASONING_OPTIONS.map(([effort, label]) => `<option value="${effort}" ${(model?.default_reasoning_effort || "") === effort ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
           <div class="field span-2"><span>能力</span>
             <div class="check-grid">
               <label><input type="checkbox" name="capabilities" value="text" ${capabilities.includes("text") ? "checked" : ""}> <code>text</code> 文本</label>
               <label><input type="checkbox" name="capabilities" value="image" ${capabilities.includes("image") ? "checked" : ""}> <code>image</code> 图像理解</label>
               <label><input type="checkbox" name="supports_tools" ${model?.supports_tools !== false ? "checked" : ""}> 支持工具调用</label>
+              <label><input type="checkbox" name="supports_reasoning" ${model?.supports_reasoning ? "checked" : ""}> 支持思考 / reasoning</label>
+              <label><input type="checkbox" name="supports_reasoning_summary" ${model?.supports_reasoning_summary !== false ? "checked" : ""}> 展示思考摘要</label>
+              <label><input type="checkbox" name="supports_transcription" ${model?.supports_transcription ? "checked" : ""}> 语音转写（ASR）</label>
               <label><input type="checkbox" name="is_default" ${model?.is_default ? "checked" : ""}> 设为默认模型</label>
               <label><input type="checkbox" name="enabled" ${model?.enabled !== false ? "checked" : ""}> 启用模型</label>
             </div>
@@ -1690,27 +3604,154 @@
           <button type="submit" class="primary-btn">${editing ? "保存" : "创建"}</button>
         </div>
       </form>`, { wide: true });
+    const form = $("#model-form");
+    let suggestTimer = null;
+    const modelIdInput = $("#model-id-input");
+    const syncKind = () => {
+      const kind = form.model_kind.value;
+      $("#model-audio-settings").classList.toggle("hidden", !["asr", "asr_realtime"].includes(kind) && !form.supports_transcription.checked);
+      if (kind === "asr" || kind === "asr_realtime") {
+        form.supports_transcription.checked = true;
+        form.supports_tools.checked = false;
+      } else if (["embedding", "rerank", "image_generation"].includes(kind)) {
+        form.supports_tools.checked = false;
+      }
+      $$('input[name="capabilities"]', form).forEach((item) => {
+        if (item.value === "text") item.checked = true;
+        if (item.value === "image" && kind === "vision") item.checked = true;
+      });
+    };
+    form.model_kind.addEventListener("change", syncKind);
+    form.supports_transcription.addEventListener("change", syncKind);
+    syncKind();
+
+    const datalist = $("#model-id-options");
+    const refreshModelOptions = async () => {
+      const providerId = Number(form.provider_id.value);
+      if (!providerId || !datalist) return;
+      datalist.innerHTML = '<option value="">加载中…</option>';
+      try {
+        const data = await api(`/api/agent/admin/providers/${providerId}/discover-models`);
+        const options = (data.items || []).map((item) => item.model_id).filter(Boolean);
+        datalist.innerHTML = options.length
+          ? options.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("")
+          : '<option value=""></option>';
+      } catch {
+        datalist.innerHTML = '<option value=""></option>';
+      }
+    };
+    form.provider_id.addEventListener("change", refreshModelOptions);
+    refreshModelOptions();
+
+    const syncBtn = $("#model-sync-btn");
+    if (syncBtn && editing) {
+      syncBtn.addEventListener("click", async () => {
+        syncBtn.disabled = true;
+        syncBtn.innerHTML = `${icon("activity", 13)} 同步中…`;
+        try {
+          const data = await api(`/api/agent/admin/models/${model.id}/sync`, { method: "POST" });
+          const synced = data.model || {};
+          const f = $("#model-form");
+          if (synced.name) f.elements.namedItem("name").value = synced.name;
+          if (synced.model_kind) { f.model_kind.value = synced.model_kind; syncKind(); }
+          if (synced.context_window) f.context_window.value = synced.context_window;
+          if (synced.max_output_tokens) f.max_output_tokens.value = synced.max_output_tokens;
+          if (synced.input_price_per_1m != null) f.input_price_per_1m.value = synced.input_price_per_1m;
+          if (synced.output_price_per_1m != null) f.output_price_per_1m.value = synced.output_price_per_1m;
+          if (synced.temperature != null) f.temperature.value = synced.temperature;
+          if (synced.top_p != null) f.top_p.value = synced.top_p;
+          f.supports_tools.checked = synced.supports_tools !== false;
+          f.supports_reasoning.checked = Boolean(synced.supports_reasoning);
+          f.supports_reasoning_summary.checked = synced.supports_reasoning_summary !== false;
+          f.supports_transcription.checked = Boolean(synced.supports_transcription);
+          f.reasoning_efforts.value = (synced.reasoning_efforts || []).join(",");
+          f.default_reasoning_effort.value = synced.default_reasoning_effort || "";
+          const capabilitySet = new Set(synced.capabilities || ["text"]);
+          $$('input[name="capabilities"]', f).forEach((item) => { item.checked = capabilitySet.has(item.value); });
+          toast("已从供应商 / models.dev 同步模型参数");
+        } catch (error) {
+          toast(error.message, "error", 4800);
+        } finally {
+          syncBtn.disabled = false;
+          syncBtn.innerHTML = `${icon("refresh", 13)} 同步模型信息`;
+        }
+      });
+    }
+
+    modelIdInput.addEventListener("input", () => {
+      if (editing) return;
+      window.clearTimeout(suggestTimer);
+      suggestTimer = window.setTimeout(async () => {
+        const modelId = modelIdInput.value.trim();
+        if (modelId.length < 2) return;
+        const hint = $("#model-suggest-hint");
+        hint.innerHTML = `${icon("activity", 13)} 正在读取模型元数据…`;
+        try {
+          const data = await api(`/api/agent/admin/model-suggest?model_id=${encodeURIComponent(modelId)}&provider_id=${encodeURIComponent(form.provider_id.value)}`);
+          if (modelIdInput.value.trim() !== modelId) return;
+          const suggested = data.suggested || {};
+          $("#model-form").model_kind.value = suggested.model_kind || "chat";
+          syncKind();
+          $("#model-form").context_window.value = suggested.context_window || 0;
+          $("#model-form").max_output_tokens.value = suggested.max_output_tokens || 0;
+          $("#model-form").input_price_per_1m.value = suggested.input_price_per_1m || 0;
+          $("#model-form").output_price_per_1m.value = suggested.output_price_per_1m || 0;
+          $("#model-form").supports_tools.checked = suggested.supports_tools !== false;
+          $("#model-form").supports_reasoning.checked = Boolean(suggested.supports_reasoning);
+          $("#model-form").supports_reasoning_summary.checked = suggested.supports_reasoning_summary !== false;
+          $("#model-form").supports_transcription.checked = Boolean(suggested.supports_transcription);
+          $("#model-form").reasoning_efforts.value = (suggested.reasoning_efforts || []).join(",");
+          $("#model-form").default_reasoning_effort.value = suggested.default_reasoning_effort || "";
+          const capabilitySet = new Set(suggested.capabilities || ["text"]);
+          $$('input[name="capabilities"]', $("#model-form")).forEach((item) => {
+            item.checked = capabilitySet.has(item.value);
+          });
+          if (!$("#model-form").elements.namedItem("name").value.trim()) {
+            $("#model-form").elements.namedItem("name").value = modelId;
+          }
+          hint.innerHTML = `${icon("check", 13)} 已从 ${escapeHtml(suggested.metadata_source || "启发式规则")} 预填：上下文 ${suggested.context_window || 0} / 输出 ${suggested.max_output_tokens || 0}。仍可手工覆盖。`;
+        } catch (error) {
+          hint.innerHTML = `${icon("warning", 13)} 自动获取失败：${escapeHtml(error.message)}。可以继续手工填写。`;
+        }
+      }, 520);
+    });
     $("#model-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.target;
       let extra = {};
       try {
         extra = JSON.parse(form.extra_params.value || "{}");
+        if (!extra || typeof extra !== "object" || Array.isArray(extra)) throw new Error("invalid object");
       } catch {
         toast("额外请求参数必须是 JSON 对象", "warn");
         return;
+      }
+      if (["asr", "asr_realtime"].includes(form.model_kind.value) || form.supports_transcription.checked) {
+        extra._asr = { protocol: form.asr_protocol.value };
+        if (form.asr_endpoint.value.trim()) extra._asr.endpoint = form.asr_endpoint.value.trim();
+        if (form.asr_data_format.value) extra._asr.data_format = form.asr_data_format.value;
       }
       const payload = {
         provider_id: Number(form.provider_id.value),
         name: form.elements.namedItem("name").value.trim(),
         model_id: form.model_id.value.trim(),
+        model_kind: form.model_kind.value || "chat",
         context_window: Number(form.context_window.value) || 0,
         max_output_tokens: Number(form.max_output_tokens.value) || 0,
         temperature: Number(form.temperature.value),
         top_p: Number(form.top_p.value),
+        input_price_per_1m: Number(form.input_price_per_1m.value) || 0,
+        output_price_per_1m: Number(form.output_price_per_1m.value) || 0,
         extra_params: extra,
         capabilities: $$('input[name="capabilities"]:checked', form).map((item) => item.value),
         supports_tools: form.supports_tools.checked,
+        supports_reasoning: form.supports_reasoning.checked,
+        supports_reasoning_summary: form.supports_reasoning_summary.checked,
+        supports_transcription: form.supports_transcription.checked,
+        reasoning_style: "effort",
+        reasoning_efforts: String(form.reasoning_efforts.value || "").split(",").map((item) => item.trim()).filter((item) => ["off", "none", "minimal", "low", "medium", "high", "xhigh"].includes(item)),
+        default_reasoning_effort: form.default_reasoning_effort.value || "",
+        metadata_source: model?.metadata_source || "manual",
         is_default: form.is_default.checked,
         enabled: form.enabled.checked,
       };
@@ -1831,7 +3872,7 @@
               ${tools.filter((tool) => tool.risk === "read").length ? "" : '<span class="check-note">没有可用的读取类工具</span>'}
             </div>
           </div>
-          <div class="field span-2"><span>技能</span>
+          <div class="field span-2"><span>技能（只注入名称与用途，模型按需加载正文）</span>
             <div class="check-grid">
               ${skills.map((skill) => `<label><input type="checkbox" name="skill_ids" value="${skill.id}" ${selectedSkills.has(Number(skill.id)) ? "checked" : ""}> ${escapeHtml(skill.name)}</label>`).join("")}
               ${skills.length ? "" : '<span class="check-note">暂无技能</span>'}
@@ -1908,9 +3949,39 @@
       if (!groups[key]) groups[key] = [];
       groups[key].push(tool);
     }
+    const pilot = state.config.pagepilot || {};
+    const pilotEnabled = Boolean(pilot.enabled && pilot.configured);
     $("#config-content").innerHTML = `
-      ${sectionHead("MCP 工具", "这里是全局开关。用户实际可用工具 = 账号权限 ∩ 助手白名单 ∩ 全局开关 ∩ 本轮勾选。", `
-        <span class="count-pill">${data.enabled_count}/${data.total}</span>`)}
+      ${sectionHead("工具治理", "工具支持 MCP 与管理员新增的 HTTP 连接器。四种状态：可见可选 / 可见固定 / 不可见但默认启用 / 不可见不可用；写和删除工具也可隐藏，但审批策略仍会校验权限。", `
+        <span class="count-pill">${data.enabled_count}/${data.total}</span>
+        <button class="primary-btn" data-action="dynamic-tool-new">${icon("plus", 14)} 新增工具</button>`)}
+      <section class="panel connector-card ${pilotEnabled ? "connected" : ""}">
+        <div class="connector-main">
+          <span class="connector-icon">PP</span>
+          <div>
+            <div class="connector-title">
+              <strong>PagePilot 发布连接器</strong>
+              <span class="badge ${pilotEnabled ? "badge-green" : "badge"}">${pilotEnabled ? "已接入" : "未接入"}</span>
+              <span class="badge badge-blue">REST</span>
+            </div>
+            <p>把模型生成或预览中的 HTML 发布为可访问网页。PagePilot 的 MCP 是本地 stdio，本框架通过官方 <code>POST /api/deploy</code> 接入，Token 加密保存且不下发浏览器。</p>
+            <div class="list-row-meta">
+              <span>${escapeHtml(pilot.base_url || "尚未配置地址")}</span>
+              <span>${pilot.token_set ? `Token ${escapeHtml(pilot.token_masked)}` : "未配置 Token"}</span>
+              <span>工具名 publish_to_pagepilot · 写入风险 · 需审批</span>
+            </div>
+          </div>
+        </div>
+        <div class="connector-actions">
+          <button class="ghost-btn" data-action="pagepilot-test">测试连接</button>
+          <button class="primary-btn" data-action="pagepilot-config">${pilotEnabled ? "管理连接" : "接入 PagePilot"}</button>
+        </div>
+      </section>
+      <div class="settings-note" style="margin:0 0 10px">${icon("search", 14)}<span>工具较多时先按账号权限、助手白名单和四态过滤，再按需检索，只把最相关的 16 个 Schema 注入模型。关闭 BM25 后会注入全部可用工具，适合工具很少但需要全量能力的场景。</span></div>
+      <div class="inline-switch tool-bm25-switch">
+        <div><strong>BM25 工具检索</strong><small>${state.status?.bm25_enabled === false ? "已关闭：全部可用工具都会进入模型上下文" : "已开启：工具较多时按查询召回 Top 16"}</small></div>
+        <label class="switch"><input type="checkbox" data-config-toggle="bm25" ${state.status?.bm25_enabled === false ? "" : "checked"}><span class="switch-track"></span></label>
+      </div>
       ${Object.entries(groups).map(([category, tools]) => `
         <div class="tool-group">
           <div class="tool-group-head"><strong>${escapeHtml(category)}</strong><span>${tools.length} 个</span></div>
@@ -1919,32 +3990,262 @@
               <div class="list-row ${tool.enabled ? "" : "off"}">
                 <span class="assistant-icon">${icon(tool.risk === "read" ? "eye" : tool.risk === "delete" ? "trash" : "edit", 13)}</span>
                 <div class="list-row-main">
-                  <div class="list-row-title"><strong>${escapeHtml(tool.name)}</strong><span class="risk-badge ${escapeHtml(tool.risk)}">${escapeHtml(RISK_LABELS[tool.risk] || tool.risk)}</span></div>
+                  <div class="list-row-title">
+                    <strong>${escapeHtml(tool.name)}</strong>
+                    <span class="risk-badge ${escapeHtml(tool.risk)}">${escapeHtml(RISK_LABELS[tool.risk] || tool.risk)}</span>
+                    <span class="badge ${tool.source === "dynamic" ? "badge-blue" : ""}">${toolSourceLabel(tool)}</span>
+                  </div>
                   <p>${escapeHtml(tool.description)}</p>
                   <div class="list-row-meta"><span>${escapeHtml(tool.permission)}</span></div>
                 </div>
                 <div class="list-row-actions">
-                  <label class="switch"><input type="checkbox" data-config-toggle="tool" data-name="${escapeHtml(tool.name)}" ${tool.enabled ? "checked" : ""}><span class="switch-track"></span></label>
+                  <select class="select-control tool-state-select" data-tool-state="${escapeHtml(tool.name)}" aria-label="工具状态">
+                    <option value="optional" ${toolState(tool) === "optional" ? "selected" : ""}>可见 · 可选</option>
+                    <option value="fixed" ${toolState(tool) === "fixed" ? "selected" : ""}>可见 · 不可选</option>
+                    <option value="hidden" ${toolState(tool) === "hidden" ? "selected" : ""}>不可见 · 默认启用</option>
+                    <option value="disabled" ${toolState(tool) === "disabled" ? "selected" : ""}>不可见 · 不可用</option>
+                  </select>
+                  ${tool.source === "dynamic" ? `
+                    <button class="mini-action" data-action="dynamic-tool-edit" data-id="${tool.definition?.dynamic_tool_id || ""}" title="编辑">${icon("edit", 12)}</button>
+                    <button class="mini-action danger" data-action="dynamic-tool-delete" data-id="${tool.definition?.dynamic_tool_id || ""}" title="删除">${icon("trash", 12)}</button>` : ""}
                 </div>
               </div>`).join("")}
           </div>
         </div>`).join("")}`;
   }
 
+  function dynamicToolById(id) {
+    return (state.config.dynamicTools || []).find((item) => Number(item.id) === Number(id));
+  }
+
+  function openDynamicToolModal(tool = null) {
+    const editing = Boolean(tool);
+    const schema = tool?.input_schema || { type: "object", properties: {} };
+    openModal(`
+      <div class="modal-head">
+        <div><h3>${editing ? "编辑动态工具" : "新增动态工具"}</h3><p>管理员用 HTTP 连接器接入业务 API，不需要改 MCP 或 Agent 代码。工具调用仍透传当前用户 Token，并由业务系统再次校验权限。</p></div>
+        <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
+      </div>
+      <form id="dynamic-tool-form" class="modal-body">
+        <div class="form-grid">
+          <label class="field"><span>工具名</span><input name="name" value="${escapeHtml(tool?.name || "")}" placeholder="get_device_detail" required pattern="[A-Za-z][A-Za-z0-9_-]{1,63}"></label>
+          <label class="field"><span>显示名称</span><input name="display_name" value="${escapeHtml(tool?.display_name || "")}" placeholder="读取设备详情"></label>
+          <label class="field span-2"><span>描述（会参与 BM25 检索）</span><input name="description" value="${escapeHtml(tool?.description || "")}" placeholder="按设备 ID 读取一台设备的完整信息" required></label>
+          <label class="field"><span>分类</span><input name="category" value="${escapeHtml(tool?.category || "业务连接器")}"></label>
+          <label class="field"><span>所需权限</span><input name="permission" value="${escapeHtml(tool?.permission || "device:read")}" placeholder="device:read"></label>
+          <label class="field"><span>风险等级</span>
+            <select name="risk">
+              ${["read", "write", "delete"].map((risk) => `<option value="${risk}" ${tool?.risk === risk ? "selected" : ""}>${RISK_LABELS[risk]}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field"><span>HTTP 方法</span>
+            <select name="method">
+              ${["GET", "POST", "PUT", "PATCH", "DELETE"].map((method) => `<option value="${method}" ${tool?.method === method ? "selected" : ""}>${method}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field span-2"><span>URL 模板</span><input name="url_template" value="${escapeHtml(tool?.url_template || "http://127.0.0.1:8000/api/devices/{device_id}")}" placeholder="http://业务系统/api/.../{path_param}" required></label>
+          <label class="field span-2"><span>附加 Header（JSON）</span><input name="headers" value="${escapeHtml(JSON.stringify(tool?.headers || {}))}" placeholder='{"X-Client":"webagent"}'></label>
+          <label class="field span-2"><span>输入 Schema（JSON Schema）</span><textarea name="input_schema" style="min-height:160px;font-family:var(--mono);font-size:10px">${escapeHtml(JSON.stringify(schema, null, 2))}</textarea></label>
+          <label class="field span-2"><span>测试参数（JSON，仅测试用）</span><textarea name="test_arguments" style="min-height:70px;font-family:var(--mono);font-size:10px">{"device_id": 1}</textarea></label>
+          <div class="field span-2"><label><input type="checkbox" name="enabled" ${tool?.enabled !== false ? "checked" : ""}> 启用这个工具</label></div>
+        </div>
+        <div class="modal-foot" style="padding:0">
+          <button type="button" class="ghost-btn" data-action="modal-close">取消</button>
+          ${editing ? `<button type="button" class="ghost-btn" data-action="dynamic-tool-test" data-id="${tool.id}">测试调用</button>` : ""}
+          <button type="submit" class="primary-btn">${editing ? "保存" : "创建"}</button>
+        </div>
+        <div id="dynamic-tool-test-result" class="test-result hidden"></div>
+      </form>`, { wide: true });
+    $("#dynamic-tool-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.target;
+      let headers = {};
+      let inputSchema = {};
+      try {
+        headers = JSON.parse(form.headers.value || "{}");
+        inputSchema = JSON.parse(form.input_schema.value || "{}");
+      } catch {
+        toast("Header 和输入 Schema 必须是 JSON", "warn");
+        return;
+      }
+      const payload = {
+        name: form.name.value.trim(),
+        display_name: form.display_name.value.trim(),
+        description: form.description.value.trim(),
+        category: form.category.value.trim() || "业务连接器",
+        permission: form.permission.value.trim(),
+        risk: form.risk.value,
+        method: form.method.value,
+        url_template: form.url_template.value.trim(),
+        headers,
+        input_schema: inputSchema,
+        enabled: form.enabled.checked,
+      };
+      try {
+        if (editing) {
+          await api(`/api/agent/admin/dynamic-tools/${tool.id}`, { method: "PUT", body: payload });
+          toast("动态工具已更新");
+        } else {
+          await api("/api/agent/admin/dynamic-tools", { method: "POST", body: payload });
+          toast("动态工具已创建");
+        }
+        closeModal();
+        await loadConfigTab("tools");
+      } catch (error) {
+        toast(error.message, "error", 5000);
+      }
+    });
+  }
+
+  async function testDynamicTool(id, target) {
+    const form = $("#dynamic-tool-form");
+    const resultNode = $("#dynamic-tool-test-result");
+    let args = {};
+    try {
+      args = JSON.parse(form?.test_arguments?.value || "{}");
+    } catch {
+      toast("测试参数必须是 JSON", "warn");
+      return;
+    }
+    const original = target.textContent;
+    target.disabled = true;
+    target.textContent = "测试中…";
+    resultNode.className = "test-result";
+    resultNode.textContent = "正在调用业务 API…";
+    resultNode.classList.remove("hidden");
+    try {
+      const data = await api(`/api/agent/admin/dynamic-tools/${id}/test`, {
+        method: "POST",
+        body: { arguments: args },
+      });
+      resultNode.className = `test-result ${data.ok ? "ok" : "fail"}`;
+      resultNode.textContent = data.message || (data.ok ? "调用成功" : "调用失败");
+    } catch (error) {
+      resultNode.className = "test-result fail";
+      resultNode.textContent = error.message;
+    } finally {
+      target.disabled = false;
+      target.textContent = original;
+    }
+  }
+
+  /* ----- PagePilot connector ----- */
+  function openPagePilotModal() {
+    const pilot = state.config.pagepilot || {};
+    openModal(`
+      <div class="modal-head">
+        <div><h3>PagePilot 发布连接器</h3><p>通过 PagePilot REST API 发布 HTML。Token 只在 Agent 服务端加密保存，浏览器只会看到掩码。</p></div>
+        <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
+      </div>
+      <form id="pagepilot-form" class="modal-body">
+        <div class="form-grid">
+          <label class="field span-2"><span>PagePilot 地址</span><input name="base_url" value="${escapeHtml(pilot.base_url || "https://pagepilot.dell.4dbim.cc:1143")}" placeholder="https://pagepilot.example.com:1143" required></label>
+          <label class="field span-2"><span>Bearer Token ${pilot.token_set ? "（留空表示不修改）" : ""}</span><input name="token" type="password" value="" placeholder="${pilot.token_set ? "已配置，留空保持不变" : "粘贴 PagePilot Token"}" autocomplete="new-password"></label>
+          <label class="field"><span>标题后缀 / 模板</span><input name="default_title" maxlength="120" value="${escapeHtml(pilot.default_title || "")}" placeholder="例如：设备运维；或用 {title}（{date}）"></label>
+          <label class="field"><span>默认发布说明</span><input name="default_description" maxlength="240" value="${escapeHtml(pilot.default_description || "")}" placeholder="支持 {date}、{user}；留空自动生成"></label>
+          <label class="field"><span>默认可见范围</span>
+            <select name="default_visibility">
+              <option value="unlisted" ${(pilot.default_visibility || "unlisted") === "unlisted" ? "selected" : ""}>不公开（仅链接可见）</option>
+              <option value="public" ${pilot.default_visibility === "public" ? "selected" : ""}>公开（创作广场可见）</option>
+            </select>
+          </label>
+          <label class="field"><span>连接器状态</span>
+            <select name="enabled">
+              <option value="1" ${pilot.enabled ? "selected" : ""}>启用</option>
+              <option value="0" ${!pilot.enabled ? "selected" : ""}>停用</option>
+            </select>
+          </label>
+          <label class="field"><span>清除已存 Token</span>
+            <select name="clear_token">
+              <option value="0">保留</option>
+              <option value="1">清除 Token</option>
+            </select>
+          </label>
+        </div>
+        <div class="settings-note" style="margin-top:12px">${icon("shield", 14)}<span>标题规则：用户填写标题 + 后台后缀，例如「用户标题（设备运维）」；用户不填时使用后台值并自动追加日期。访问密码每次发布时填写，留空即公开，不会自动生成。</span></div>
+        <div id="pagepilot-test-result" class="test-result hidden"></div>
+        <div class="modal-foot" style="padding:16px 0 0">
+          <button type="button" class="ghost-btn" data-action="modal-close">取消</button>
+          <button type="button" class="ghost-btn" data-action="pagepilot-test">测试连接</button>
+          <button type="submit" class="primary-btn">保存连接器</button>
+        </div>
+      </form>`, { wide: true });
+    $("#pagepilot-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.target;
+      const payload = {
+        base_url: form.base_url.value.trim(),
+        enabled: form.enabled.value === "1",
+        default_title: form.default_title.value.trim(),
+        default_description: form.default_description.value.trim(),
+        default_visibility: form.default_visibility.value,
+        clear_token: form.clear_token.value === "1",
+      };
+      if (form.token.value.trim()) payload.token = form.token.value.trim();
+      try {
+        const data = await api("/api/agent/admin/pagepilot", { method: "PUT", body: payload });
+        state.config.pagepilot = data.config;
+        toast("PagePilot 连接器已保存");
+        closeModal();
+        await loadConfigTab("tools");
+      } catch (error) {
+        toast(error.message, "error", 5000);
+      }
+    });
+  }
+
+  async function testPagePilot(target) {
+    const result = $("#pagepilot-test-result");
+    const original = target.textContent;
+    target.disabled = true;
+    target.textContent = "测试中…";
+    if (result) {
+      result.className = "test-result";
+      result.textContent = "正在验证 PagePilot Token…";
+      result.classList.remove("hidden");
+    }
+    try {
+      const data = await api("/api/agent/admin/pagepilot/test", { method: "POST" });
+      if (result) {
+        result.className = `test-result ${data.ok ? "ok" : "fail"}`;
+        result.textContent = data.message;
+      } else {
+        toast(data.message, data.ok ? "ok" : "error", 5000);
+      }
+    } catch (error) {
+      if (result) {
+        result.className = "test-result fail";
+        result.textContent = error.message;
+      } else {
+        toast(error.message, "error", 5000);
+      }
+    } finally {
+      target.disabled = false;
+      target.textContent = original;
+    }
+  }
+
   /* ----- Skills ----- */
   function renderSkillsConfig() {
     const items = state.config.skills;
     $("#config-content").innerHTML = `
-      ${sectionHead("技能", "技能会作为规范或知识注入系统提示词，由助手选择启用。", `
+      ${sectionHead("技能", "按 Agent Skills 规范做渐进式加载：系统提示词只放名称和用途，需要时由模型调用 load_skill 读取正文。", `
         <span class="count-pill">${items.length} 个</span>
         <button class="primary-btn" data-action="skill-new">${icon("plus", 14)} 新增技能</button>`)}
       <div class="list-panel">${items.length ? items.map((item) => `
         <div class="list-row ${item.enabled ? "" : "off"}">
           <span class="assistant-icon">${icon("book", 13)}</span>
           <div class="list-row-main">
-            <div class="list-row-title"><strong>${escapeHtml(item.name)}</strong></div>
+            <div class="list-row-title">
+              <strong>${escapeHtml(item.name)}</strong>
+              <code>${escapeHtml(item.slug || "—")}</code>
+              <span class="badge badge-blue">知识型</span>
+            </div>
             <p>${escapeHtml(item.description || "未填写描述")}</p>
-            <div class="list-row-meta"><span>${escapeHtml(truncate(item.content.replace(/\s+/g, " "), 90))}</span></div>
+            <div class="list-row-meta">
+              <span>${Object.keys(item.files || {}).length} 个参考文件</span>
+              <span>${escapeHtml(truncate(item.content.replace(/\s+/g, " "), 90))}</span>
+            </div>
           </div>
           <div class="list-row-actions">
             <label class="switch"><input type="checkbox" data-config-toggle="skill" data-id="${item.id}" ${item.enabled ? "checked" : ""}><span class="switch-track"></span></label>
@@ -1956,16 +4257,21 @@
 
   function openSkillModal(skill = null) {
     const editing = Boolean(skill);
+    const files = skill?.files || {};
     openModal(`
       <div class="modal-head">
-        <div><h3>${editing ? "编辑技能" : "新增技能"}</h3><p>技能内容会直接拼进系统提示词，建议写清规则而不是长篇资料。</p></div>
+        <div><h3>${editing ? "编辑技能" : "新增技能"}</h3><p>遵循 Agent Skills 渐进式加载：名称和描述常驻提示词，正文与参考文件按需加载。技能只提供知识，不获得执行权限。</p></div>
         <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
       </div>
       <form id="skill-form" class="modal-body">
         <div class="form-grid">
-          <label class="field span-2"><span>名称</span><input name="name" value="${escapeHtml(skill?.name || "")}" required></label>
+          <label class="field"><span>名称</span><input name="name" value="${escapeHtml(skill?.name || "")}" required></label>
+          <label class="field"><span>标识（slug）</span><input name="slug" value="${escapeHtml(skill?.slug || "")}" placeholder="device-inspection"></label>
           <label class="field span-2"><span>描述</span><input name="description" value="${escapeHtml(skill?.description || "")}"></label>
-          <label class="field span-2"><span>内容</span><textarea name="content" required>${escapeHtml(skill?.content || "")}</textarea></label>
+          <label class="field"><span>类型</span><input value="prompt · 知识型" disabled></label>
+          <label class="field"><span>License（可选）</span><input name="license" value="${escapeHtml(skill?.license || "")}" placeholder="MIT / 内部规范"></label>
+          <label class="field span-2"><span>SKILL.md 正文</span><textarea name="content" required style="min-height:220px">${escapeHtml(skill?.content || "")}</textarea></label>
+          <label class="field span-2"><span>参考文件（JSON：路径 → 内容）</span><textarea name="files" style="min-height:150px" placeholder='{"references/status-codes.md":"# 状态码..."}'>${escapeHtml(JSON.stringify(files, null, 2))}</textarea></label>
         </div>
         <div class="modal-foot" style="padding:0">
           <button type="button" class="ghost-btn" data-action="modal-close">取消</button>
@@ -1975,10 +4281,25 @@
     $("#skill-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.target;
+      let filesValue = {};
+      try {
+        filesValue = JSON.parse(form.files.value || "{}");
+      } catch {
+        toast("参考文件必须是 JSON 对象", "warn");
+        return;
+      }
+      if (typeof filesValue !== "object" || Array.isArray(filesValue)) {
+        toast("参考文件必须是 JSON 对象", "warn");
+        return;
+      }
       const payload = {
         name: form.elements.namedItem("name").value.trim(),
+        slug: form.slug.value.trim(),
         description: form.description.value.trim(),
         content: form.content.value.trim(),
+        kind: "prompt",
+        license: form.license.value.trim(),
+        files: filesValue,
       };
       try {
         if (editing) {
@@ -2019,6 +4340,148 @@
       </div>`;
   }
 
+  /* ----- Sessions ----- */
+  function renderSessionsConfig() {
+    const items = state.config.sessions || [];
+    const summary = state.config.usageSummary || {};
+    const totals = summary.totals || {};
+    const filter = state.sessionFilter;
+    const statusOptions = [
+      ["", "全部状态"],
+      ["ok", "成功"],
+      ["error", "失败"],
+      ["approval_required", "待审批"],
+    ];
+    const cards = [
+      ["近 " + (summary.days || filter.days) + " 天调用", formatTokens(totals.calls || 0)],
+      ["总 tokens", formatTokens(totals.total_tokens || 0)],
+      ["估算费用", formatCost(totals.cost_usd || 0)],
+      ["失败 / 重试", `${formatTokens(totals.errors || 0)} / ${formatTokens(totals.retries || 0)}`],
+    ];
+    $("#config-content").innerHTML = `
+      ${sectionHead("会话管理", "查看所有用户的会话、上下文压缩、重试与 token 消耗。查看和导出都会写入审计。", `
+        <span class="count-pill">${state.config.sessionTotal || items.length} 个会话</span>
+        <button class="ghost-btn" data-action="admin-sessions-refresh">刷新</button>`)}
+      <div class="admin-session-summary">
+        ${cards.map(([label, value]) => `<div class="stat-card"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${escapeHtml(value)}</div></div>`).join("")}
+      </div>
+      <div class="panel" style="margin-bottom:12px;padding:11px">
+        <div class="session-filter-row">
+          <input data-session-filter="username" value="${escapeHtml(filter.username)}" placeholder="用户">
+          <input data-session-filter="model" value="${escapeHtml(filter.model)}" placeholder="模型">
+          <input data-session-filter="q" value="${escapeHtml(filter.q)}" placeholder="标题 / 关键词">
+          <select class="select-control" data-session-filter="status">
+            ${statusOptions.map(([value, label]) => `<option value="${value}" ${filter.status === value ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+          <select class="select-control" data-session-filter="days">
+            ${[1, 7, 30, 90].map((days) => `<option value="${days}" ${Number(filter.days) === days ? "selected" : ""}>近 ${days} 天</option>`).join("")}
+          </select>
+          <button class="primary-btn" data-action="admin-sessions-refresh">查询</button>
+          <button class="ghost-btn" data-action="admin-sessions-reset">重置</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>用户</th><th>标题</th><th>助手</th><th>模型</th><th>状态</th><th>消息</th><th>Tokens</th><th>费用</th><th>重试/压缩</th><th>更新时间</th><th class="w-actions">操作</th></tr></thead>
+            <tbody>${items.length ? items.map((item) => `
+              <tr>
+                <td><strong>${escapeHtml(item.username)}</strong><br><span class="mono">#${item.user_id}</span></td>
+                <td class="device-name">${escapeHtml(item.title || "新对话")}</td>
+                <td>${escapeHtml(item.assistant_name || "—")}</td>
+                <td class="mono">${escapeHtml(item.last_model_name || "—")}</td>
+                <td>${item.last_status === "error" ? '<span class="badge badge-red">失败</span>' : item.last_status === "approval_required" ? '<span class="badge badge-warn">待审批</span>' : item.last_status ? '<span class="badge badge-green">成功</span>' : "—"}</td>
+                <td class="mono">${item.message_count || 0}</td>
+                <td class="mono">${formatTokens(item.total_tokens || 0)}</td>
+                <td class="mono">${formatCost(item.total_cost_usd || 0)}</td>
+                <td class="mono">${item.retry_count || 0} / ${item.compaction_count || 0}</td>
+                <td class="mono">${formatTime(item.updated_at)}</td>
+                <td class="w-actions"><button class="row-btn" data-action="admin-session-detail" data-id="${escapeHtml(item.id)}" title="查看会话">${icon("eye", 13)}</button></td>
+              </tr>`).join("") : '<tr><td colspan="11"><div class="empty-config">没有匹配的会话</div></td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel" style="padding:11px 13px">
+        <div class="settings-note">${icon("shield", 14)}<span>隐私开关关闭时，管理员只能看到会话元数据、工具名和 token，不显示正文与工具参数。可在「运行设置」中调整。</span></div>
+      </div>`;
+  }
+
+  async function openAdminSessionDetail(id) {
+    openModal(`<div class="modal-head"><div><h3>会话详情</h3><p>正在读取…</p></div><button class="icon-btn" data-action="modal-close">${icon("x")}</button></div><div class="modal-body"><div class="empty-config">加载中…</div></div>`, { wide: true });
+    try {
+      const detail = await api(`/api/agent/admin/sessions/${encodeURIComponent(id)}`);
+      state.sessionDetail = detail;
+      const session = detail.session || {};
+      const messages = detail.messages || [];
+      const compactions = detail.compaction_events || [];
+      const calls = detail.llm_calls || [];
+      const privacy = detail.privacy || {};
+      const meta = [
+        ["用户", `${session.username || "—"} #${session.user_id || ""}`],
+        ["助手", session.assistant_name || "—"],
+        ["模型", session.last_model_name || "—"],
+        ["状态", SESSION_STATUS_LABELS[session.last_status] || session.last_status || "—"],
+        ["消息数", String(session.message_count || messages.length)],
+        ["累计 tokens", formatTokens(session.total_tokens || 0)],
+        ["估算费用", formatCost(session.total_cost_usd || 0)],
+        ["重试 / 压缩", `${session.retry_count || 0} / ${session.compaction_count || 0}`],
+      ];
+      const messageHtml = messages.length ? messages.map((message) => {
+        const runs = message.tool_runs || [];
+        const usage = message.metadata?.usage || {};
+        return `
+          <div class="session-detail-message ${escapeHtml(message.role)}">
+            <div class="msg-head">
+              <strong>${message.role === "user" ? "用户" : "助手"}</strong>
+              <span>${formatTime(message.created_at)} · ${message.token_estimate || 0} tokens</span>
+            </div>
+            <div class="msg-text">${renderMarkdown(message.content || "（无正文）")}</div>
+            ${runs.length ? `<div class="admin-tool-runs">${runs.map((run, index) => renderProcessToolStep(run, index)).join("")}</div>` : ""}
+            ${usage.total_tokens ? `<div class="msg-usage">${formatTokens(usage.prompt_tokens)} in · ${formatTokens(usage.completion_tokens)} out · ${formatCost(usage.cost_usd)}${usage.retry_count ? ` · ${usage.retry_count} 次重试` : ""}</div>` : ""}
+          </div>`;
+      }).join("") : '<div class="empty-config">没有消息</div>';
+      const compactionHtml = compactions.length ? compactions.map((event) => `
+        <div class="session-event-row">
+          <span class="${event.ok ? "ok" : "fail"}">${event.ok ? "OK" : "FAIL"}</span>
+          <span>${formatTime(event.created_at)}</span>
+          <span>${escapeHtml(event.trigger)}</span>
+          <span>${formatTokens(event.before_tokens)} → ${formatTokens(event.after_tokens)}</span>
+          <span>${event.summarized_messages} 条</span>
+          <span>${escapeHtml(event.summary_model || "")}</span>
+          <span>${event.duration_ms}ms</span>
+        </div>`).join("") : '<div class="usage-note">没有压缩记录</div>';
+      const callHtml = calls.length ? calls.slice(0, 40).map((call) => `
+        <div class="session-event-row">
+          <span class="${call.status === "ok" ? "ok" : "fail"}">${call.status}</span>
+          <span>${formatTime(call.created_at)}</span>
+          <span>${escapeHtml(call.purpose)}</span>
+          <span>#${call.attempt}</span>
+          <span>${formatTokens(call.total_tokens)} tok</span>
+          <span>${formatCost(call.cost_usd)}</span>
+          <span>${call.latency_ms}ms</span>
+          <span title="${escapeHtml(call.error || "")}">${escapeHtml(truncate(call.error || "", 60))}</span>
+        </div>`).join("") : '<div class="usage-note">没有模型调用记录</div>';
+      openModal(`
+        <div class="modal-head">
+          <div><h3>${escapeHtml(session.title || "会话详情")}</h3><p>${escapeHtml(session.id)}${privacy.include_content ? "" : " · 正文已按隐私设置隐藏"}</p></div>
+          <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
+        </div>
+        <div class="modal-body">
+          <div class="session-detail-meta">${meta.map(([label, value]) => `<div><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div>
+          <div class="session-detail-messages">${messageHtml}</div>
+          <div class="session-events"><h4>压缩记录</h4>${compactionHtml}</div>
+          <div class="session-events"><h4>模型调用与重试</h4>${callHtml}</div>
+          <div class="modal-foot" style="padding:0">
+            <a class="ghost-btn" href="/api/agent/admin/sessions/${encodeURIComponent(session.id)}/export?format=json" download>导出 JSON</a>
+            <a class="ghost-btn" href="/api/agent/admin/sessions/${encodeURIComponent(session.id)}/export?format=markdown" download>导出 Markdown</a>
+            <a class="ghost-btn" href="/api/agent/admin/sessions/${encodeURIComponent(session.id)}/export?format=csv" download>导出 CSV</a>
+          </div>
+        </div>`, { wide: true });
+      hydrateMermaid($("#modal-root .session-detail-messages"));
+    } catch (error) {
+      toast(error.message, "error", 5000);
+      closeModal();
+    }
+  }
+
   /* ----- Audit ----- */
   function renderAuditConfig() {
     const rows = [
@@ -2048,24 +4511,70 @@
   /* ----- Settings ----- */
   function renderSettingsConfig() {
     const config = state.config.settings || {};
+    const models = state.config.models || [];
+    const compactionModel = models.find((item) => Number(item.id) === Number(config.compaction_model_id));
     $("#config-content").innerHTML = `
       ${sectionHead("运行设置", "全局默认值。助手可以覆盖步数、工具调用、超时和上下文上限。", "")}
       <form id="settings-form" class="settings-grid">
         <section class="panel settings-card">
+          <div class="settings-section-title">模型与上下文</div>
           <div class="form-grid">
             <label class="field"><span>temperature</span><input name="llm_temperature" type="number" step="0.1" min="0" max="2" value="${config.llm_temperature ?? 0.3}"></label>
             <label class="field"><span>最大推理轮次</span><input name="max_iterations" type="number" min="1" max="12" value="${config.max_iterations ?? 6}"></label>
             <label class="field"><span>最大工具调用</span><input name="max_tool_calls" type="number" min="1" max="50" value="${config.max_tool_calls ?? 12}"></label>
             <label class="field"><span>运行超时（秒）</span><input name="max_run_seconds" type="number" min="10" max="900" value="${config.max_run_seconds ?? 120}"></label>
-            <label class="field"><span>上下文上限（tokens）</span><input name="context_max_tokens" type="number" min="4096" value="${config.context_max_tokens ?? 32000}"></label>
+            <label class="field"><span>上下文上限（0 = 跟随模型窗口）</span><input name="context_max_tokens" type="number" min="0" value="${config.context_max_tokens ?? 0}"></label>
+            <label class="field"><span>安全余量（tokens）</span><input name="context_reserve_tokens" type="number" min="0" max="100000" value="${config.context_reserve_tokens ?? 1600}"></label>
+            <label class="field"><span>压缩摘要模型</span>
+              <select name="compaction_model_id">
+                <option value="0" ${!config.compaction_model_id ? "selected" : ""}>跟随主模型</option>
+                ${models.map((model) => `<option value="${model.id}" ${Number(config.compaction_model_id) === Number(model.id) ? "selected" : ""}>${escapeHtml(model.name)} · ${escapeHtml(model.model_id)}</option>`).join("")}
+              </select>
+            </label>
+            <label class="field"><span>标题生成模型</span>
+              <select name="title_model_id">
+                <option value="0" ${!config.title_model_id ? "selected" : ""}>跟随主模型</option>
+                ${models.map((model) => `<option value="${model.id}" ${Number(config.title_model_id) === Number(model.id) ? "selected" : ""}>${escapeHtml(model.name)}</option>`).join("")}
+              </select>
+            </label>
+            <label class="field"><span>降级模型</span>
+              <select name="fallback_model_id">
+                <option value="0" ${!config.fallback_model_id ? "selected" : ""}>不降级</option>
+                ${models.map((model) => `<option value="${model.id}" ${Number(config.fallback_model_id) === Number(model.id) ? "selected" : ""}>${escapeHtml(model.name)}</option>`).join("")}
+              </select>
+            </label>
+            <label class="field"><span>语音识别（ASR）模型</span>
+              <select name="asr_model_id">
+                <option value="0" ${!config.asr_model_id ? "selected" : ""}>未配置（语音按钮禁用）</option>
+                ${models.filter((model) => model.supports_transcription && model.model_kind !== "asr_realtime" && !/realtime|real-time/i.test(model.model_id || "")).map((model) => `<option value="${model.id}" ${Number(config.asr_model_id) === Number(model.id) ? "selected" : ""}>${escapeHtml(model.name)}</option>`).join("")}
+              </select>
+              <small>仅用于录音文件识别。实时 WebSocket 模型不能在这里使用；请先在模型中选择正确语音协议并测试。</small>
+            </label>
+            <label class="field"><span>默认执行方式</span>
+              <select name="default_approval_mode">
+                <option value="confirm" ${config.default_approval_mode !== "full_access" ? "selected" : ""}>变更前确认</option>
+                <option value="full_access" ${config.default_approval_mode === "full_access" ? "selected" : ""}>完全访问</option>
+              </select>
+            </label>
+            <label class="field"><span>默认思考强度</span>
+              <select name="default_reasoning_effort">
+                ${REASONING_OPTIONS.map(([effort, label]) => `<option value="${effort}" ${(config.default_reasoning_effort || "") === effort ? "selected" : ""}>${label}</option>`).join("")}
+              </select>
+            </label>
+            <label class="field"><span>压缩保留比例（0.2–0.9）</span><input name="compaction_keep_ratio" type="number" step="0.05" min="0.2" max="0.9" value="${config.compaction_keep_ratio ?? 0.58}"></label>
+            <label class="field"><span>每用户每日 token 上限（0 = 不限）</span><input name="user_daily_token_limit" type="number" min="0" value="${config.user_daily_token_limit ?? 0}"></label>
             <label class="field"><span>演示模式</span>
               <select name="demo_mode"><option value="1" ${config.demo_mode ? "selected" : ""}>开启（不请求外部 LLM）</option><option value="0" ${!config.demo_mode ? "selected" : ""}>关闭（真实调用）</option></select>
             </label>
+            <label class="field"><span>空态标题</span><input name="welcome_title" maxlength="120" value="${escapeHtml(config.welcome_title || "有什么我能帮你的吗？")}"></label>
+            <label class="field"><span>空态副标题（留空用助手欢迎语）</span><input name="welcome_subtitle" maxlength="500" value="${escapeHtml(config.welcome_subtitle || "")}"></label>
+            <label class="field span-2"><span>空态问题（每行一个，留空使用权限默认）</span><textarea name="welcome_prompts" style="min-height:92px">${escapeHtml(config.welcome_prompts || "")}</textarea></label>
             <label class="field span-2"><span>管理员补充提示词</span><textarea name="system_prompt_extra" style="min-height:110px">${escapeHtml(config.system_prompt_extra || "")}</textarea></label>
           </div>
           <div class="check-grid" style="margin-top:4px">
-            <label><input type="checkbox" name="context_compression" ${config.context_compression ? "checked" : ""}> 启用上下文压缩</label>
+            <label><input type="checkbox" name="context_compression" ${config.context_compression ? "checked" : ""}> 启用自动上下文压缩</label>
             <label><input type="checkbox" name="memory_enabled" ${config.memory_enabled ? "checked" : ""}> 启用长期记忆</label>
+            <label><input type="checkbox" name="allow_full_access" ${config.allow_full_access !== false ? "checked" : ""}> 允许用户切换完全访问</label>
           </div>
           <div class="config-actions">
             <button type="submit" class="primary-btn">保存设置</button>
@@ -2074,9 +4583,37 @@
           <div id="settings-test-result" class="test-result hidden"></div>
         </section>
         <section class="panel settings-card">
+          <div class="settings-section-title">LLM 异常重试</div>
+          <div class="form-grid">
+            <label class="field"><span>最大尝试次数</span><input name="retry_max_attempts" type="number" min="1" max="8" value="${config.retry_max_attempts ?? 3}"></label>
+            <label class="field"><span>初始退避（毫秒）</span><input name="retry_initial_backoff_ms" type="number" min="100" max="60000" value="${config.retry_initial_backoff_ms ?? 800}"></label>
+            <label class="field"><span>最大退避（毫秒）</span><input name="retry_max_backoff_ms" type="number" min="100" max="120000" value="${config.retry_max_backoff_ms ?? 8000}"></label>
+            <label class="field"><span>退避倍数</span><input name="retry_multiplier" type="number" step="0.1" min="1" max="10" value="${config.retry_multiplier ?? 2}"></label>
+            <label class="field"><span>抖动比例（0–1）</span><input name="retry_jitter" type="number" step="0.05" min="0" max="1" value="${config.retry_jitter ?? 0.2}"></label>
+            <label class="field"><span>重试总时长上限（秒）</span><input name="retry_max_elapsed_seconds" type="number" min="1" max="600" value="${config.retry_max_elapsed_seconds ?? 60}"></label>
+          </div>
+          <div class="check-grid" style="margin-top:4px">
+            <label><input type="checkbox" name="retry_enabled" ${config.retry_enabled !== false ? "checked" : ""}> 启用自动重试</label>
+            <label><input type="checkbox" name="retry_honor_retry_after" ${config.retry_honor_retry_after !== false ? "checked" : ""}> 优先遵守 Retry-After</label>
+          </div>
+          <div class="settings-note" style="margin-top:10px">${icon("activity", 14)}<span>只重试 LLM HTTP 请求；超时、连接错误、429 和 5xx 会退避重试，401/403/404/422 不重试。工具执行不会自动重放。</span></div>
+        </section>
+        <section class="panel settings-card">
+          <div class="settings-section-title">会话与隐私</div>
+          <div class="form-grid">
+            <label class="field"><span>会话保留天数（0 = 永久）</span><input name="session_retention_days" type="number" min="0" max="3650" value="${config.session_retention_days ?? 0}"></label>
+            <label class="field"><span>管理员查看会话正文</span>
+              <select name="admin_session_content">
+                <option value="1" ${config.admin_session_content !== false ? "selected" : ""}>允许查看正文</option>
+                <option value="0" ${config.admin_session_content === false ? "selected" : ""}>只看元数据</option>
+              </select>
+            </label>
+          </div>
           <div class="settings-note">${icon("shield", 14)}<span>API Key 只存放于 Agent 服务端 SQLite，接口只返回掩码；浏览器和业务系统都拿不到明文。</span></div>
           <div class="settings-note" style="margin-top:10px">${icon("activity", 14)}<span>当前：${config.provider_count || 0} 个供应商 · ${config.model_count || 0} 个模型 · ${config.assistants || 0} 个助手</span></div>
+          <div class="inline-switch"><div><strong>保存思考原文</strong><small>关闭时仍可在本次页面展开思考，刷新后不恢复；开启后才持久保存原文。</small></div><label class="switch"><input type="checkbox" name="store_reasoning" ${config.store_reasoning !== false ? "checked" : ""}><span class="switch-track"></span></label></div>
           <div class="inline-switch"><div><strong>上下文压缩</strong><small>超出预算时把较早消息摘要，保留最近对话。</small></div><span class="badge ${config.context_compression ? "badge-green" : ""}">${config.context_compression ? "开启" : "关闭"}</span></div>
+          <div class="inline-switch"><div><strong>压缩摘要模型</strong><small>${compactionModel ? escapeHtml(compactionModel.name + " · " + compactionModel.model_id) : "跟随主模型"}</small></div><span class="badge badge-blue">${compactionModel ? "已指定" : "继承"}</span></div>
           <div class="inline-switch"><div><strong>长期记忆</strong><small>只注入用户手动添加的记忆，v1 不做自动抽取。</small></div><span class="badge ${config.memory_enabled ? "badge-green" : ""}">${config.memory_enabled ? "开启" : "关闭"}</span></div>
           <div class="inline-switch"><div><strong>演示模式</strong><small>开启时使用本地规则引擎，适合演示和回归测试。</small></div><span class="badge ${config.demo_mode ? "badge-warn" : "badge-green"}">${config.demo_mode ? "开启" : "关闭"}</span></div>
         </section>
@@ -2090,15 +4627,45 @@
         max_tool_calls: Number(form.max_tool_calls.value),
         max_run_seconds: Number(form.max_run_seconds.value),
         context_max_tokens: Number(form.context_max_tokens.value),
+        context_reserve_tokens: Number(form.context_reserve_tokens.value),
+        compaction_model_id: Number(form.compaction_model_id.value) || 0,
+        title_model_id: Number(form.title_model_id.value) || 0,
+        fallback_model_id: Number(form.fallback_model_id.value) || 0,
+        asr_model_id: Number(form.asr_model_id.value) || 0,
+        default_reasoning_effort: form.default_reasoning_effort.value,
+        default_approval_mode: form.default_approval_mode.value,
+        allow_full_access: form.allow_full_access.checked,
+        welcome_title: form.welcome_title.value.trim(),
+        welcome_subtitle: form.welcome_subtitle.value.trim(),
+        welcome_prompts: form.welcome_prompts.value.trim(),
+        compaction_keep_ratio: Number(form.compaction_keep_ratio.value),
+        user_daily_token_limit: Number(form.user_daily_token_limit.value) || 0,
+        session_retention_days: Number(form.session_retention_days.value) || 0,
+        admin_session_content: form.admin_session_content.value === "1",
+        store_reasoning: form.store_reasoning.checked,
         context_compression: form.context_compression.checked,
         memory_enabled: form.memory_enabled.checked,
         demo_mode: form.demo_mode.value === "1",
         system_prompt_extra: form.system_prompt_extra.value.trim(),
+        retry_enabled: form.retry_enabled.checked,
+        retry_max_attempts: Number(form.retry_max_attempts.value),
+        retry_initial_backoff_ms: Number(form.retry_initial_backoff_ms.value),
+        retry_max_backoff_ms: Number(form.retry_max_backoff_ms.value),
+        retry_multiplier: Number(form.retry_multiplier.value),
+        retry_jitter: Number(form.retry_jitter.value),
+        retry_honor_retry_after: form.retry_honor_retry_after.checked,
+        retry_max_elapsed_seconds: Number(form.retry_max_elapsed_seconds.value),
       };
       try {
         await api("/api/agent/config", { method: "PUT", body: payload });
         toast("运行设置已保存");
         state.demoMode = payload.demo_mode;
+        if (state.status) state.status.store_reasoning = payload.store_reasoning;
+        try {
+          const fresh = await api("/api/agent/status");
+          state.status = fresh;
+          renderVoiceState();
+        } catch { /* ignore */ }
         updateDemoBadge();
         await loadConfigTab("settings");
       } catch (error) {
@@ -2166,6 +4733,13 @@
   /* ----- Config actions ----- */
   async function handleConfigAction(action, target) {
     const id = target.dataset.id;
+    if (action === "admin-sessions-refresh") { await loadConfigTab("sessions"); return; }
+    if (action === "admin-sessions-reset") {
+      state.sessionFilter = { username: "", model: "", status: "", q: "", days: 7 };
+      await loadConfigTab("sessions");
+      return;
+    }
+    if (action === "admin-session-detail") { await openAdminSessionDetail(id); return; }
     if (action === "provider-new") { openProviderModal(); return; }
     if (action === "provider-edit") { openProviderModal(providerById(id)); return; }
     if (action === "provider-test") { testProvider(id, target); return; }
@@ -2176,7 +4750,7 @@
       try {
         await api(`/api/agent/admin/providers/${id}`, { method: "DELETE" });
         toast("供应商已删除");
-        await loadConfigTab("providers");
+        await loadConfigTab("models");
       } catch (error) { toast(error.message, "error"); }
       return;
     }
@@ -2186,14 +4760,7 @@
       return;
     }
     if (action === "model-test") {
-      const original = target.textContent;
-      target.disabled = true;
-      target.textContent = "测试中…";
-      try {
-        const data = await api(`/api/agent/admin/models/${id}/test`, { method: "POST" });
-        toast(data.message, data.ok ? "ok" : "error", 5000);
-      } catch (error) { toast(error.message, "error", 5000); }
-      finally { target.disabled = false; target.textContent = original; }
+      await testModel(id, target);
       return;
     }
     if (action === "model-delete") {
@@ -2202,6 +4769,25 @@
         await api(`/api/agent/admin/models/${id}`, { method: "DELETE" });
         toast("模型已删除");
         await loadConfigTab("models");
+      } catch (error) { toast(error.message, "error"); }
+      return;
+    }
+    if (action === "dynamic-tool-new") { openDynamicToolModal(); return; }
+    if (action === "pagepilot-config") { openPagePilotModal(); return; }
+    if (action === "pagepilot-test") { testPagePilot(target); return; }
+    if (action === "dynamic-tool-edit") {
+      openDynamicToolModal(dynamicToolById(id));
+      return;
+    }
+    if (action === "dynamic-tool-test") { testDynamicTool(Number(id), target); return; }
+    if (action === "dynamic-tool-delete") {
+      const tool = dynamicToolById(id);
+      if (!tool) return;
+      if (!(await confirmDialog({ title: "删除动态工具", message: `删除「${tool.display_name || tool.name}」？相关工具状态也会移除。`, confirmText: "删除", danger: true }))) return;
+      try {
+        await api(`/api/agent/admin/dynamic-tools/${id}`, { method: "DELETE" });
+        toast("动态工具已删除");
+        await loadConfigTab("tools");
       } catch (error) { toast(error.message, "error"); }
       return;
     }
@@ -2272,6 +4858,46 @@
   }
 
   async function handleConfigChange(event) {
+    const stateSelect = event.target.closest("[data-tool-state]");
+    if (stateSelect) {
+      const name = stateSelect.dataset.toolState;
+      const value = stateSelect.value;
+      const tool = state.config.tools.find((item) => item.name === name);
+      if (
+        value === "hidden" &&
+        tool &&
+        ["write", "delete"].includes(tool.risk)
+      ) {
+        const confirmed = await confirmDialog({
+          title: "隐藏高风险工具",
+          message: `「${name}」是${tool.risk === "delete" ? "删除" : "写入"}工具。隐藏后用户工具列表里看不到它，但模型仍可能自动调用；调用仍会进入审批。确认继续？`,
+          confirmText: "确认隐藏",
+          danger: true,
+        });
+        if (!confirmed) {
+          await loadConfigTab("tools");
+          return;
+        }
+      }
+      const payload = {
+        optional: { enabled: true, visible: true, selectable: true, default_selected: true },
+        fixed: { enabled: true, visible: true, selectable: false, default_selected: true },
+        hidden: { enabled: true, visible: false, selectable: false, default_selected: true },
+        disabled: { enabled: false, visible: false, selectable: false, default_selected: false },
+      }[value];
+      if (!payload) return;
+      try {
+        await api(`/api/agent/admin/tools/${encodeURIComponent(name)}`, { method: "PUT", body: payload });
+        const tool = state.config.tools.find((item) => item.name === name);
+        if (tool) Object.assign(tool, payload);
+        toast(`工具状态已更新：${TOOL_STATE_LABELS[value]}`, "ok", 1800);
+        await loadConfigTab("tools");
+      } catch (error) {
+        toast(error.message, "error");
+        await loadConfigTab("tools");
+      }
+      return;
+    }
     const toggle = event.target.closest("[data-config-toggle]");
     if (!toggle) return;
     const kind = toggle.dataset.configToggle;
@@ -2288,6 +4914,14 @@
       } else if (kind === "memory") {
         await api(`/api/agent/memories/${toggle.dataset.id}`, { method: "PATCH", body: { enabled } });
         toast(enabled ? "记忆已启用" : "记忆已停用", "ok", 1800);
+      } else if (kind === "bm25") {
+        const result = await api("/api/agent/config", {
+          method: "PUT",
+          body: { bm25_enabled: enabled },
+        });
+        state.status = { ...(state.status || {}), bm25_enabled: result.bm25_enabled };
+        toast(enabled ? "BM25 工具检索已开启" : "BM25 已关闭，全部工具将进入上下文", "ok", 2400);
+        await loadConfigTab("tools");
       }
     } catch (error) {
       toggle.checked = !enabled;
@@ -2312,6 +4946,7 @@
     $("#mobile-new-chat-btn").addEventListener("click", newChat);
     $("#mobile-assistant-btn").addEventListener("click", openAssistantPicker);
     $("#clear-chat-btn").addEventListener("click", clearChat);
+    $("#compact-chat-btn").addEventListener("click", compactChat);
     $("#send-btn").addEventListener("click", () => sendMessage());
     $("#chat-input").addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
@@ -2324,7 +4959,16 @@
       event.target.style.height = `${Math.min(event.target.scrollHeight, 180)}px`;
     });
     $("#model-select").addEventListener("change", (event) => changeModel(event.target.value));
+    $("#reasoning-select").addEventListener("change", (event) => {
+      state.reasoningEffort = event.target.value;
+    });
+    $("#voice-btn").addEventListener("click", toggleVoice);
+    $("#access-mode-btn").addEventListener("click", () => {
+      $("#tool-popover").classList.add("hidden");
+      $("#access-popover").classList.toggle("hidden");
+    });
     $("#tool-picker-btn").addEventListener("click", () => {
+      $("#access-popover").classList.add("hidden");
       $("#tool-popover").classList.toggle("hidden");
     });
     $("#tools-all-btn").addEventListener("click", () => {
@@ -2344,6 +4988,10 @@
       event.target.value = "";
     });
     $("#manage-memory-btn").addEventListener("click", openMemoryModal);
+    $("#artifact-publish-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      publishArtifact();
+    });
     $("#refresh-devices-btn").addEventListener("click", loadDevices);
     $("#add-device-btn").addEventListener("click", () => openDeviceModal());
     $("#refresh-config-btn").addEventListener("click", () => loadConfigPage(true));
@@ -2362,27 +5010,111 @@
 
     document.addEventListener("click", handleGlobalClick);
     document.addEventListener("change", handleGlobalChange);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && event.target.matches("[data-session-filter]")) {
+        event.preventDefault();
+        loadConfigTab("sessions");
+      }
+      if (event.key === "Escape") closeArtifactModal();
+    });
   }
 
   function handleGlobalClick(event) {
+    const artifactTrigger = event.target.closest("[data-artifact-open]");
+    if (artifactTrigger) {
+      openArtifactModal(artifactTrigger.dataset.artifactOpen);
+      return;
+    }
+    const artifactCode = event.target.closest("[data-artifact-code]");
+    if (artifactCode) {
+      const artifact = htmlArtifacts.get(artifactCode.dataset.artifactCode);
+      if (artifact) openCodeModal(`${artifact.title} · HTML`, artifact.html, "html", "page.html");
+      return;
+    }
+    const codeAction = event.target.closest("[data-code-action]");
+    if (codeAction) {
+      const item = codeBoxes.get(codeAction.dataset.codeId);
+      if (!item) return;
+      const action = codeAction.dataset.codeAction;
+      if (action === "copy") {
+        navigator.clipboard?.writeText(item.code).then(
+          () => toast("代码已复制"),
+          () => toast("复制失败，请展开代码手动选择", "warn")
+        );
+      } else if (action === "download") {
+        const blob = new Blob([item.code], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = item.fileName || (item.language === "html" ? "page.html" : "code.txt");
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } else if (action === "wrap") {
+        const box = codeAction.closest("[data-code-box]");
+        box?.classList.toggle("wrap");
+        codeAction.textContent = box?.classList.contains("wrap") ? "不换行" : "换行";
+      }
+      return;
+    }
     const target = event.target.closest("[data-action]");
-    if (!target) return;
+    if (!target) {
+      if (!event.target.closest("#access-popover") && !event.target.closest("#access-mode-btn")) {
+        $("#access-popover")?.classList.add("hidden");
+      }
+      return;
+    }
     const action = target.dataset.action;
     const id = target.dataset.id;
+    if (action === "set-approval-mode") { setApprovalMode(target.dataset.mode); return; }
     if (action === "modal-close") { closeModal(); return; }
     if (action === "assistant-switch") { switchAssistant(id); return; }
     if (action === "quick-prompt") { sendMessage(target.dataset.prompt); return; }
     if (action === "session-open") { openSession(id); return; }
     if (action === "session-delete") { event.stopPropagation(); deleteSession(id); return; }
+    if (action === "session-fork") { event.stopPropagation(); forkSession(id); return; }
+    if (action === "session-rename") { event.stopPropagation(); renameSession(id); return; }
+    if (action === "message-edit") { editMessage(Number(id)); return; }
+    if (action === "message-delete") { deleteMessage(Number(id)); return; }
+    if (action === "message-fork") { forkSession(state.activeSessionId, Number(id)); return; }
     if (action === "approval-approve") { handleApproval(id, true); return; }
     if (action === "approval-reject") { handleApproval(id, false); return; }
     if (action === "attach-remove") { removeAttachment(Number(target.dataset.index)); return; }
+    if (action === "artifact-close") { closeArtifactModal(); return; }
+    if (action === "artifact-save") { saveArtifactImage(target); return; }
+    if (action === "publications-open") { openPublishedPages(); return; }
+    if (action === "publications-reload") { loadPublicationsPage(); return; }
+    if (action === "publications-prev" || action === "publications-next") {
+      publicationsView.offset = Math.max(0, publicationsView.offset + (action.endsWith("prev") ? -12 : 12));
+      loadPublicationsPage(); return;
+    }
+    if (action === "publication-detail") { openPublicationDetail(id); return; }
+    if (action === "publication-preview" || action === "publication-code") { publicationsView.view = action === "publication-code" ? "code" : "preview"; renderPublicationDetail(); return; }
+    if (action === "publication-download") { downloadPublication(); return; }
+    if (action === "publication-update") { updatePublicationFromLibrary(); return; }
+    if (action === "publication-session") { const sessionId = publicationsView.detail?.session_id; closeModal(); if (sessionId) openSession(sessionId); return; }
+    if (action === "artifact-publish-open") { openArtifactPublishPanel(); return; }
+    if (action === "artifact-publish-close") { $("#artifact-publish-panel").classList.add("hidden"); return; }
+    if (action === "artifact-copy-url") {
+      const url = target.dataset.url || "";
+      if (!url) return;
+      navigator.clipboard?.writeText(url).then(
+        () => toast("链接已复制"),
+        () => toast("复制失败，请手动选择链接", "warn")
+      );
+      return;
+    }
     if (action === "device-edit") { openDeviceModal(state.devices.find((item) => Number(item.id) === Number(id))); return; }
     if (action === "device-delete") { deleteDevice(state.devices.find((item) => Number(item.id) === Number(id))); return; }
     handleConfigAction(action, target);
   }
 
   function handleGlobalChange(event) {
+    if (event.target.matches("[data-session-filter]")) {
+      const key = event.target.dataset.sessionFilter;
+      state.sessionFilter[key] = key === "days" ? Number(event.target.value) : event.target.value;
+      loadConfigTab("sessions");
+      return;
+    }
     if (event.target.matches("[data-tool-name]")) {
       const name = event.target.dataset.toolName;
       if (event.target.checked) state.selectedTools.add(name);

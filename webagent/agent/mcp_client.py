@@ -28,6 +28,7 @@ class ToolSpec:
     risk: str
     category: str
     annotations: dict[str, Any] = field(default_factory=dict)
+    source: str = "mcp"
 
     def public(self, *, enabled: bool | None = None) -> dict[str, Any]:
         item = {
@@ -39,6 +40,7 @@ class ToolSpec:
             "input_schema": self.input_schema,
             "read_only": bool(self.annotations.get("read_only_hint")),
             "destructive": bool(self.annotations.get("destructive_hint")),
+            "source": self.source,
         }
         if enabled is not None:
             item["enabled"] = enabled
@@ -126,4 +128,3 @@ async def call_tool(token: str, name: str, arguments: dict[str, Any]) -> ToolExe
     except json.JSONDecodeError:
         parsed = text
     return ToolExecution(ok=not result.is_error, text=text, data=parsed)
-

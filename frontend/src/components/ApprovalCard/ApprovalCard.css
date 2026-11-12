@@ -1,0 +1,231 @@
+.approval {
+  overflow: hidden;
+  border: 1px solid rgba(240, 180, 81, 0.32);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 0 0, rgba(240, 180, 81, 0.08), transparent 38%),
+    #12120f;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.18);
+}
+
+.approval--approved {
+  border-color: rgba(39, 201, 106, 0.24);
+  background:
+    radial-gradient(circle at 0 0, rgba(39, 201, 106, 0.06), transparent 38%),
+    #0d1310;
+}
+
+.approval--rejected {
+  border-color: var(--border);
+  background: #0e1217;
+}
+
+.approval__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 7px;
+}
+
+.approval__icon {
+  display: grid;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(240, 180, 81, 0.24);
+  border-radius: 9px;
+  background: rgba(240, 180, 81, 0.09);
+  color: #e7ba75;
+}
+
+.approval--approved .approval__icon {
+  border-color: rgba(39, 201, 106, 0.2);
+  background: rgba(39, 201, 106, 0.07);
+  color: var(--accent);
+}
+
+.approval--rejected .approval__icon {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: #768396;
+}
+
+.approval__heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.approval__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 2px;
+  color: #b8925c;
+  font-size: 8.5px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+.approval__eyebrow i {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(240, 180, 81, 0.11);
+  color: #d4a55f;
+  font-size: 7.5px;
+  font-style: normal;
+  letter-spacing: 0;
+}
+
+.approval__heading h3 {
+  overflow: hidden;
+  margin: 0;
+  color: #eee4d3;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval__status {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid rgba(240, 180, 81, 0.2);
+  border-radius: 4px;
+  background: rgba(240, 180, 81, 0.07);
+  color: #d8ae6a;
+  font-size: 8.5px;
+}
+
+.approval--approved .approval__status {
+  border-color: rgba(39, 201, 106, 0.18);
+  background: rgba(39, 201, 106, 0.06);
+  color: #70c892;
+}
+
+.approval--rejected .approval__status {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.025);
+  color: #6d7a8c;
+}
+
+.approval__description {
+  margin: 0;
+  padding: 1px 14px 8px 58px;
+  color: #9a9184;
+  font-size: 11.25px;
+  line-height: 1.62;
+}
+
+.approval__meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 14px 9px 58px;
+}
+
+.approval__tool,
+.approval__expiry {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #726b61;
+  font-family: var(--font-mono);
+  font-size: 8.75px;
+}
+
+.approval__tool {
+  padding: 2px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.12);
+  color: #a89474;
+}
+
+.approval__arguments {
+  padding: 0 13px;
+}
+
+.approval__arguments-label {
+  margin-bottom: 4px;
+  color: #665f54;
+  font-size: 8.5px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+}
+
+.approval__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 9px 13px;
+  border-top: 1px solid rgba(240, 180, 81, 0.12);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.approval__footer p {
+  margin: 0;
+  color: #6f675b;
+  font-size: 9.25px;
+  line-height: 1.45;
+}
+
+.approval__actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.approval__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 29px;
+  padding: 0 11px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition:
+    background 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.approval__button--ghost {
+  border: 1px solid #343029;
+  background: transparent;
+  color: #a49a8b;
+}
+
+.approval__button--ghost:hover {
+  border-color: #4a443a;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.approval__button--primary {
+  border: 1px solid rgba(240, 180, 81, 0.32);
+  background: #e7b668;
+  color: #241707;
+}
+
+.approval__button--primary:hover {
+  background: #f0c47b;
+}
+
+.approval__resolved {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--border-soft);
+  color: #688073;
+  font-size: 10px;
+}
+
+.approval--approved .approval__resolved {
+  color: #72a989;
+}

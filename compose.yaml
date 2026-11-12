@@ -1,0 +1,79 @@
+name: webagent
+
+x-service: &service
+  image: webagent-demo:local
+  build:
+    context: .
+    target: runtime
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,size=536870912,mode=1777
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+  healthcheck:
+    test: ["CMD", "python", "scripts/healthcheck.py"]
+    interval: 10s
+    timeout: 5s
+    start_period: 30s
+    retries: 5
+
+x-environment: &environment
+  WEBAGENT_INTERNAL_SECRET: ${WEBAGENT_INTERNAL_SECRET:?请先运行 python3 scripts/init_env.py}
+  WEBAGENT_BUSINESS_URL: http://business:8000
+  WEBAGENT_AGENT_URL: http://agent:8010
+  WEBAGENT_MCP_URL: http://mcp:8020/mcp
+  WEBAGENT_DATA_DIR: /app/data
+
+services:
+  mcp:
+    <<: *service
+    command: ["python", "-m", "uvicorn", "webagent.mcp_server.server:app", "--host", "0.0.0.0", "--port", "8020", "--workers", "1"]
+    environment:
+      <<: *environment
+      WEBAGENT_HEALTH_URL: http://127.0.0.1:8020/health
+
+  agent:
+    <<: *service
+    command: ["python", "-m", "uvicorn", "webagent.agent.app:app", "--host", "0.0.0.0", "--port", "8010", "--workers", "1"]
+    environment:
+      <<: *environment
+      WEBAGENT_SECRET_KEY: ${WEBAGENT_SECRET_KEY:?请先运行 python3 scripts/init_env.py}
+      WEBAGENT_HEALTH_URL: http://127.0.0.1:8010/health
+    volumes:
+      - agent-data:/app/data
+    depends_on:
+      mcp:
+        condition: service_healthy
+
+  business:
+    <<: *service
+    environment:
+      <<: *environment
+      WEBAGENT_ADMIN_PASSWORD: ${WEBAGENT_ADMIN_PASSWORD:?请先运行 python3 scripts/init_env.py}
+      WEBAGENT_SEED_DEMO_USERS: ${WEBAGENT_SEED_DEMO_USERS:-1}
+      WEBAGENT_COOKIE_SECURE: ${WEBAGENT_COOKIE_SECURE:-0}
+      WEBAGENT_SESSION_COOKIE: ${WEBAGENT_SESSION_COOKIE:-wa_container_session}
+      WEBAGENT_HEALTH_URL: http://127.0.0.1:8000/api/health
+    ports:
+      - "${WEBAGENT_BIND_HOST:-127.0.0.1}:${WEBAGENT_HTTP_PORT:-8080}:8000"
+    volumes:
+      - business-data:/app/data
+    depends_on:
+      agent:
+        condition: service_healthy
+      mcp:
+        condition: service_healthy
+
+volumes:
+  business-data:
+  agent-data:
