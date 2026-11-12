@@ -235,9 +235,9 @@ async def build_context(
     user = user or await identity_from_token(token)
     assistant = None
     if not assistant_id:
-        candidates = db.assistants_for_user(user)
-        if candidates:
-            assistant_id = int(candidates[0]["id"])
+        default = db.default_assistant(user)
+        if default:
+            assistant_id = int(default["id"])
     if assistant_id:
         assistant = db.get_assistant(assistant_id)
         if not assistant or not assistant["enabled"]:

@@ -922,7 +922,11 @@
     } else failures += 1;
 
     const storedAssistant = Number(localStorage.getItem(`wa_assistant_${state.user.username}`));
-    const fallback = state.assistants.find((item) => Number(item.id) === storedAssistant) || state.assistants[0];
+    const activeAssistant = state.sessions.find((session) => session.id === state.activeSessionId)?.assistant_id;
+    const fallback = state.assistants.find((item) => Number(item.id) === Number(activeAssistant))
+      || state.assistants.find((item) => Number(item.id) === storedAssistant)
+      || state.assistants.find((item) => item.is_default)
+      || state.assistants[0];
     state.assistantId = fallback ? Number(fallback.id) : null;
     const assistant = currentAssistant();
 
@@ -1216,6 +1220,16 @@
       const session = data.session;
       state.sessions.unshift(session);
       if (switchTo) {
+        if (Number(state.assistantId) !== Number(session.assistant_id)) {
+          state.assistantId = session.assistant_id ? Number(session.assistant_id) : null;
+          localStorage.setItem(`wa_assistant_${state.user.username}`, String(state.assistantId || ""));
+          const assistant = currentAssistant();
+          if (assistant?.model_row_id) state.modelId = Number(assistant.model_row_id);
+          renderAssistantRail();
+          renderWelcome();
+          renderModelSelect();
+          await loadTools();
+        }
         state.activeSessionId = session.id;
         state.messages = [];
         state.contextInfo = null;
@@ -1236,8 +1250,8 @@
   }
 
   async function newChat() {
-    const assistant = currentAssistant();
-    await createSession(assistant?.id || null, true);
+    const session = await createSession(null, true);
+    if (!session) return;
     $("#chat-input").value = "";
     $("#chat-input").style.height = "auto";
     state.attachments = [];
@@ -3384,7 +3398,7 @@
   function renderAssistants() {
     const items = state.config.assistants;
     $("#config-content").innerHTML = `
-      ${sectionHead("助手", "助手是运行时的配置模板：提示词、工具白名单、技能、预算和可见范围，不改代码就能新增。", `
+      ${sectionHead("助手", "助手配置提示词、工具、技能和预算。新会话优先使用默认助手；当前账号不可用时按排序回退，已有会话不变。", `
         <span class="count-pill">${items.length} 个</span>
         <button class="primary-btn" data-action="assistant-new">${icon("plus", 14)} 新增助手</button>`)}
       <div class="list-panel">${items.length ? items.map((item) => `
@@ -3393,6 +3407,7 @@
           <div class="list-row-main">
             <div class="list-row-title">
               <strong>${escapeHtml(item.name)}</strong>
+              ${item.is_default ? '<span class="badge badge-green">默认助手</span>' : ""}
               <span class="badge ${item.mode === "report" ? "badge-blue" : "badge-green"}">${MODE_LABELS[item.mode] || item.mode}</span>
               ${item.enabled ? "" : '<span class="badge">停用</span>'}
             </div>
@@ -3405,6 +3420,7 @@
             </div>
           </div>
           <div class="list-row-actions">
+            ${item.enabled && !item.is_default ? `<button class="text-btn" data-action="assistant-default" data-id="${item.id}" aria-label="将${escapeHtml(item.name)}设为默认助手">设为默认</button>` : ""}
             <button class="mini-action" data-action="assistant-edit" data-id="${item.id}" title="编辑">${icon("edit", 12)}</button>
             <button class="mini-action danger" data-action="assistant-delete" data-id="${item.id}" title="删除">${icon("trash", 12)}</button>
           </div>
@@ -3436,6 +3452,7 @@
       memory_enabled: true,
       allowed_roles: ["*"],
       enabled: true,
+      is_default: false,
       sort_order: 100,
     };
     const tools = state.config.tools;
@@ -3497,7 +3514,9 @@
               <label><input type="checkbox" name="allow_model_switch" ${data.allow_model_switch !== false ? "checked" : ""}> 允许用户切换模型</label>
               <label><input type="checkbox" name="memory_enabled" ${data.memory_enabled !== false ? "checked" : ""}> 启用长期记忆</label>
               <label><input type="checkbox" name="enabled" ${data.enabled !== false ? "checked" : ""}> 启用助手</label>
+              <label><input type="checkbox" name="is_default" ${data.is_default ? "checked" : ""} ${data.enabled === false ? "disabled" : ""}> 设为默认助手</label>
             </div>
+            <small>默认助手只能设置一个，保存后自动替换原默认助手。仅对新会话生效；不可用时回退到当前账号可用的助手。</small>
           </div>
         </div>
         <div class="modal-foot" style="padding:0">
@@ -3505,6 +3524,11 @@
           <button type="submit" class="primary-btn">${editing ? "保存" : "创建"}</button>
         </div>
       </form>`, { wide: true });
+    const assistantForm = $("#assistant-form");
+    assistantForm.enabled.addEventListener("change", () => {
+      assistantForm.is_default.disabled = !assistantForm.enabled.checked;
+      if (!assistantForm.enabled.checked) assistantForm.is_default.checked = false;
+    });
     $("#assistant-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.target;
@@ -3527,6 +3551,7 @@
         memory_enabled: form.memory_enabled.checked,
         allowed_roles: form.allowed_roles.value.split(",").map((item) => item.trim()).filter(Boolean),
         enabled: form.enabled.checked,
+        is_default: form.is_default.checked,
         sort_order: Number(form.sort_order.value) || 100,
       };
       if (!payload.allowed_roles.length) payload.allowed_roles = ["*"];
@@ -4377,6 +4402,18 @@
     }
     if (action === "assistant-new") { openAssistantModal(); return; }
     if (action === "assistant-edit") { openAssistantModal(assistantById(id)); return; }
+    if (action === "assistant-default") {
+      target.disabled = true;
+      try {
+        await api(`/api/agent/admin/assistants/${id}`, { method: "PUT", body: { is_default: true } });
+        toast("默认助手已更新，新会话将使用该助手");
+        await loadConfigTab("assistants");
+        await loadAgentMeta();
+        renderAssistantRail();
+      } catch (error) { toast(error.message, "error"); }
+      finally { target.disabled = false; }
+      return;
+    }
     if (action === "assistant-delete") {
       const assistant = assistantById(id);
       if (!(await confirmDialog({ title: "删除助手", message: `删除「${assistant.name}」？已有会话会保留。`, confirmText: "删除", danger: true }))) return;

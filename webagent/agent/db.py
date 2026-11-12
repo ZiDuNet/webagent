@@ -233,6 +233,7 @@ def init_db() -> None:
                 memory_enabled INTEGER NOT NULL DEFAULT 1,
                 allowed_roles TEXT NOT NULL DEFAULT '["*"]',
                 enabled INTEGER NOT NULL DEFAULT 1,
+                is_default INTEGER NOT NULL DEFAULT 0,
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -390,6 +391,7 @@ def init_db() -> None:
             """
         )
         _ensure_model_columns(conn)
+        _ensure_assistant_columns(conn)
         _ensure_session_columns(conn)
         _ensure_message_columns(conn)
         _clean_legacy_reasoning(conn)
@@ -460,6 +462,20 @@ def _ensure_model_columns(conn: sqlite3.Connection) -> None:
     for name, definition in additions.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE models ADD COLUMN {name} {definition}")
+
+
+def _ensure_assistant_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(assistants)")}
+    if "is_default" not in columns:
+        conn.execute("ALTER TABLE assistants ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "UPDATE assistants SET is_default = 1 WHERE id = "
+            "(SELECT id FROM assistants WHERE enabled = 1 ORDER BY sort_order, id LIMIT 1)"
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistants_default "
+        "ON assistants(is_default) WHERE is_default = 1"
+    )
 
 
 def _ensure_session_columns(conn: sqlite3.Connection) -> None:
@@ -831,6 +847,7 @@ def _seed_assistants(conn: sqlite3.Connection) -> None:
     assistants = [
         {
             "name": "设备管理助手",
+            "is_default": True,
             "icon": "🛠",
             "description": "查询、统计、修改和删除设备，工具范围跟随账号权限与管理员开关。",
             "greeting": "我可以查询设备、统计状态，并在你审批后执行修改或删除。",
@@ -891,9 +908,9 @@ def _seed_assistants(conn: sqlite3.Connection) -> None:
                  model_row_id, allow_model_switch, prefetch_tools, tool_names,
                  skill_ids, max_steps, max_tool_calls, max_run_seconds,
                  context_max_tokens, memory_enabled, allowed_roles, enabled,
-                 sort_order, created_at, updated_at)
+                 is_default, sort_order, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, 0, 0, 1,
-                    '["*"]', 1, ?, ?, ?)
+                    '["*"]', 1, ?, ?, ?, ?)
             """,
             (
                 item["name"],
@@ -906,6 +923,7 @@ def _seed_assistants(conn: sqlite3.Connection) -> None:
                 json.dumps(item["prefetch_tools"], ensure_ascii=False),
                 json.dumps(item["tool_names"], ensure_ascii=False),
                 json.dumps(item["skill_ids"], ensure_ascii=False),
+                int(item.get("is_default", False)),
                 item["sort_order"],
                 now,
                 now,
@@ -926,6 +944,7 @@ def _decorate_assistant(row: sqlite3.Row) -> dict[str, Any]:
     item["allow_model_switch"] = bool(item.get("allow_model_switch"))
     item["memory_enabled"] = bool(item.get("memory_enabled"))
     item["enabled"] = bool(item.get("enabled"))
+    item["is_default"] = bool(item.get("is_default"))
     return item
 
 
@@ -1791,6 +1810,11 @@ def assistants_for_user(user: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+def default_assistant(user: dict[str, Any]) -> dict[str, Any] | None:
+    items = assistants_for_user(user)
+    return next((item for item in items if item["is_default"]), items[0] if items else None)
+
+
 def _assistant_values(values: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "name",
@@ -1811,6 +1835,7 @@ def _assistant_values(values: dict[str, Any]) -> dict[str, Any]:
         "memory_enabled",
         "allowed_roles",
         "enabled",
+        "is_default",
         "sort_order",
     }
     updates = {key: value for key, value in values.items() if key in allowed}
@@ -1821,6 +1846,7 @@ def _assistant_values(values: dict[str, Any]) -> dict[str, Any]:
         "allow_model_switch",
         "memory_enabled",
         "enabled",
+        "is_default",
     ):
         if key in updates:
             updates[key] = int(bool(updates[key]))
@@ -1848,14 +1874,20 @@ def create_assistant(values: dict[str, Any]) -> dict[str, Any]:
         "memory_enabled": 1,
         "allowed_roles": ["*"],
         "enabled": 1,
+        "is_default": 0,
         "sort_order": 100,
     }
-    data.update(_assistant_values(values))
+    data.update(values)
+    data = _assistant_values(data)
+    if data["is_default"] and not data["enabled"]:
+        raise ValueError("请先启用助手，再设为默认助手")
     data["created_at"] = now
     data["updated_at"] = now
     keys = list(data.keys())
     placeholders = ", ".join("?" for _ in keys)
     with connect() as conn:
+        if data["is_default"]:
+            conn.execute("UPDATE assistants SET is_default = 0, updated_at = ? WHERE is_default = 1", (now,))
         cursor = conn.execute(
             f"INSERT INTO assistants ({', '.join(keys)}) VALUES ({placeholders})",
             [data[key] for key in keys],
@@ -1867,14 +1899,25 @@ def create_assistant(values: dict[str, Any]) -> dict[str, Any]:
 def update_assistant(
     assistant_id: int, values: dict[str, Any]
 ) -> dict[str, Any] | None:
-    if not get_assistant(assistant_id):
-        return None
     updates = _assistant_values(values)
     if not updates:
         return get_assistant(assistant_id)
     updates["updated_at"] = utc_now()
-    assignments = ", ".join(f"{key} = ?" for key in updates)
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute("SELECT enabled FROM assistants WHERE id = ?", (assistant_id,)).fetchone()
+        if current is None:
+            return None
+        if not updates.get("enabled", current["enabled"]):
+            if updates.get("is_default"):
+                raise ValueError("请先启用助手，再设为默认助手")
+            updates["is_default"] = 0
+        if updates.get("is_default"):
+            conn.execute(
+                "UPDATE assistants SET is_default = 0, updated_at = ? WHERE is_default = 1 AND id != ?",
+                (updates["updated_at"], assistant_id),
+            )
+        assignments = ", ".join(f"{key} = ?" for key in updates)
         conn.execute(
             f"UPDATE assistants SET {assignments} WHERE id = ?",
             [*updates.values(), assistant_id],

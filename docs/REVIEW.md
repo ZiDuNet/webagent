@@ -23,10 +23,11 @@
 | `scripts/test_publications.py`：16 项 | 发布归属、并发、版本、部分成功、兼容路由和秘密处理 |
 | `scripts/test_publications_api.py`：8 项 | HTTP/SDK 契约、跨用户访问、关闭连接器后的本地读取 |
 | `scripts/test_review_regressions.py`：45 项 | 上述上下文、四态、审批、互斥、隐私、SDK、缓存、准备阶段事件、次数不限/超时与入口回归 |
+| `scripts/test_assistants.py`：15 项 | 默认助手配置与迁移、唯一约束与并发切换、管理员权限、新会话绑定、显式覆盖、可见性回退、停用 / 删除 / 取消默认及运行时一致性 |
 | `scripts/test_decision.py`：25 项 | 两开关互斥与全关、评分协议、权限后筛选、固定工具补回、超时/重试、评分无效时用量留存、模型分类、同步和凭据要求 |
 | `scripts/test_speech.py`：33 项 | OpenAI / DashScope 两 schema、音色/格式/语速、大小/超时、音频下载边界、错误脱敏 |
 | `scripts/test_model_settings.py`：18 项 | 模板管理员鉴权、多连接、Key 脱敏、专用类型、STT / TTS 绑定、真实分类测试、语言校验、空回复失败、音频 API 与 BFF 隐私头透传 |
-| `frontend/tests/conversationRun.test.mjs`：19 项 | 准备/思考/工具/回答阶段、多工具顺序与快照、参数隐私、失败/审批/重试、冻结计时、流式 HTML 提取与真实步骤轮播 |
+| `frontend/tests/conversationRun.test.mjs`：22 项 | 准备/思考/工具/回答阶段、多工具顺序与快照、参数隐私、失败/审批/重试、冻结计时、流式 HTML 提取与真实步骤轮播 |
 | `scripts/smoke_test.py` | 独立 Compose 数据卷中的真实 BFF → Agent → MCP → 业务 API、角色权限、审批、SSE 重放、加密配置、会话操作、假 PagePilot 发布/更新、真实 Chromium PNG 截图 |
 | 静态与构建 | Ruff `F,E9`、Python 全量语法编译、HTML JavaScript 语法、TypeScript、Vite 生产构建、`git diff --check` |
 | npm 审计 | 生产依赖已知漏洞为 0（验收时的 registry 结果，不保证未来不会出现新的公告） |
@@ -34,7 +35,7 @@
 运行单元测试：
 
 ```bash
-for test_file in scripts/test_asr_protocol.py scripts/test_publications.py scripts/test_publications_api.py scripts/test_review_regressions.py scripts/test_decision.py scripts/test_speech.py scripts/test_model_settings.py; do
+for test_file in scripts/test_asr_protocol.py scripts/test_publications.py scripts/test_publications_api.py scripts/test_review_regressions.py scripts/test_assistants.py scripts/test_decision.py scripts/test_speech.py scripts/test_model_settings.py; do
   .venv/bin/python "$test_file"
 done
 ```
@@ -44,6 +45,8 @@ done
 ## 浏览器检查
 
 实际打开正式 HTML、生产 React 页面和 390px 窄视口，检查同源登录、真实工具触发、Markdown 表格/公式/Mermaid/柱图、HTML 隔离预览、可展开过程和思考、完成后折叠、当前上下文/用量、切换模型、删除确认、手机端发布记录弹窗，以及模型/工具/运行配置入口。
+
+默认助手复验：在正式后台将排序第二的「只读分析员」设为默认，检查唯一默认标记、编辑表单默认勾选、停用时联动取消并禁用默认选项；分别从 React 与 HTML 新建会话，确认绑定「只读分析员」且 HTML 工具范围变为其 4 项白名单。验收后恢复原默认助手，删除本轮空白会话，未调用外部模型。
 
 流式视觉验收采用临时的 OpenAI-compatible 测试网关，输出明确标注为验收数据，通过真实 Agent 循环调用只读业务工具，测试网关不会进入产品代码。这样验证传输和渲染，不冒充真实大模型效果，也不消耗用户模型额度。
 

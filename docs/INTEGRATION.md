@@ -390,9 +390,12 @@ GET  /api/agent/chat/stream/{run_id}
 GET  /api/agent/tools
 GET  /api/agent/models
 GET  /api/agent/assistants
+POST /api/agent/sessions
 POST /api/agent/approvals/{id}/approve
 POST /api/agent/approvals/{id}/reject
 ```
+
+助手列表包含布尔字段 `is_default`。创建会话或首次对话时，省略 `assistant_id` 即由服务端选用当前账号可用的默认助手；默认项不可用时按助手排序回退。使用创建会话返回的 `session.assistant_id` 加载工具和发送消息，后续会话保持该绑定。显式传入 `assistant_id` 可覆盖默认选择，但仍需通过权限校验。管理员在助手创建 / 更新接口中传入 `is_default=true` 即可切换唯一默认项，传入 `false` 可取消；停用助手自动取消其默认标记。
 
 业务 BFF 的职责：
 

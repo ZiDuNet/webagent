@@ -26,7 +26,7 @@ export interface AgentModel {
 }
 export interface AgentAttachment { name: string; mime_type: string; data_url: string; size?: number }
 export interface AgentTool { name: string; title?: string; description: string; selectable: boolean; default_selected: boolean }
-export interface AgentAssistant { id: number; name: string; default_model_id?: number; context_max_tokens?: number }
+export interface AgentAssistant { id: number; name: string; is_default: boolean; default_model_id?: number; context_max_tokens?: number }
 export interface AgentStatus {
   asr: { configured: boolean; model_name?: string; protocol?: string; reason?: string };
   default_reasoning_effort: string;

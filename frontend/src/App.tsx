@@ -102,7 +102,8 @@ export default function App() {
     return () => controller.abort();
   }, [user]);
 
-  const assistantId = activeSession?.assistant_id ?? assistants[0]?.id;
+  const defaultAssistant = assistants.find((assistant) => assistant.is_default) ?? assistants[0];
+  const assistantId = activeSession?.assistant_id ?? defaultAssistant?.id;
   useEffect(() => {
     if (!user || !assistantId) return;
     const controller = new AbortController();
@@ -117,7 +118,7 @@ export default function App() {
   }, [user, assistantId]);
 
   const createSession = async () => {
-    const result = await agentJson<{ session: AgentSession }>("/api/agent/sessions", { assistant_id: assistants[0]?.id, title: "新对话" });
+    const result = await agentJson<{ session: AgentSession }>("/api/agent/sessions", { title: "新对话" });
     setSessions((previous) => [result.session, ...previous]);
     setActiveSessionId(result.session.id);
     setNavOpen(false);

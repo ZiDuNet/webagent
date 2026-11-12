@@ -376,6 +376,7 @@ class AssistantCreate(BaseModel):
     memory_enabled: bool = True
     allowed_roles: list[str] = Field(default_factory=lambda: ["*"], max_length=50)
     enabled: bool = True
+    is_default: bool = False
     sort_order: int = Field(default=100, ge=0, le=10000)
 
 
@@ -398,6 +399,7 @@ class AssistantUpdate(BaseModel):
     memory_enabled: bool | None = None
     allowed_roles: list[str] | None = Field(default=None, max_length=50)
     enabled: bool | None = None
+    is_default: bool | None = None
     sort_order: int | None = Field(default=None, ge=0, le=10000)
 
 
@@ -501,6 +503,7 @@ def _assistant_public(
         "memory_enabled": item.get("memory_enabled", True),
         "allowed_roles": item.get("allowed_roles", ["*"]),
         "enabled": item.get("enabled", True),
+        "is_default": item.get("is_default", False),
         "sort_order": item.get("sort_order", 100),
     }
     if admin:
@@ -1208,9 +1211,9 @@ async def create_session(
     user = await runtime.identity_from_token(_bearer(request))
     assistant_id = body.assistant_id
     if assistant_id is None:
-        available = db.assistants_for_user(user)
-        if available:
-            assistant_id = int(available[0]["id"])
+        assistant = db.default_assistant(user)
+        if assistant:
+            assistant_id = int(assistant["id"])
     if body.assistant_id:
         _assistant_for_user(user, body.assistant_id)
     session = sessions.create_session(
@@ -1464,7 +1467,10 @@ async def admin_create_assistant(
     values = body.model_dump()
     if values.get("model_row_id") and not db.get_model(values["model_row_id"]):
         raise AgentError("绑定的模型不存在", 404)
-    assistant = db.create_assistant(values)
+    try:
+        assistant = db.create_assistant(values)
+    except ValueError as exc:
+        raise AgentError(str(exc), 422) from exc
     db.log_audit(
         username=user["username"],
         action="assistant.create",
@@ -1493,7 +1499,10 @@ async def admin_update_assistant(
         values["supports_tools"] = False
     if values.get("model_row_id") and not db.get_model(values["model_row_id"]):
         raise AgentError("绑定的模型不存在", 404)
-    assistant = db.update_assistant(assistant_id, values)
+    try:
+        assistant = db.update_assistant(assistant_id, values)
+    except ValueError as exc:
+        raise AgentError(str(exc), 422) from exc
     if assistant is None:
         raise AgentError("助手不存在", 404)
     db.log_audit(

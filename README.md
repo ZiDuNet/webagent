@@ -153,7 +153,7 @@ STT / TTS 在语音页独立绑定；决策页提供 Jev、Microsoft、Laya、Op
 | 聊天交互 | SSE 流式、单行过程与展开详情、结束自动收起、模型与推理等级选择、工具选择、每轮用量 |
 | 内容展示 | 安全 Markdown、表格、可滚动代码框、KaTeX、Mermaid、柱状/折线/面积/饼环图 |
 | 会话 | 用户隔离、重命名、分叉、删除、消息编辑/删除；管理员筛选、查看与导出 |
-| 运行时 | 自研单 Agent loop、不同助手配置、最大步数/工具次数/时长、重试、可选降级模型 |
+| 运行时 | 自研单 Agent loop、可配置默认助手、最大步数/工具次数/时长、重试、可选降级模型 |
 | 上下文与记忆 | 跟随模型的预算、自动/手动压缩、独立摘要模型、用户手动长期记忆、思考存储开关 |
 | 工具与 Skill | 示例 MCP、动态 HTTP 工具、内置 Tool、四态治理、互斥且可全关的 BM25 / 决策筛选、知识型 Skill 渐进加载 |
 | 权限与审计 | 继承登录用户身份、工具授权过滤、写/删审批、业务 API 最终 RBAC、业务与 Agent 双侧审计 |
@@ -320,6 +320,7 @@ python scripts/test_asr_protocol.py
 python scripts/test_publications.py
 python scripts/test_publications_api.py
 python scripts/test_review_regressions.py
+python scripts/test_assistants.py
 python scripts/test_decision.py
 python scripts/test_speech.py
 python scripts/test_model_settings.py
