@@ -61,6 +61,10 @@ export interface AgentMessage {
 }
 
 export interface AgentEvent {
+  phase?: string;
+  step?: number;
+  max_steps?: number;
+  attempt?: number;
   delta?: string;
   message?: string;
   title?: string;

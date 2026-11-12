@@ -53,6 +53,7 @@ export function MessageList({
   className = "",
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
 
@@ -79,6 +80,17 @@ export function MessageList({
     return () => window.cancelAnimationFrame(frame);
   }, [messages]);
 
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const observer = new ResizeObserver(() => {
+      const container = scrollRef.current;
+      if (container && pinnedRef.current) container.scrollTop = container.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <div className={`message-list ${className}`.trim()}>
       <div
@@ -89,11 +101,11 @@ export function MessageList({
         aria-live="polite"
         aria-label="对话消息"
       >
-        <div className="message-list__inner">
+        <div className="message-list__inner" ref={contentRef}>
           {messages.length === 0 && emptyState}
           {messages.map((message) =>
             message.role === "user" ? (
-              <article className="message message--user" key={message.id}>
+              <article className="message message--user" key={message.renderKey || message.id}>
                 <div className="message__user-body">
                   <div className="message__meta message__meta--user">
                     <span>你</span>
@@ -111,7 +123,7 @@ export function MessageList({
                 <UserAvatar />
               </article>
             ) : (
-              <article className="message message--assistant" key={message.id}>
+              <article className="message message--assistant" key={message.renderKey || message.id}>
                 <AssistantAvatar />
                 <div className="message__assistant-body">
                   <div className="message__meta">
@@ -127,7 +139,13 @@ export function MessageList({
                           <ProcessLine
                             data={part.process}
                             defaultOpen={false}
-                            persistKey={`webagent:${message.id}:process:${index}`}
+                            onOpenChange={(open) => {
+                              if (open) {
+                                pinnedRef.current = false;
+                                setShowJump(true);
+                              }
+                            }}
+                            persistKey={`webagent:${message.renderKey || message.id}:process:${index}`}
                             key={index}
                           />
                         );

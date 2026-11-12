@@ -22,6 +22,10 @@ export interface ProcessData {
   steps: ProcessStep[];
   meta?: string;
   duration?: string;
+  preview?: string;
+  startedAt?: number;
+  activityAt?: number;
+  waitingForModel?: boolean;
   /** 思考原文是否已入库 */
   reasoningStored?: boolean;
 }
@@ -58,6 +62,7 @@ export type MessageRole = "user" | "assistant";
 
 export interface ChatMessage {
   id: string;
+  renderKey?: string;
   role: MessageRole;
   name: string;
   time?: string;

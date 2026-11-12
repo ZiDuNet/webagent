@@ -5,6 +5,7 @@
   "type": "module",
   "description": "WebAgent React 聊天组件与业务 API 接入",
   "scripts": {
+    "test:conversation": "node --experimental-strip-types --test tests/conversationRun.test.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "postbuild": "node scripts/copy-vendor.mjs",

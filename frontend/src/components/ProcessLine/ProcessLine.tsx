@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ProcessData, ProcessStatus, ProcessStep } from "../../types";
 import { isStructuredValue, stringifyValue } from "../../lib/file";
 import { CodeBox } from "../CodeBox/CodeBox";
+import { Markdown } from "../Markdown/Markdown";
 import { Icon } from "../ui/Icon";
 import "./ProcessLine.css";
 
@@ -11,6 +12,7 @@ export interface ProcessLineProps {
   /** 思考原文是否已入库，false 时在思考块上显示「原文不落库」 */
   reasoningStored?: boolean;
   persistKey?: string;
+  onOpenChange?: (open: boolean) => void;
   className?: string;
 }
 
@@ -142,43 +144,32 @@ function ArgumentBlock({
 function ReasoningBlock({
   reasoning,
   stored,
-  expanded,
-  onToggle,
+  streaming,
 }: {
   reasoning: string;
   stored: boolean;
-  expanded: boolean;
-  onToggle: () => void;
+  streaming: boolean;
 }) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const pinnedRef = useRef(true);
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (body && streaming && pinnedRef.current) body.scrollTop = body.scrollHeight;
+  }, [reasoning, streaming]);
+
   return (
     <div className="process__reasoning">
-      <button
-        type="button"
-        className="process__reasoning-head"
-        onClick={onToggle}
-        aria-expanded={expanded}
-      >
+      <div className="process__reasoning-head">
         <Icon name="bot" size={12} />
         思考原文
         {!stored && <em className="process__reasoning-badge">原文不落库</em>}
-        <span className="process__step-spacer" />
-        <Icon
-          name="chevron-right"
-          size={12}
-          className="process__reasoning-chevron"
-        />
-      </button>
-      {expanded && (
-        <div className="process__reasoning-body">
-          <CodeBox
-            code={reasoning}
-            language="text"
-            lineNumbers={false}
-            maxHeight="28vh"
-            compact
-          />
-        </div>
-      )}
+      </div>
+      <div className="process__reasoning-body" ref={bodyRef} onScroll={() => {
+        const body = bodyRef.current;
+        if (body) pinnedRef.current = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+      }}>
+        <Markdown content={reasoning} streaming={streaming} />
+      </div>
     </div>
   );
 }
@@ -186,17 +177,13 @@ function ReasoningBlock({
 function StepRow({
   step,
   expanded,
-  reasoningExpanded,
   reasoningStored,
   onToggle,
-  onReasoningToggle,
 }: {
   step: ProcessStep;
   expanded: boolean;
-  reasoningExpanded: boolean;
   reasoningStored: boolean;
   onToggle: () => void;
-  onReasoningToggle: () => void;
 }) {
   const hasDetail =
     step.description !== undefined ||
@@ -237,8 +224,7 @@ function StepRow({
             <ReasoningBlock
               reasoning={step.reasoning}
               stored={reasoningStored}
-              expanded={reasoningExpanded}
-              onToggle={onReasoningToggle}
+              streaming={step.status === "running"}
             />
           )}
           {step.description && (
@@ -261,20 +247,19 @@ export function ProcessLine({
   defaultOpen = false,
   reasoningStored,
   persistKey,
+  onOpenChange,
   className = "",
 }: ProcessLineProps) {
-  const persisted = readPersisted(persistKey);
+  const [persisted] = useState(() => readPersisted(persistKey));
   const [open, setOpen] = useState(persisted?.open ?? defaultOpen);
   const [expandedSteps, setExpandedSteps] = useState<Record<string, boolean>>(
     () => Object.fromEntries((persisted?.steps ?? []).map((id) => [id, true]))
   );
-  const [reasoningExpanded, setReasoningExpanded] = useState<
-    Record<string, boolean>
-  >(() =>
-    Object.fromEntries((persisted?.reasoning ?? []).map((id) => [id, true]))
-  );
   const [elapsedMs, setElapsedMs] = useState(0);
-  const startedAtRef = useRef(Date.now());
+  const startedAtRef = useRef(data.startedAt ?? Date.now());
+  const [now, setNow] = useState(Date.now);
+  const sectionRef = useRef<HTMLElement>(null);
+  const revealRef = useRef(false);
 
   const running = data.status === "running";
   const previousStatusRef = useRef(data.status);
@@ -285,8 +270,20 @@ export function ProcessLine({
   }, [data.status]);
 
   useEffect(() => {
+    if (!open || !revealRef.current) return;
+    revealRef.current = false;
+    const frame = window.requestAnimationFrame(() => sectionRef.current?.scrollIntoView({
+      block: "nearest", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
+
+  useEffect(() => {
     if (!running) return;
-    const update = () => setElapsedMs(Date.now() - startedAtRef.current);
+    const update = () => {
+      setElapsedMs(Date.now() - startedAtRef.current);
+      setNow(Date.now());
+    };
     update();
     const timer = window.setInterval(update, 500);
     return () => window.clearInterval(timer);
@@ -297,56 +294,56 @@ export function ProcessLine({
     const steps = Object.entries(expandedSteps)
       .filter(([, value]) => value)
       .map(([id]) => id);
-    const reasoning = Object.entries(reasoningExpanded)
-      .filter(([, value]) => value)
-      .map(([id]) => id);
     try {
       window.localStorage.setItem(
         persistKey,
-        JSON.stringify({ open, steps, reasoning } satisfies PersistedState)
+        JSON.stringify({ open, steps, reasoning: [] } satisfies PersistedState)
       );
     } catch {
       // localStorage 不可用时忽略持久化
     }
-  }, [expandedSteps, reasoningExpanded, open, persistKey]);
+  }, [expandedSteps, open, persistKey]);
 
-  const runningStep = data.steps.find((step) => step.status === "running");
-  const doneCount = data.steps.filter((step) => step.status === "done").length;
-  const finished = data.status === "done" || data.status === "failed";
+  const toolCount = data.steps.filter((step) => step.kind === "tool").length;
+  const thinkingCount = data.steps.filter((step) => step.kind === "think").length;
   const stored = reasoningStored ?? data.reasoningStored ?? false;
 
-  const summaryTitle = runningStep ? runningStep.title : data.title;
-  const badgeText = finished
-    ? `${doneCount} 步`
-    : STATUS_TEXT[data.status];
+  const summaryTitle = data.status === "done" ? "已完成" : data.title;
+  const counts = [toolCount ? `${toolCount} 次工具` : data.status === "done" ? "未调用工具" : "", thinkingCount ? `${thinkingCount} 次思考` : ""].filter(Boolean).join(" · ");
+  const preview = data.preview || (running && data.waitingForModel && now - (data.activityAt ?? startedAtRef.current) > 8000 ? "模型尚未返回新内容，正在等待响应" : "");
   const durationText = running
     ? formatElapsed(elapsedMs)
     : (data.duration ?? formatElapsed(elapsedMs));
 
   const toggleStep = (id: string) => {
-    setExpandedSteps((previous) => ({ ...previous, [id]: !previous[id] }));
-  };
-  const toggleReasoning = (id: string) => {
-    setReasoningExpanded((previous) => ({ ...previous, [id]: !previous[id] }));
+    setExpandedSteps((previous) => ({ ...previous, [id]: !(previous[id] ?? data.steps.find((step) => step.id === id)?.kind === "think") }));
   };
 
   return (
     <section
+      ref={sectionRef}
       className={`process process--${data.status} ${className}`.trim()}
       aria-label="执行过程"
+      aria-busy={running || undefined}
     >
       <button
         type="button"
         className="process__summary"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          revealRef.current = !open;
+          onOpenChange?.(!open);
+          setOpen(!open);
+        }}
         aria-expanded={open}
+        aria-label={`${summaryTitle}，${open ? "收起" : "展开"}执行过程`}
       >
-        <StatusGlyph status={data.status} size={17} />
-        <span className="process__title">
-          {finished ? STATUS_TEXT[data.status] : summaryTitle}
+        {running ? <span className="process__activity" aria-hidden="true"><i /><i /><i /></span> : <StatusGlyph status={data.status} size={17} />}
+        <span className="process__title" role="status" aria-live="polite">
+          {summaryTitle || STATUS_TEXT[data.status]}
         </span>
-        <span className="process__badge">{badgeText}</span>
+        {preview && <span className="process__preview" aria-hidden="true">{preview}</span>}
         <span className="process__summary-spacer" />
+        {counts && <span className="process__badge">{counts}</span>}
         <span className="process__meta">{durationText}</span>
         <Icon
           name="chevron-right"
@@ -362,11 +359,9 @@ export function ProcessLine({
               <StepRow
                 key={step.id}
                 step={step}
-                expanded={Boolean(expandedSteps[step.id])}
-                reasoningExpanded={Boolean(reasoningExpanded[step.id])}
+                expanded={expandedSteps[step.id] ?? step.kind === "think"}
                 reasoningStored={stored}
                 onToggle={() => toggleStep(step.id)}
-                onReasoningToggle={() => toggleReasoning(step.id)}
               />
             ))}
           </div>

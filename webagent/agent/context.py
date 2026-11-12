@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -275,6 +276,7 @@ async def prepare_context(
     summary_provider: dict[str, Any] | None = None,
     force: bool = False,
     trigger: str = "auto",
+    on_compaction: Callable[[], Awaitable[None]] | None = None,
 ) -> ContextPlan:
     after_id = int(session.get("summary_until_id") or 0)
     messages = sessions.list_messages(session["id"], user_id, after_id=after_id)
@@ -293,6 +295,8 @@ async def prepare_context(
         and (force or config.get("context_compression", True))
         and messages
     ):
+        if on_compaction is not None:
+            await on_compaction()
         result = await compact_session(
             session,
             user_id,

@@ -229,6 +229,7 @@ async def build_context(
     reasoning_effort: str | None = None,
     approval_mode: str | None = None,
     user: dict[str, Any] | None = None,
+    emit: Any = None,
 ) -> AgentContext:
     user = user or await identity_from_token(token)
     assistant = None
@@ -286,6 +287,9 @@ async def build_context(
         wanted = set(assistant["skill_ids"])
         skills = [skill for skill in skills if int(skill["id"]) in wanted]
     mcp_error = ""
+    await _emit_callback(emit, "run.phase", {
+        "phase": "tools", "title": "正在发现并授权工具",
+    })
     try:
         all_specs = await list_tools(token)
     except Exception as exc:  # noqa: BLE001 - degrade to connector tools
@@ -910,7 +914,12 @@ async def _create_approval(
 async def _emit_event(
     ctx: AgentContext, event_type: str, payload: dict[str, Any]
 ) -> None:
-    callback = ctx.emit
+    await _emit_callback(ctx.emit, event_type, payload)
+
+
+async def _emit_callback(
+    callback: Any, event_type: str, payload: dict[str, Any]
+) -> None:
     if callback is None:
         return
     try:
@@ -1624,6 +1633,7 @@ async def _report_chat(
         },
     ]
     try:
+        await _emit_event(ctx, "step.started", {"step": 1, "max_steps": 1})
         completion = await chat_completion(
             messages=messages,
             tools=[],
@@ -1825,6 +1835,9 @@ async def _chat(
     if not text:
         raise AgentError("消息不能为空", 422)
 
+    await _emit_callback(emit, "run.phase", {
+        "phase": "identity", "title": "正在校验业务身份",
+    })
     user = await identity_from_token(token)
     session = None
     if session_id:
@@ -1843,6 +1856,7 @@ async def _chat(
         reasoning_effort=reasoning_effort,
         approval_mode=approval_mode,
         user=user,
+        emit=emit,
     )
     ctx.emit = emit
     await _emit_event(
@@ -1879,6 +1893,9 @@ async def _chat(
     context_config = dict(ctx.config)
     context_config["context_max_tokens"] = ctx.budget["context_max_tokens"]
     summary_model, summary_provider = _summary_target(ctx)
+    await _emit_event(ctx, "run.phase", {
+        "phase": "context", "title": "正在检查对话上下文",
+    })
     plan = await context_planner.prepare_context(
         session,
         ctx.user["id"],
@@ -1887,6 +1904,9 @@ async def _chat(
         summary_model=summary_model,
         summary_provider=summary_provider,
         trigger="auto",
+        on_compaction=lambda: _emit_event(ctx, "run.phase", {
+            "phase": "compaction", "title": "正在压缩较早对话",
+        }),
     )
     ctx.budget["context_budget_tokens"] = plan.budget_tokens
     if plan.compaction:

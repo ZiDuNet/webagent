@@ -22,7 +22,8 @@
 | `scripts/test_asr_protocol.py`：16 项 | 转写协议、录音转换、推理开关、超时和错误脱敏 |
 | `scripts/test_publications.py`：16 项 | 发布归属、并发、版本、部分成功、兼容路由和秘密处理 |
 | `scripts/test_publications_api.py`：8 项 | HTTP/SDK 契约、跨用户访问、关闭连接器后的本地读取 |
-| `scripts/test_review_regressions.py`：33 项 | 上述上下文、四态、审批、互斥、隐私、SDK、缓存与 MCP 容器回归 |
+| `scripts/test_review_regressions.py`：39 项 | 上述上下文、四态、审批、互斥、隐私、SDK、缓存、准备阶段事件与入口回归 |
+| `frontend/tests/conversationRun.test.mjs`：11 项 | 准备/思考/工具/回答阶段、多工具顺序与快照、参数隐私、失败/审批/重试、冻结计时和无效事件 |
 | `scripts/smoke_test.py` | 独立 Compose 数据卷中的真实 BFF → Agent → MCP → 业务 API、角色权限、审批、SSE 重放、加密配置、会话操作、假 PagePilot 发布/更新、真实 Chromium PNG 截图 |
 | 静态与构建 | Ruff `F,E9`、Python 全量语法编译、HTML JavaScript 语法、TypeScript、Vite 生产构建、`git diff --check` |
 | npm 审计 | 生产依赖已知漏洞为 0（验收时的 registry 结果，不保证未来不会出现新的公告） |
@@ -42,6 +43,14 @@ done
 实际打开正式 HTML、生产 React 页面和 390px 窄视口，检查同源登录、真实工具触发、Markdown 表格/公式/Mermaid/柱图、HTML 隔离预览、可展开过程和思考、完成后折叠、当前上下文/用量、切换模型、删除确认、手机端发布记录弹窗，以及模型/工具/运行配置入口。
 
 流式视觉验收采用临时的 OpenAI-compatible 测试网关，输出明确标注为验收数据，通过真实 Agent 循环调用只读业务工具，测试网关不会进入产品代码。这样验证传输和渲染，不冒充真实大模型效果，也不消耗用户模型额度。
+
+### React 默认入口与过程交互复验
+
+- 本机 `8000` 与容器 `8080` 的根入口均默认跳转 `/react/`，原生配置管理台留在 `/admin/`；业务后端仍负责登录与 BFF，不另开前端端口。
+- 对照 Octop 的 `AssistantProcessSummary` 与 `GeneratingIndicator` 源码，修复思考状态遮住工具/回答、完成后消息身份变更导致重挂载、心跳造成无效更新和过程展开滚动等问题。
+- 在独立临时库中验证等待首 token、真实 MCP 工具、流式思考/Markdown/表格/Mermaid、结束自动折叠、结束后展开本轮未落库思考、390px 手机布局与工具过程展开；临时网关和包装页已停止，不是产品原型或默认回答来源。检查该测试库中 `store_reasoning=0` 时思考原文写入数为 0。
+- 另用本机已配置真实模型、只读账号做少量探针：一次工具统计链路准备约 0.19 秒、工具约 0.11 秒，两次模型响应各约 16 秒，说明不能把上游等待当作前端渲染耗时；实际延迟会随供应商与推理配置变化。仅删除本轮专用验收会话，不重写现有模型、密钥或业务数据。
+- 前端成功/失败/审批以协议事件及工具记录为准，完成但未调用工具时明确显示“未调用工具”，不能把模型正文中“我已查询”的文字当作真实执行证据。
 
 ## 已知边界
 

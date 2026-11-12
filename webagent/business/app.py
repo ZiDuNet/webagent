@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -488,7 +488,13 @@ if FRONTEND_DIST_DIR.is_dir():
 
 
 @app.get("/")
-async def index() -> FileResponse:
+async def index() -> RedirectResponse:
+    target = "/react/" if (FRONTEND_DIST_DIR / "index.html").is_file() else "/admin/"
+    return RedirectResponse(target, status_code=307)
+
+
+@app.get("/admin/", include_in_schema=False)
+async def admin_index() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
 
 

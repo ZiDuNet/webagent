@@ -10,8 +10,8 @@ COMPOSE_BAKE=false docker compose up -d --build --wait --wait-timeout 180
 docker compose ps
 ```
 
-- 完整管理台：`http://127.0.0.1:8080/`
-- React 聊天入口：`http://127.0.0.1:8080/react/`
+- 默认 React 聊天：`http://127.0.0.1:8080/`（跳转到同端口 `/react/`）
+- 完整配置管理台：`http://127.0.0.1:8080/admin/`
 - 整体健康检查：`http://127.0.0.1:8080/api/health`
 - 管理员：`admin`，初始随机密码在本机 `.env` 的 `WEBAGENT_ADMIN_PASSWORD` 中。
 

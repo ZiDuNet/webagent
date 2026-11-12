@@ -81,6 +81,66 @@ class ReviewRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertIn("关键事实：机房 A", plan.messages[0]["content"])
         self.assertEqual(plan.messages[-1]["content"], "现在开始下一步")
 
+    async def test_compaction_announces_the_real_slow_stage(self) -> None:
+        sessions.add_message(self.session["id"], role="user", content="旧信息" * 2500)
+        sessions.add_message(self.session["id"], role="assistant", content="旧回复" * 2500)
+        sessions.add_message(self.session["id"], role="user", content="最新问题")
+        announce = AsyncMock()
+        await context.prepare_context(
+            sessions.get_session(self.session["id"], USER["id"]), USER["id"],
+            {"context_window": 4096}, {"context_compression": True, "demo_mode": True},
+            on_compaction=announce,
+        )
+        announce.assert_awaited_once()
+
+    async def test_short_context_does_not_announce_fake_compaction(self) -> None:
+        announce = AsyncMock()
+        await context.prepare_context(
+            sessions.get_session(self.session["id"], USER["id"]), USER["id"],
+            {"context_window": 32768}, {"context_compression": True}, on_compaction=announce,
+        )
+        announce.assert_not_awaited()
+
+    async def test_stream_announces_identity_before_waiting_for_it(self) -> None:
+        events = []
+        async def emit(name, payload):
+            events.append((name, payload))
+        async def identity(_token):
+            self.assertEqual(events[0][0], "run.phase")
+            self.assertEqual(events[0][1]["phase"], "identity")
+            raise runtime.AgentError("fixture identity blocked", 401)
+        with patch.object(runtime, "identity_from_token", side_effect=identity):
+            with self.assertRaises(runtime.AgentError):
+                await runtime.chat("fixture", "hello", None, None, emit=emit)
+
+    async def test_preparation_announces_tools_before_discovery(self) -> None:
+        events = []
+        async def emit(name, payload):
+            events.append((name, payload))
+        async def discover(_token):
+            self.assertEqual(events[-1][1]["phase"], "tools")
+            return []
+        with patch.object(runtime, "list_tools", side_effect=discover):
+            await runtime.build_context("fixture", None, None, user=USER, emit=emit)
+
+    async def test_disconnected_stage_listener_does_not_break_the_run(self) -> None:
+        emit = AsyncMock(side_effect=ConnectionError("client disconnected"))
+        await runtime._emit_callback(emit, "run.phase", {"phase": "tools"})
+        emit.assert_awaited_once()
+
+    def test_same_port_root_opens_react_and_preserves_the_configuration_entry(self) -> None:
+        from webagent.business import app as business_app
+        async def check():
+            with patch.object(business_app, "FRONTEND_DIST_DIR", Path(self.directory.name)), patch.object(
+                business_app, "WEB_DIR", Path(self.directory.name),
+            ):
+                (Path(self.directory.name) / "index.html").write_text("<main>test config</main>")
+                response = await business_app.index()
+                self.assertEqual(response.headers["location"], "/react/")
+                configuration = await business_app.admin_index()
+                self.assertEqual(configuration.path, Path(self.directory.name) / "index.html")
+        asyncio.run(check())
+
     def test_tool_governance_four_states_and_rbac(self) -> None:
         spec = ToolSpec("delete_device", "删除设备", {}, "device:delete", "delete", "业务")
         cases = [

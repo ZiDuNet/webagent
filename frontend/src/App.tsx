@@ -41,7 +41,7 @@ export default function App() {
   const [sessionQuery, setSessionQuery] = useState("");
   const [attachments, setAttachments] = useState<AgentAttachment[]>([]);
   const activeSession = sessions.find((session) => session.id === activeSessionId);
-  const businessUrl = import.meta.env.VITE_BUSINESS_URL || (import.meta.env.DEV ? "http://127.0.0.1:8000" : "/");
+  const businessUrl = import.meta.env.VITE_BUSINESS_URL || (import.meta.env.DEV ? "http://127.0.0.1:8000/admin/" : "/admin/");
 
   const updateSession = useCallback((session: AgentSession) => {
     setSessions((previous) => previous.map((item) => item.id === session.id ? { ...item, ...session } : item));

@@ -6,11 +6,11 @@ import {
   type AgentAttachment,
   type AgentMessage,
   type AgentSession,
-  type AgentToolRun,
 } from "../api/agent";
 import { apiErrorMessage } from "../api/pagepilot";
 import type { AccessMode } from "../components/Composer/Composer";
-import type { ArtifactData, ChatMessage, MessagePart, ProcessData, UsageData } from "../types";
+import { ConversationRun } from "../lib/conversationRun";
+import type { ArtifactData, ChatMessage, MessagePart, ProcessData } from "../types";
 
 export function extractHtmlArtifacts(content: string, messageId: string): { parts: MessagePart[]; artifacts: ArtifactData[] } {
   const parts: MessagePart[] = [];
@@ -59,16 +59,14 @@ function processFromMessage(message: AgentMessage): ProcessData | null {
   };
 }
 
-function storedMessage(message: AgentMessage, liveReasoning?: string): ChatMessage {
-  const source = liveReasoning && !message.reasoning ? { ...message, reasoning: liveReasoning } : message;
-  const process = processFromMessage(source);
-  if (process && liveReasoning && !message.reasoning) process.reasoningStored = false;
+function storedMessage(message: AgentMessage, liveProcess?: ProcessData, renderKey?: string): ChatMessage {
+  const process = liveProcess && !message.metadata.approval_status ? { ...liveProcess, reasoningStored: Boolean(message.reasoning) } : processFromMessage(message);
   const parts: MessagePart[] = [];
   if (process) parts.push({ kind: "process", process });
   parts.push(...(message.role === "assistant" ? extractHtmlArtifacts(message.content, String(message.id)).parts : [{ kind: "markdown" as const, content: message.content }]));
   const approval = message.metadata.approval;
   if (approval && !message.metadata.approval_status) parts.push({ kind: "approval", approval: { id: approval.id, tool: approval.tool, title: "等待操作确认", description: approval.summary, arguments: approval.arguments, risk: approval.risk, status: "pending" } });
-  return { id: String(message.id), role: message.role, name: message.role === "user" ? "你" : "智能助手", parts, usage: message.metadata.usage, time: new Date(message.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) };
+  return { id: String(message.id), renderKey, role: message.role, name: message.role === "user" ? "你" : "智能助手", parts, usage: message.metadata.usage, time: new Date(message.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) };
 }
 
 export interface SendAgentOptions { modelId?: number; toolIds: string[]; reasoning: string; accessMode: AccessMode; assistantId?: number; attachments?: AgentAttachment[] }
@@ -83,24 +81,26 @@ export function useAgentConversation(sessionId: string | undefined, onSessionCha
   const streamRef = useRef<AbortController | null>(null);
   const sessionRef = useRef(sessionId);
   const callbackRef = useRef(onSessionChange);
-  const reasoningRef = useRef(new Map<string, string>());
+  const processRef = useRef(new Map<string, ProcessData>());
+  const messageKeysRef = useRef(new Map<string, string>());
   callbackRef.current = onSessionChange;
   sessionRef.current = sessionId;
 
   useEffect(() => {
     streamRef.current?.abort();
+    streamRef.current = null;
     setStreaming(false);
     setMessages([]);
     setContextTokens(0);
     setError(null);
     setLoading(false);
-    if (!sessionId) { reasoningRef.current.clear(); return; }
+    if (!sessionId) { processRef.current.clear(); messageKeysRef.current.clear(); return; }
     const controller = new AbortController();
     setLoading(true);
     agentRequest<{ items: AgentMessage[]; session: AgentSession }>(`/api/agent/sessions/${encodeURIComponent(sessionId)}/messages`, { signal: controller.signal })
       .then((result) => {
         if (controller.signal.aborted) return;
-        setMessages(result.items.map((message) => storedMessage(message, reasoningRef.current.get(String(message.id)))));
+        setMessages(result.items.map((message) => storedMessage(message, processRef.current.get(String(message.id)), messageKeysRef.current.get(String(message.id)))));
         const last = [...result.items].reverse().find((message) => message.role === "assistant");
         setContextTokens(last?.metadata.context?.context_tokens || last?.metadata.usage?.prompt_tokens || result.session.last_context_tokens || 0);
         callbackRef.current?.(result.session);
@@ -119,91 +119,84 @@ export function useAgentConversation(sessionId: string | undefined, onSessionCha
     setStreaming(true);
     setError(null);
     const id = `live-${Date.now()}`;
-    let answer = "";
-    let reasoning = "";
-    let runs: AgentToolRun[] = [];
-    let usage: UsageData | undefined;
-    let label = "正在请求模型";
-    let completed = false;
-    let failed = false;
+    const run = new ConversationRun();
     let lastEventId = "";
-    let approval: AgentEvent["approval"];
-    const startedAt = Date.now();
     let frame: number | null = null;
+    let renderTimer: number | null = null;
+    let lastRenderAt = 0;
     const render = () => {
       if (sessionRef.current !== sessionId) return;
-      const process: ProcessData = {
-        title: failed ? label : completed ? "已完成" : label,
-        status: failed ? "failed" : completed ? "done" : "running",
-        duration: `${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
-        reasoningStored: false,
-        steps: [
-          ...(reasoning ? [{ id: "thinking", title: "模型思考", kind: "think" as const, status: completed ? "done" as const : "running" as const, reasoning }] : []),
-          ...runs.map((run, index) => ({ id: run.call_id || `tool-${index}`, title: run.tool, kind: "tool" as const, status: run.status === "running" ? "running" as const : ["error", "failed", "rejected", "cancelled"].includes(run.status) ? "failed" as const : run.status === "pending" ? "approval" as const : "done" as const, arguments: run.arguments, result: run.result, meta: run.summary })),
-          ...(!runs.length && !reasoning ? [{ id: "waiting", title: label, kind: "step" as const, status: completed ? "done" as const : failed ? "failed" as const : "running" as const }] : []),
-        ],
-      };
-      const parts: MessagePart[] = [{ kind: "process", process }];
-      parts.push(...(completed ? extractHtmlArtifacts(answer, id).parts : answer ? [{ kind: "markdown" as const, content: answer }] : []));
-      if (approval) parts.push({ kind: "approval", approval: { id: approval.id, tool: approval.tool, title: "等待操作确认", description: approval.summary, arguments: approval.arguments, risk: approval.risk, status: "pending" } });
-      setMessages((previous) => previous.map((message) => message.id === id ? { ...message, parts, streaming: !completed && !failed, usage } : message));
+      lastRenderAt = Date.now();
+      const parts: MessagePart[] = [{ kind: "process", process: run.snapshot() }];
+      parts.push(...(run.completed ? extractHtmlArtifacts(run.answer, id).parts : run.answer ? [{ kind: "markdown" as const, content: run.answer }] : []));
+      if (run.approval) parts.push({ kind: "approval", approval: { id: run.approval.id, tool: run.approval.tool, title: "等待操作确认", description: run.approval.summary, arguments: run.approval.arguments, risk: run.approval.risk, status: "pending" } });
+      setMessages((previous) => previous.map((message) => message.id === id ? { ...message, parts, streaming: !run.completed && !run.failed, usage: run.usage } : message));
+    };
+    const cancelRender = () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      if (renderTimer !== null) window.clearTimeout(renderTimer);
+      frame = null;
+      renderTimer = null;
     };
     const scheduleRender = () => {
-      if (frame !== null) return;
-      frame = window.requestAnimationFrame(() => { frame = null; render(); });
+      if (frame !== null || renderTimer !== null) return;
+      renderTimer = window.setTimeout(() => {
+        renderTimer = null;
+        frame = window.requestAnimationFrame(() => { frame = null; render(); });
+      }, Math.max(0, 50 - (Date.now() - lastRenderAt)));
     };
     const onEvent = (name: string, data: AgentEvent, eventId: string) => {
       if (sessionRef.current !== sessionId) return;
       if (eventId) lastEventId = eventId;
-      if (name === "text.delta") { answer += data.delta || ""; label = "正在生成回答"; }
-      if (name === "thinking.delta") { reasoning += data.delta || ""; label = "模型正在思考"; }
-      if (name === "tool.started") { label = `正在执行 ${data.tool || "工具"}`; runs.push({ tool: data.tool || "工具", call_id: data.call_id, arguments: data.arguments, status: "running" }); }
-      if (name === "tool.finished") { const target = data.call_id ? runs.find((run) => run.call_id === data.call_id) : [...runs].reverse().find((run) => run.tool === data.tool && run.status === "running"); if (target) Object.assign(target, data); label = data.summary || "工具执行完成"; }
-      if (name === "tool.approval_required") { approval = data as AgentEvent & { id: string; tool: string }; label = "等待操作确认"; }
-      if (name === "usage") { usage = data.usage; if (usage?.prompt_tokens) setContextTokens(usage.prompt_tokens); }
+      const changed = run.accept(name, data);
+      if (name === "usage" && data.usage?.prompt_tokens) setContextTokens(data.usage.prompt_tokens);
       if (name === "context" && data.context_tokens !== undefined) setContextTokens(data.context_tokens);
-      if (name === "retry") label = `请求重试，${((data.delay_ms || 0) / 1000).toFixed(1)} 秒后继续`;
-      if (name === "model.fallback") label = `正在切换备用模型 ${data.to || ""}`;
       if (name === "session.title" && data.title) callbackRef.current?.({ id: sessionId, title: data.title } as AgentSession);
       if (name === "run.completed") {
-        completed = true;
-        answer = data.answer || answer;
-        runs = data.tool_runs || runs;
-        usage = data.usage || usage;
-        approval = data.approval || approval;
         if (data.context?.context_tokens !== undefined) setContextTokens(data.context.context_tokens);
       }
-      if (name === "run.failed") { failed = true; label = data.message || "运行失败"; setError(label); }
-      scheduleRender();
+      if (name === "run.failed") setError(run.title);
+      if (changed) scheduleRender();
     };
-    setMessages((previous) => [...previous, { id: `${id}-user`, role: "user", name: "你", parts: [{ kind: "markdown", content: text }], streaming: true }, { id, role: "assistant", name: "智能助手", parts: [{ kind: "process", process: { title: label, status: "running", steps: [] } }], streaming: true }]);
+    setMessages((previous) => [...previous, { id: `${id}-user`, role: "user", name: "你", parts: [{ kind: "markdown", content: text }], streaming: true }, { id, role: "assistant", name: "智能助手", parts: [{ kind: "process", process: run.snapshot() }], streaming: true }]);
     try {
       const response = await fetch("/api/agent/chat/stream", { method: "POST", credentials: "same-origin", signal: controller.signal, headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify({ message: text, session_id: sessionId, model_row_id: options.modelId, assistant_id: options.assistantId, enabled_tools: options.toolIds, reasoning_effort: options.reasoning || null, approval_mode: options.accessMode, attachments: options.attachments || [] }) });
       const runId = response.headers.get("X-Run-Id");
       try { await consumeAgentEvents(response, onEvent); }
       catch (failure) { if (!runId || controller.signal.aborted) throw failure; }
-      if (!completed && !failed && runId && !controller.signal.aborted) {
-        label = "正在恢复连接";
+      if (!run.completed && !run.failed && runId && !controller.signal.aborted) {
+        run.reconnect();
         render();
         const resumed = await fetch(`/api/agent/chat/stream/${encodeURIComponent(runId)}`, { credentials: "same-origin", signal: controller.signal, headers: { Accept: "text/event-stream", "Last-Event-ID": lastEventId } });
         await consumeAgentEvents(resumed, onEvent);
       }
-      if (!completed && !failed) throw new Error("连接中断。后台任务可能仍在执行，请刷新会话查看结果。");
-      if (completed && sessionRef.current === sessionId) {
+      if (!run.completed && !run.failed) throw new Error("连接中断。后台任务可能仍在执行，请刷新会话查看结果。");
+      cancelRender();
+      render();
+      if (run.completed && sessionRef.current === sessionId) {
         const latest = await agentRequest<{ items: AgentMessage[]; session: AgentSession }>(`/api/agent/sessions/${encodeURIComponent(sessionId)}/messages`, { signal: controller.signal });
+        if (sessionRef.current !== sessionId) return;
         const last = [...latest.items].reverse().find((message) => message.role === "assistant");
-        if (last && reasoning) reasoningRef.current.set(String(last.id), reasoning);
-        setMessages(latest.items.map((message) => storedMessage(message, reasoningRef.current.get(String(message.id)))));
+        const lastUser = [...latest.items].reverse().find((message) => message.role === "user");
+        if (last) {
+          processRef.current.set(String(last.id), run.snapshot());
+          messageKeysRef.current.set(String(last.id), id);
+        }
+        if (lastUser) messageKeysRef.current.set(String(lastUser.id), `${id}-user`);
+        setMessages(latest.items.map((message) => storedMessage(message, processRef.current.get(String(message.id)), messageKeysRef.current.get(String(message.id)))));
         callbackRef.current?.(latest.session);
       }
     } catch (failure) {
       if (sessionRef.current !== sessionId) return;
-      failed = true;
-      label = controller.signal.aborted ? "已停止接收；后台任务可能仍在执行" : apiErrorMessage(failure);
-      setError(label);
+      if (run.completed) {
+        setError("回答已完成，但同步会话失败；可刷新会话查看。");
+      } else {
+        run.interrupt(controller.signal.aborted ? "已停止接收；后台任务可能仍在执行" : apiErrorMessage(failure));
+        setError(run.title);
+      }
     } finally {
-      if (frame !== null) window.cancelAnimationFrame(frame);
-      if (!completed || failed) render();
+      cancelRender();
+      if (!run.completed) render();
       if (streamRef.current === controller) {
         streamRef.current = null;
         setStreaming(false);

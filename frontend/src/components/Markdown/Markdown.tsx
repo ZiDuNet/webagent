@@ -1,4 +1,4 @@
-import { Fragment, useMemo, type CSSProperties, type ReactNode } from "react";
+import { Fragment, memo, useMemo, type CSSProperties, type ReactNode } from "react";
 import katex from "katex";
 import type { Token } from "markdown-it";
 import "katex/dist/katex.min.css";
@@ -335,7 +335,7 @@ function renderBlocks(tokens: Token[], streaming = false): ReactNode[] {
   return walk();
 }
 
-export function Markdown({
+export const Markdown = memo(function Markdown({
   content,
   className = "",
   streaming = false,
@@ -350,4 +350,4 @@ export function Markdown({
       {blocks}
     </div>
   );
-}
+});
