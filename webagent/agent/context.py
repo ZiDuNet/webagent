@@ -116,7 +116,8 @@ def _context_budget(
     max_context = max(2048, max_context)
     reserved_output = int(model.get("max_output_tokens") or 0)
     reserved_output = min(reserved_output, max_context // 2)
-    reserve = int(config.get("context_reserve_tokens") or 1600)
+    configured_reserve = config.get("context_reserve_tokens")
+    reserve = max(0, int(configured_reserve if configured_reserve is not None else 1600))
     budget = max_context - reserved_output - reserve
     return max(1200, budget), max_context
 

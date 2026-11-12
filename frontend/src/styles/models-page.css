@@ -1,0 +1,7 @@
+.models-page { height: 100dvh; overflow: auto; background: var(--bg); }
+.models-page--embedded { height: 100dvh; overflow: auto; }
+.models-page__nav { display: flex; align-items: center; gap: 20px; padding: 14px clamp(16px, 4vw, 52px); border-bottom: 1px solid var(--border); }
+.models-page__nav a, .models-page__message a { color: var(--accent); text-decoration: none; font-size: 13px; }
+.models-page__nav a:hover, .models-page__message a:hover { text-decoration: underline; }
+.models-page__message { padding: 32px 20px; font-size: 14px; line-height: 1.8; }
+.models-page__message h1 { font-size: 20px; }

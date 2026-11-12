@@ -4,6 +4,8 @@ export type IconName =
   | "sparkles"
   | "send"
   | "stop"
+  | "pause"
+  | "play"
   | "mic"
   | "chevron-down"
   | "chevron-right"
@@ -55,6 +57,8 @@ const P: Record<IconName, ReactNode> = {
     </>
   ),
   stop: <rect x="7" y="7" width="10" height="10" rx="2" />,
+  pause: <path d="M8 5v14M16 5v14" />,
+  play: <path d="m8 4 12 8-12 8V4Z" />,
   mic: (
     <>
       <rect x="9" y="3" width="6" height="11" rx="3" />

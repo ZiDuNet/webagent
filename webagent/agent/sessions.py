@@ -344,6 +344,19 @@ def list_messages(
     return [_message_public(row) for row in rows]
 
 
+def list_recent_messages(session_id: str, user_id: int, *, limit: int = 6) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT m.* FROM messages m JOIN sessions s ON s.id = m.session_id
+            WHERE m.session_id = ? AND s.user_id = ?
+            ORDER BY m.id DESC LIMIT ?
+            """,
+            (session_id, user_id, max(1, min(limit, 40))),
+        ).fetchall()
+    return [_message_public(row) for row in reversed(rows)]
+
+
 def clear_messages(session_id: str, user_id: int) -> bool:
     with connect() as conn:
         exists = conn.execute(

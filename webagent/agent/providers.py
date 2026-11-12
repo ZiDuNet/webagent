@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import time
 from typing import Any
@@ -22,10 +23,28 @@ class ProviderError(Exception):
 
 def validate_base_url(value: str) -> str:
     candidate = value.strip().rstrip("/")
-    parsed = urlparse(candidate)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if any(character.isspace() or ord(character) < 32 for character in candidate) or "\\" in candidate:
+        raise ProviderError("Base URL 不能包含空白字符或反斜杠")
+    try:
+        parsed = urlparse(candidate)
+        parsed.port
+    except ValueError as exc:
+        raise ProviderError("Base URL 的主机或端口无效") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ProviderError("Base URL 必须是完整的 http:// 或 https:// 地址")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ProviderError("Base URL 不能包含用户名、密码、查询参数或片段")
     return candidate
+
+
+def provider_requires_key(provider: dict[str, Any]) -> bool:
+    hostname = (urlparse(str(provider.get("base_url") or "")).hostname or "").lower()
+    if hostname == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return True
 
 
 def validate_headers(value: dict[str, Any]) -> dict[str, str]:
@@ -69,6 +88,9 @@ def transcription_config(
     settings = extra_params.get("_asr") or {}
     if not isinstance(settings, dict):
         raise ProviderError("语音协议配置 _asr 必须是 JSON 对象")
+    language = settings.get("language")
+    if language is not None and (not isinstance(language, str) or len(language) > 20):
+        raise ProviderError("语音识别语言必须是最多 20 个字符的字符串")
     protocol = str(settings.get("protocol") or "auto").strip().lower()
     if protocol not in {"auto", "transcriptions", "chat_audio", "dashscope"}:
         raise ProviderError(f"不支持的语音协议：{protocol}")
@@ -254,12 +276,9 @@ async def list_remote_models(
                 f"供应商模型列表读取超时（{timeout:.0f}s），请检查 Base URL 或手工添加模型"
             ) from exc
         except httpx2.RequestError as exc:
-            raise ProviderError(f"无法连接供应商：{exc}") from exc
+            raise ProviderError("无法连接供应商，请检查地址、网络和端口") from exc
         if response.status_code >= 400:
-            detail = response.text[:300]
-            raise ProviderError(
-                f"供应商返回 {response.status_code}：{detail or '没有响应内容'}"
-            )
+            raise ProviderError(f"供应商模型列表返回 HTTP {response.status_code}，请检查地址、Key 和模型列表权限；也可手工添加模型")
         try:
             data = response.json()
         except ValueError as exc:
@@ -324,6 +343,10 @@ def guess_capabilities(model_id: str) -> list[str]:
 
 def guess_model_kind(model_id: str) -> str:
     lower = model_id.lower()
+    if any(hint in lower for hint in ("decision", "typesafe/jev", "typed-decisions", "laya")):
+        return "decision"
+    if any(hint in lower for hint in ("tts", "text-to-speech", "speech-synthesis")):
+        return "tts"
     if any(hint in lower for hint in ("realtime", "real-time")):
         if any(hint in lower for hint in ("asr", "audio", "transcribe", "whisper", "voice")):
             return "asr_realtime"
@@ -512,6 +535,8 @@ async def enrich_model_defaults(
         "output_price_per_1m": float(cost.get("output") or 0),
         "metadata_source": "models.dev",
     }
+    if enriched["model_kind"] not in {"chat", "vision"}:
+        enriched.update(supports_tools=False, supports_reasoning=False, reasoning_efforts=[])
     enriched["reasoning_efforts"] = reasoning_config(
         {"model_id": model_id, **enriched}
     )["efforts"]

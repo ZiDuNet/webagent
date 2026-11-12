@@ -1,6 +1,6 @@
 # WebAgent React 组件与业务接入
 
-React + TypeScript + Vite。组件沿用正式 HTML 系统的深色配色、绿色强调色 `#27c96a` 和输入框布局。模态交互采用 Radix Dialog，提供焦点圈定、关闭后焦点恢复和 Escape 关闭。手机视口使用相同组件，自动调整尺寸与触摸目标。
+React + TypeScript + Vite。组件沿用正式 HTML 系统的深色配色、绿色强调色 `#27c96a` 和输入框布局。聊天弹层采用 Radix Dialog，模型管理采用 Ant Design 6 与 Lucide 图标；手机端调整尺寸、内容滚动和触摸目标。
 
 `src/App.tsx` 连接真实业务服务：登录、会话、模型、工具、流式聊天、语音识别、HTML 发布和发布记录。旧的模拟回答数据与会话 Hook 已移除，不自动播放假回答，也不把未完成操作显示为成功。
 
@@ -25,15 +25,17 @@ npm run preview
 
 ## 流式过程与等待反馈
 
-过程默认只占一行，点击展开时间线与工具参数/结果；思考正文直接在展开区域按 Markdown 渲染，不再叠加第三层开关。完成后自动收起，当前页面仍可重新展开未落库的本轮思考。
+过程默认只占一行，按时间顺序连续播放实际步骤、思考原文、工具参数/结果与回答片段。长文本按标点或最多 36 个 Unicode 字符分段；超过单行宽度时平移，积压时加快播放，避免固定显示“等待模型响应”或只轮换阶段名称。点击展开对应轮次的完整内容；完成后立即停止播放、自动收起，当前页面仍可重新展开未落库的本轮思考。
 
 - `run.phase`：真实的身份校验、工具发现授权、上下文检查和按需压缩，不伪造模型推理。
-- `step.started`：等待模型首次响应或等待模型继续；等待超过 8 秒时明确提示上游尚未返回新内容，不轮播假动作。
-- `thinking.delta`：当前推理片段的单行尾部预览，完整正文保留在当前轮对应的位置。
+- `step.started`：等待模型首次响应或等待模型继续；追加真实请求提示，不把轮次编号作为播放主体。
+- `thinking.delta`：逐段加入上方单行播放，完整正文保留在当前轮对应的位置。
 - `tool.args.delta`：仅显示模型正在生成调用参数，不显示未脱敏的参数片段。`tool.started` 后显示后端处理过的参数。
-- `tool.started` / `tool.finished`：当前工具动作优先，上一段思考不会保持执行中并遮住它。
-- `text.delta`：立即增量解析 Markdown，状态切为回答；20fps 合批，心跳和工具参数碎片不触发整屏更新。
+- `tool.started` / `tool.finished`：动作、后端已脱敏参数和实际结果都进入播放队列；原始调用参数碎片始终不展示。
+- `text.delta`：同步加入过程播放并立即增量解析 Markdown；HTML 在过程行播放源码片段，正文继续使用紧凑产物卡；20fps 合批，心跳和工具参数碎片不触发整屏更新。
 - `run.completed`：冻结计时、收起过程；同步数据库消息时保留消息渲染身份，避免重新播放入场动画。审批与错误不能显示成成功。
+
+支持暂停、上一条/下一条，悬停与键盘聚焦暂停；手机端只保留 44px 的暂停按钮并可展开查看全部过程。`prefers-reduced-motion` 关闭自动播放动画，改为直接跟随最新内容。队列最多保留 300 段且仅在内存中存在，完整思考的落库规则由后端配置决定；播放进度和计时不触发整个聊天正文重新解析。可复用数据类型 `ProcessActivity` 与 `ProcessData.activities` 从组件入口导出。
 
 参考的是 Octop 的阶段提示、折叠过程与完成后收起的交互原则，不移植其多 Agent/团队执行逻辑。组件不会缩短上游模型实际首 token 等待时间；需要分开观察准备、模型请求与工具执行耗时。
 
@@ -60,8 +62,32 @@ npm run test:conversation
 | `SessionList` / `MessageActions` | 会话与消息的重命名、分叉、编辑、删除和用量 |
 | `PublishedPages` | 当前业务账号的发布列表、搜索、会话筛选、版本、预览和更新 |
 | `PublishPageDialog` | 新建或更新页面，每次填写密码、选择可见范围 |
+| `ModelsSettings` | 对话 / 语音 / 生图 / 决策模型池、多供应商连接、参数同步、真实分类测试 |
 
-组件通过 props 和回调融合现有系统。`HtmlArtifactCard.onAction` 支持异步回调，失败时显示真实错误；未传回调时发布/保存按钮禁用，不模拟成功。App 的截图操作连接 `/api/agent/artifacts/screenshot`。
+组件通过 props 和回调融合现有系统。`HtmlArtifactCard` 默认仅呈现紧凑标题卡和「打开预览 / 查看代码」，点击才打开弹窗和加载 iframe；弹窗内保留下载、截图、发布与已发布记录入口。`HtmlArtifactCard.onAction` 支持异步回调，失败时显示真实错误；未传回调时发布/保存按钮禁用，不模拟成功。App 的截图操作连接 `/api/agent/artifacts/screenshot`。
+
+## 模型管理组件
+
+生产入口 `/react/?view=models`，HTML 后台模型菜单内嵌 `/react/?view=models&embed=1`；两者使用同一组件和登录态。页面先检查管理员身份，所有模型与供应商写接口仍由后端核验管理员权限。
+
+```tsx
+import { ModelsSettings } from "./src";
+import "./src/styles/theme.css";
+
+export function AdminModels() {
+  return <ModelsSettings
+    baseUrl="/api/agent"
+    initialCategory="chat"
+    onChanged={() => window.dispatchEvent(new Event("models-changed"))}
+  />;
+}
+```
+
+`initialCategory` 支持 `chat | voice | image | decision`；`baseUrl` 指向同源 BFF，不携带服务密钥。`onChanged` 通知宿主刷新模型可选列表。组件自带局部 Ant Design 深色主题，外层应提供可滚动的视口容器；官方嵌入页固定剩余视口高度，弹窗正文独立滚动、保存按钮保留在底部。
+
+模型列表不在打开页面时自动拉取供应商目录；只有管理员点击后才访问 `/models` 或 models.dev。可手输 ID，读取有 12 秒超时和取消按钮。12 个品牌模板不代表已适配所有厂商原生协议，边界见 [模型接入手册](../docs/MODELS.md)。
+
+语音页独立设置 STT 和 TTS 默认绑定；支持上传 / 录制测试音频和 TTS 合成试听。`POST /api/agent/audio/speech` 返回音频二进制，业务界面可用 Blob URL 接入播放；当前聊天页未自动朗读回答。实时 WebSocket 语音仍预留。
 
 ## 发布记录接入
 
@@ -183,9 +209,11 @@ App 从 `/api/agent/models` 读取服务端归一化的 `supports_reasoning`、`
 
 App 的 `useAgentConversation` 对接现有 `/api/agent/chat/stream` SSE，处理 `text.delta`、`thinking.delta`、工具、审批、用量、上下文、重试、降级和完成事件。更新合并到浏览器动画帧，消息内容直接进入 Markdown 组件。完成后读取真实会话消息，保留本次内存中的思考文本，遵守后台的思考原文落库开关；关闭页面后，未落库原文不会恢复。
 
-断流时利用 `X-Run-Id` 和 `Last-Event-ID` 尝试恢复。按钮标为「停止接收（后台任务继续）」，不假装取消服务器任务；刷新会话可以读取后台已保存结果。单用户最多同时运行 4 个任务，同一会话执行中返回 409，避免并发修改历史。会话/消息删除有二次确认，流式占位消息禁止编辑/删除。React 入口聚焦会话与发布能力，业务数据表和管理员配置页仍由正式 HTML 系统提供。
+断流时利用 `X-Run-Id` 和 `Last-Event-ID` 尝试恢复。按钮标为「停止接收（后台任务继续）」，不假装取消服务器任务；刷新会话可以读取后台已保存结果。单用户最多同时运行 4 个任务，同一会话执行中返回 409，避免并发修改历史。会话/消息删除有二次确认，流式占位消息禁止编辑/删除。业务表和其他配置页仍由 HTML 后台提供，模型管理已复用 React 组件。
 
-Mermaid 在流式代码满足语法时尝试渲染，尚未闭合或不完整语法显示生成状态，不连续弹出解析错误；更新期间保留已有图形。普通文本按动画帧合并，HTML 页面不因过程计时重复解析正文。
+Mermaid 在流式代码满足语法时尝试渲染，尚未闭合或不完整语法显示生成状态，不连续弹出解析错误；更新期间保留已有图形。普通文本按动画帧合并，HTML 页面不因过程计时重复解析正文。`src/lib/answerContent.ts` 提前提取流式 HTML，未闭合代码不会铺满聊天正文；过程行播放真实 HTML 片段，展开可查实际接收量，收尾文字仍正常渲染。
+
+`ProcessLine` 在固定的一行内顺序播放真实动作、思考原文、已脱敏工具参数和结果、回答内容；长文本分段显示，积压时加快推进。悬停或键盘聚焦暂停播放，可手动暂停和前后查看；减少动态效果偏好下直接显示最新片段。展开后查看对应轮次完整内容，结束立即收起；历史会话默认折叠。`src/lib/processActivity.ts` 只使用真实事件，不生成虚构进度。
 
 ## 移动端与小程序
 

@@ -479,6 +479,7 @@ async def proxy_agent(path: str, request: Request) -> Response:
         content=upstream.content,
         status_code=upstream.status_code,
         media_type=media_type,
+        headers={key: upstream.headers[key] for key in ("Cache-Control", "X-Content-Type-Options") if key in upstream.headers},
     )
 
 

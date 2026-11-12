@@ -22,8 +22,11 @@
 | `scripts/test_asr_protocol.py`：16 项 | 转写协议、录音转换、推理开关、超时和错误脱敏 |
 | `scripts/test_publications.py`：16 项 | 发布归属、并发、版本、部分成功、兼容路由和秘密处理 |
 | `scripts/test_publications_api.py`：8 项 | HTTP/SDK 契约、跨用户访问、关闭连接器后的本地读取 |
-| `scripts/test_review_regressions.py`：39 项 | 上述上下文、四态、审批、互斥、隐私、SDK、缓存、准备阶段事件与入口回归 |
-| `frontend/tests/conversationRun.test.mjs`：11 项 | 准备/思考/工具/回答阶段、多工具顺序与快照、参数隐私、失败/审批/重试、冻结计时和无效事件 |
+| `scripts/test_review_regressions.py`：45 项 | 上述上下文、四态、审批、互斥、隐私、SDK、缓存、准备阶段事件、次数不限/超时与入口回归 |
+| `scripts/test_decision.py`：25 项 | 两开关互斥与全关、评分协议、权限后筛选、固定工具补回、超时/重试、评分无效时用量留存、模型分类、同步和凭据要求 |
+| `scripts/test_speech.py`：33 项 | OpenAI / DashScope 两 schema、音色/格式/语速、大小/超时、音频下载边界、错误脱敏 |
+| `scripts/test_model_settings.py`：18 项 | 模板管理员鉴权、多连接、Key 脱敏、专用类型、STT / TTS 绑定、真实分类测试、语言校验、空回复失败、音频 API 与 BFF 隐私头透传 |
+| `frontend/tests/conversationRun.test.mjs`：19 项 | 准备/思考/工具/回答阶段、多工具顺序与快照、参数隐私、失败/审批/重试、冻结计时、流式 HTML 提取与真实步骤轮播 |
 | `scripts/smoke_test.py` | 独立 Compose 数据卷中的真实 BFF → Agent → MCP → 业务 API、角色权限、审批、SSE 重放、加密配置、会话操作、假 PagePilot 发布/更新、真实 Chromium PNG 截图 |
 | 静态与构建 | Ruff `F,E9`、Python 全量语法编译、HTML JavaScript 语法、TypeScript、Vite 生产构建、`git diff --check` |
 | npm 审计 | 生产依赖已知漏洞为 0（验收时的 registry 结果，不保证未来不会出现新的公告） |
@@ -31,7 +34,7 @@
 运行单元测试：
 
 ```bash
-for test_file in scripts/test_asr_protocol.py scripts/test_publications.py scripts/test_publications_api.py scripts/test_review_regressions.py; do
+for test_file in scripts/test_asr_protocol.py scripts/test_publications.py scripts/test_publications_api.py scripts/test_review_regressions.py scripts/test_decision.py scripts/test_speech.py scripts/test_model_settings.py; do
   .venv/bin/python "$test_file"
 done
 ```
@@ -52,10 +55,35 @@ done
 - 另用本机已配置真实模型、只读账号做少量探针：一次工具统计链路准备约 0.19 秒、工具约 0.11 秒，两次模型响应各约 16 秒，说明不能把上游等待当作前端渲染耗时；实际延迟会随供应商与推理配置变化。仅删除本轮专用验收会话，不重写现有模型、密钥或业务数据。
 - 前端成功/失败/审批以协议事件及工具记录为准，完成但未调用工具时明确显示“未调用工具”，不能把模型正文中“我已查询”的文字当作真实执行证据。
 
+### Octop 风格模型管理与语音复验
+
+- 阅读 Octop 模型、供应商、决策设置与语音适配源码，采用模型池 / 供应商卡片 / STT 与 TTS 分区 / 决策完整参数的组织方式；保持框架现有业务鉴权和主对话 OpenAI 兼容协议。
+- 模型管理统一为 Ant Design 6 React 组件，HTML 后台嵌入同一页面。验证桌面以及 375 / 320px 视口、从列表底部打开配置弹窗、正文独立滚动、保存按钮常驻、切换菜单后高度恢复。
+- 使用独立库和本机验收网关，通过 UI 新增自定义连接、关联手填模型、取消慢模型发现后保存；未修改用户现有真实供应商或 Key。
+- 验证决策测试返回 0.900 评分、启用 BM25 自动关闭决策、两个开关全关保存；配置关闭时仍可编辑范围、绑定、阈值、数量和超时。
+- TTS 走真实 HTTP 返回可解码 WAV，浏览器音频元素识别 1 秒样本。该样本为验收静音，不是厂商人声音质认证；STT API 通过隔离音频请求验证转写契约，未使用用户麦克风或真实私有录音。
+- 当前自动回归共 **155 项后端 + 11 项前端**通过；TypeScript / Vite 构建、Ruff `F,E9`、HTML JS 语法与 diff 检查通过。模型页和聊天入口分别按需加载；Ant Design 与部分 Mermaid 图类型仍有大分包警告。
+- 本机 `8000` / `8010` 已加载本轮修改，原有 `8080` Compose 镜像未在本轮重建；截图来自隔离验收实例。
+
+### 单行过程与 HTML 紧凑展示复验
+
+- React 的过程行轮换当前动作和最近真实完成的步骤，暂停自动轮换支持悬停、键盘聚焦及系统减少动态效果偏好。生成中的 HTML 不作为 Markdown 代码块铺出，只在过程行提示实际接收量。
+- 在正式 `8000/react/` 查看已有 HTML 消息，确认默认无 iframe、无源码展开；「打开预览」「查看代码」按需进入弹窗，保留下载、截图、发布与已发布入口。375px 手机视口没有页面横向溢出，弹窗操作栏仍在屏幕内。
+- 独立临时数据的 `8100` 验收实例通过真实 BFF → Agent → MCP → 业务工具链路，测试网关先延迟响应，再输出思考、工具调用和分片 HTML。过程折叠高度约 45px，未闭合 HTML 期间没有大代码块，完成产物默认无 iframe；完成后仍能展开查看未落库的本轮思考。测试网关返回内容明确标为验收数据，不使用用户真实模型额度或修改模型密钥。
+- 全局轮次/工具次数支持 `0 = 不限`，助手 `0 = 跟随全局`。后端自动测试覆盖 14 轮 / 52 次工具运行、正数预算生效、超时仍终止、报告预采集和安全余量 `0`。现有运行设置保留管理员原值。
+- 当前自动回归 **161 项后端 + 19 项前端**通过；TypeScript / Vite 生产构建、HTML JS 语法、Python 编译、diff 检查通过。部分 Ant Design / Mermaid 依赖分包仍提示大于 500KB。
+
+### 实时详细内容播放
+
+- React 与 HTML 聊天将真实准备阶段、思考原文、工具调用 / 已脱敏参数 / 结果及回答增量统一加入单行播放；保持默认折叠和完成立即收起。新增可读分段、溢出平移、暂停与手动前后切换，手机仅保留暂停控件。
+- 片段队列限制 300 段，仅存在于页面内存；完整思考和答案不因队列裁剪丢失，工具参数碎片继续不展示。测试覆盖事件顺序、快照不变性、播放推进、长文本分段和内存队列上限。
+- 在临时本机 HTTP 事件服务中加载正式生产构建，React 桌面过程条 45px、375px 手机过程条 46px，HTML 桌面过程条 35px；持续采样确认思考、工具返回 JSON 和回答片段在同一行变化。手机暂停 / 恢复、展开本轮未落库思考、结束折叠和紧凑 HTML 卡片通过。验收服务只提供测试事件，没有调用付费模型、读取用户私有数据库或修改已有会话。
+- 本轮前端回归 **22 项**、相关后端回归 **45 项**通过，TypeScript / Vite 生产构建与 HTML JavaScript 语法检查通过；依赖的大分包警告仍存在。
+
 ## 已知边界
 
 - 原生配置管理台和 React 聊天组件并存；React 不是整套后台的完全重写。移动验收是响应式 Web，不是微信原生小程序真机认证。
-- 当前浏览器录音文件转写不支持 WebSocket 实时语音模型；已有目标网关的文件模型路由限制仍需供应商解决，不能宣称实际语音已全面可用。
+- 已适配 STT 文件转写、OpenAI / DashScope HTTP TTS，未实现 WebSocket 实时语音或聊天自动朗读；各品牌模板没有逐家付费认证，最终按目标供应商实际路由验收。
 - MCP 为远程 Streamable HTTP 配置入口；没有后台管理任意 stdio/SSE 服务器的完整控制面。原生 Tool、HTTP 连接器与 PagePilot REST 走各自适配路径。
 - Agent/SSE 运行锁和重放缓存仍在单进程内，保持单 worker；服务重启不恢复正在运行的任务。持久化审批不等于持久化任务调度。
 - 长期记忆当前手动维护；自动提取、租户知识库、任意脚本沙箱等不属于此次落地范围。第三方知识库可通过受控工具扩展。

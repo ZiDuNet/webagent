@@ -16,7 +16,7 @@ from typing import Any
 import httpx2
 
 from webagent.agent import context as context_planner
-from webagent.agent import db, dynamic_tools, pagepilot, publications, sessions, tool_search
+from webagent.agent import db, decision, dynamic_tools, pagepilot, publications, sessions, tool_search
 from webagent.agent.llm import (
     LLMError,
     build_system_prompt,
@@ -95,6 +95,7 @@ class AgentContext:
     overflow_retried: bool = False
     fallback_used: bool = False
     tool_retrieval: dict[str, Any] = field(default_factory=dict)
+    decision_usage: dict[str, Any] = field(default_factory=dict)
     had_reasoning: bool = False
     reasoning_text: str = ""
     last_prompt_tokens: int = 0
@@ -323,7 +324,7 @@ async def build_context(
         if model.get("supports_tools", True)
         else []
     )
-    if config.get("bm25_enabled", True):
+    if config.get("tool_selection_mode", "bm25") == "bm25":
         available, retrieval_used = tool_search.rank_tools(eligible, query, limit=16)
         retrieval_reason = "bm25" if retrieval_used else "all"
     else:
@@ -381,8 +382,42 @@ async def build_context(
             "bm25": retrieval_used,
             "reason": retrieval_reason,
             "mcp_error": mcp_error,
+            "mode": config.get("tool_selection_mode", "bm25"),
         },
     )
+
+
+async def _select_with_decision(ctx: AgentContext, text: str) -> None:
+    if ctx.config.get("tool_selection_mode") != "decision":
+        return
+    if ctx.config["demo_mode"] or (ctx.assistant or {}).get("mode") == "report" or not ctx.model.get("supports_tools", True):
+        ctx.tool_retrieval["decision"] = {"used": False, "reason": "demo_report_or_no_tools"}
+        return
+    await _emit_event(ctx, "run.phase", {"phase": "decision", "title": "正在筛选相关工具与技能"})
+    history = sessions.list_recent_messages(ctx.session_id, ctx.user["id"], limit=6) if ctx.session_id else []
+    state = "\n".join(f"{item['role']}: {str(item['content'])[:1200]}" for item in history)
+    state = f"最近对话（参考）：\n{state}\n当前任务：\n{text}"
+    eligible = ctx.tools
+    selected, skills, info, usage = await decision.select_candidates(
+        tools=eligible, skills=ctx.skills, state=state, config=ctx.config,
+        session_id=ctx.session_id, username=ctx.user["username"], deadline=ctx.deadline,
+    )
+    names = {spec.name for spec in selected}
+    for spec in eligible:
+        setting = ctx.global_tool_settings.get(spec.name) or db.default_tool_setting(spec.name, spec.source)
+        if not setting.get("selectable", True) and setting.get("default_selected", True) and spec.name not in names:
+            selected.append(spec)
+            names.add(spec.name)
+    ctx.tools = selected
+    ctx.skills = skills
+    ctx.skill_tools = _skill_tools(skills) if ctx.model.get("supports_tools", True) else []
+    ctx.decision_usage = usage
+    ctx.retry_count += int(usage.get("retry_count") or 0)
+    ctx.tool_retrieval.update(selected=len(selected), reason="decision", decision=info)
+    await _emit_event(ctx, "run.phase", {
+        "phase": "decision_result",
+        "title": "决策不可用，保留全部已授权候选" if info.get("fallback") else f"已准备 {len(selected)} 个工具 · {len(skills)} 个技能",
+    })
 
 
 def _summary_target_for(
@@ -1025,9 +1060,7 @@ async def _llm_loop(
                     usage,
                 )
 
-            tool_call_total += 1
-            ctx.tool_calls_used = tool_call_total
-            if tool_call_total > ctx.budget["max_tool_calls"]:
+            if ctx.budget["max_tool_calls"] > 0 and tool_call_total >= ctx.budget["max_tool_calls"]:
                 return _response(
                     ctx,
                     status="error",
@@ -1038,6 +1071,8 @@ async def _llm_loop(
                     tool_runs=tool_runs,
                     usage=usage,
                 )
+            tool_call_total += 1
+            ctx.tool_calls_used = tool_call_total
             execution, run = await _execute_emitting(ctx, spec, call, tool_runs)
             _append_tool_message(
                 messages, call, _tool_result_for_model(execution)
@@ -1045,7 +1080,7 @@ async def _llm_loop(
             approved_ids.discard(call["id"])
             calls.pop(0)
 
-        if round_count >= ctx.budget["max_steps"]:
+        if ctx.budget["max_steps"] > 0 and round_count >= ctx.budget["max_steps"]:
             return _response(
                 ctx,
                 status="error",
@@ -1584,7 +1619,7 @@ async def _run_prefetch(
             continue
         if time.monotonic() > ctx.deadline:
             break
-        if ctx.tool_calls_used >= ctx.budget["max_tool_calls"]:
+        if ctx.budget["max_tool_calls"] > 0 and ctx.tool_calls_used >= ctx.budget["max_tool_calls"]:
             break
         call = {
             "id": f"prefetch-{secrets.token_hex(4)}",
@@ -1737,6 +1772,7 @@ def _record_assistant_message(ctx: AgentContext, result: dict[str, Any]) -> None
             "usage": usage,
             "budget": result.get("budget") or {},
             "context": result.get("context") or {},
+            "tool_retrieval": result.get("tool_retrieval") or {},
             "approval": result.get("approval"),
             "run": {key: value for key, value in (result.get("run") or {}).items() if key != "reasoning"},
             "reasoning": {
@@ -1889,6 +1925,7 @@ async def _chat(
             assistant_id=(ctx.assistant or {}).get("id"),
         )
     ctx.session_id = session["id"]
+    await _select_with_decision(ctx, text)
 
     context_config = dict(ctx.config)
     context_config["context_max_tokens"] = ctx.budget["context_max_tokens"]
@@ -1962,6 +1999,8 @@ async def _chat(
         result["system_prompt_preview"] = system_prompt
 
     result["session_id"] = ctx.session_id
+    if ctx.decision_usage:
+        result["usage"] = merge_usage(result.get("usage"), ctx.decision_usage)
     result["context"] = {**plan.public(), **(result.get("context") or {})}
     if plan.compaction and plan.compaction.get("usage"):
         result["usage"] = merge_usage(

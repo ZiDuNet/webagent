@@ -137,6 +137,26 @@ class AgentAdminClient:
         return True
 
 
+class SpeechClient(AgentAdminClient):
+    """Use the authenticated business user's configured speech capabilities."""
+
+    def synthesize(
+        self, token: str, text: str, *, voice: str | None = None,
+        response_format: str | None = None, speed: float | None = None,
+        model_row_id: int | None = None,
+    ) -> tuple[bytes, str]:
+        payload: dict[str, Any] = {"text": text}
+        for key, value in (("voice", voice), ("response_format", response_format), ("speed", speed), ("model_row_id", model_row_id)):
+            if value is not None:
+                payload[key] = value
+        response = httpx2.post(
+            f"{self.agent_url}/api/audio/speech", headers=self._headers(token),
+            json=payload, timeout=100,
+        )
+        response.raise_for_status()
+        return response.content, response.headers.get("content-type", "application/octet-stream")
+
+
 class PagePilotClient(AgentAdminClient):
     """Server-side, business-user-scoped access to local PagePilot records."""
 

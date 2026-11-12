@@ -24,6 +24,13 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "context_max_tokens": "0",
     "context_compression": "1",
     "bm25_enabled": "1",
+    "tool_selection_mode": "",
+    "decision_model_id": "",
+    "decision_tools": "1",
+    "decision_skills": "1",
+    "decision_threshold": "0.6",
+    "decision_min_count": "8",
+    "decision_timeout_seconds": "5",
     "memory_enabled": "1",
     "system_prompt_extra": "",
     "demo_mode": "1",
@@ -34,6 +41,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "welcome_subtitle": "",
     "welcome_prompts": "",
     "asr_model_id": "",
+    "tts_model_id": "",
     "title_model_id": "",
     "fallback_model_id": "",
     "context_reserve_tokens": "1600",
@@ -1173,6 +1181,7 @@ def default_model() -> dict[str, Any] | None:
             FROM models m
             JOIN providers p ON p.id = m.provider_id
             WHERE m.enabled = 1 AND p.enabled = 1
+              AND m.model_kind IN ('chat', 'vision')
             ORDER BY m.is_default DESC, m.sort_order ASC, m.id ASC
             LIMIT 1
             """
@@ -1206,6 +1215,7 @@ def create_model(
     extra_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
+    is_default = is_default and model_kind in {"chat", "vision"}
     with connect() as conn:
         if is_default:
             conn.execute("UPDATE models SET is_default = 0")
@@ -1283,6 +1293,8 @@ def update_model(model_row_id: int, values: dict[str, Any]) -> dict[str, Any] | 
         "extra_params",
     }
     updates = {key: value for key, value in values.items() if key in allowed}
+    if updates.get("model_kind", current["model_kind"]) not in {"chat", "vision"}:
+        updates["is_default"] = False
     if "enabled" in updates:
         updates["enabled"] = int(bool(updates["enabled"]))
     if "supports_tools" in updates:
@@ -1337,12 +1349,19 @@ def delete_model(model_row_id: int) -> bool:
             (model_row_id,),
         )
         conn.execute("DELETE FROM models WHERE id = ?", (model_row_id,))
+        decision_binding = conn.execute("SELECT value FROM settings WHERE key = 'decision_model_id'").fetchone()
+        if decision_binding and decision_binding["value"] == str(model_row_id):
+            conn.execute("UPDATE settings SET value = 'none' WHERE key = 'tool_selection_mode' AND value = 'decision'")
+            conn.execute("UPDATE settings SET value = '0' WHERE key = 'bm25_enabled' AND (SELECT value FROM settings WHERE key = 'tool_selection_mode') = 'none'")
+        for key in ("asr_model_id", "tts_model_id", "decision_model_id", "compaction_model_id", "title_model_id", "fallback_model_id"):
+            conn.execute("UPDATE settings SET value = '' WHERE key = ? AND value = ?", (key, str(model_row_id)))
         if row["is_default"]:
             fallback = conn.execute(
                 """
                 SELECT m.id FROM models m
                 JOIN providers p ON p.id = m.provider_id
                 WHERE m.enabled = 1 AND p.enabled = 1
+                  AND m.model_kind IN ('chat', 'vision')
                 ORDER BY m.id ASC LIMIT 1
                 """
             ).fetchone()

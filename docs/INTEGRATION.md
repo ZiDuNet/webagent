@@ -154,11 +154,25 @@ Accept: application/json
   ∩ 助手工具白名单
   ∩ 管理员四态配置
   ∩ 用户本轮勾选
-  -> BM25 检索
-  -> 最多注入 16 个工具 Schema
+  -> BM25 / 决策模型（最多启用一种，也可全部关闭）
+  -> 补回固定启用工具，并提供入选 Skill 的渐进加载工具
 ```
 
-BM25 的作用不是“向量记忆”，而是工具很多时减少模型上下文占用。它只对已通过权限和四态过滤的工具做名称、描述、分类和参数名检索。
+BM25 的作用不是“向量记忆”，而是工具很多时减少模型上下文占用。它只对已通过权限和四态过滤的工具检索 Top 16；固定工具补回后可能超过 16。决策模型对已授权候选与允许的 Skill 评分，两种开关都关闭则全部保留。决策异常时保留原候选，不暗中改用 BM25。配置、协议与传给评分服务的数据范围见 [运行配置：决策模型](RUNTIME.md#决策模型)。
+
+接入方通过 `PUT /api/agent/config` 设置开关：
+
+```json
+{"bm25_enabled": false, "decision_enabled": false}
+```
+
+开启决策时同时指定后台创建的 `model_kind=decision` 模型 ID，例如：
+
+```json
+{"decision_enabled": true, "decision_model_id": 8, "decision_tools": true, "decision_skills": true, "decision_threshold": 0.6, "decision_min_count": 8, "decision_timeout_seconds": 5}
+```
+
+开启决策会自动关闭 BM25，开启 BM25 会自动关闭决策。两个布尔值同时为 `true` 会返回 422。内部以 `tool_selection_mode` 单值持久化并兼容历史 BM25 配置；不需要接入方自己维护互斥状态。
 
 ### 3.4 直连 Tool：业务系统已有数据接口时的接入
 
@@ -399,17 +413,25 @@ POST /api/agent/approvals/{id}/reject
 
 ### 4.1 HTML、React 与移动端
 
-`web/` 提供原生 HTML/JS 管理台；`frontend/` 提供独立 React + TypeScript 可复用聊天组件和真实登录、对话、发布/记录界面。二者使用相同 BFF/API 与业务身份。本轮没有把原生配置页全部迁成 React，集成方可以选择自己的前端技术栈；实际小程序仍需用小程序原生请求/SSE适配与组件实现相同交互。
+`web/` 提供 HTML/JS 业务及其他配置后台；`frontend/` 提供 React + TypeScript 聊天、发布记录，以及 Ant Design 模型管理组件。HTML 的模型菜单内嵌同一个 `ModelsSettings`，无需维护两份模型表单。实际小程序需用原生请求 / SSE 适配与组件实现相同交互。
 
 部署构建后，根入口 `/` 默认进入同端口 `/react/`，原生配置管理台位于 `/admin/`。停止使用 HTML 聊天首页不意味着关闭业务后端；后端继续承接登录、业务 API 与 BFF。接入宿主系统时可直接嵌入 React 组件，无需保留 Demo 的这两个页面路由。
 
+模型管理独立入口为 `/react/?view=models`，可从 `frontend/src/index.ts` 导入 `ModelsSettings`，传入 `baseUrl="/api/agent"`、`initialCategory="chat|voice|image|decision"` 与 `onChanged`。宿主负责配置页导航和更新后刷新模型列表，服务端继续核验管理员身份。供应商模板与模型协议详见 [模型接入手册](MODELS.md)。
+
 SSE 的 `run.phase` 携带 `phase` 与 `title`，描述身份、工具发现、上下文检查和实际触发的压缩。`step.started` 携带 `step/max_steps`，用于区分模型首轮与后续轮次。阶段事件不含思考原文，也不授予任何额外权限；宿主应以实际事件切换状态，不使用定时器伪造推理或工具调用。React 组件在一行中展示当前动作和真实思考尾部，按需展开完整过程，结束后收起；可参考 `frontend/src/lib/conversationRun.ts` 的事件状态管理。
+
+`step.started.max_steps=0` 表示本次不限制推理轮数；响应 `budget.max_tool_calls=0` 表示不限制工具调用次数。展示时应使用“不限”，不能用 `value || default` 将 `0` 替换成默认次数。助手配置的 `0` 则表示跟随全局；运行超时仍有效，具体语义见 [运行设置](RUNTIME.md#3-助手执行方式与运行上限)。
+
+React 的 `answerContent.ts` 按流式累积内容提取 HTML；`ConversationRun` 将准备阶段、思考原文、后端已脱敏的工具参数/结果及回答增量组织为 `ProcessData.activities`。`processActivity.ts` 与 `ProcessLine` 按时间顺序播放可读分段，支持暂停与溢出平移，完成时立即停止并折叠。播放只更新过程组件，主正文继续独立流式渲染。片段队列只在浏览器内存保留最近 300 段；完整思考是否入库仍由管理员配置，不能把原始 `tool.args.delta` 拼接到 UI 或日志。
+
+宿主可复用这些纯逻辑处理响应式 Web 或小程序数据：单行过程可播放 HTML 源码片段，主正文中 HTML 生成中不铺大段源码、完成后默认小卡片、预览点击后才加载。手机端保留暂停按钮与展开完整过程，不能依赖悬停操作。
 
 接入组件时，发布列表和历史版本一律走本地发布接口；HTML 预览放在隔离容器内，模型生成的 HTML 不能取得父页面 Cookie、内部密钥或 PagePilot Token。移动弹层应遵循视口高度、独立内容滚动与安全区规则，不能直接使用固定桌面宽度。
 
 ### 4.2 录音转写协议与真实验证
 
-语音入口 `POST /api/agent/transcribe` 接受音频 data URL，由服务端读取运行设置 `asr_model_id`；不允许浏览器传供应商 API Key。ASR 未配置时按钮关闭，不会自动拿主对话模型转写。`supports_transcription=true` 是能力声明，仍需配置与测试正确协议。
+语音入口 `POST /api/agent/transcribe` 接受音频 data URL，由服务端读取默认 STT `asr_model_id`；不允许浏览器传供应商 API Key。可在模型语音页绑定，未配置时按钮关闭。`supports_transcription=true` 是能力声明，仍需配置与测试正确协议。请求语言优先于模型 `_asr.language`，都未设置时默认 `zh`。
 
 在模型 `extra_params` 中配置：
 
@@ -434,9 +456,26 @@ SSE 的 `run.phase` 携带 `phase` 与 `title`，描述身份、工具发现、�
 
 Chat Audio/原生适配在需要时调用系统 FFmpeg 将 WebM/Opus、OGG、MP4 转成单声道 16 kHz WAV。部署语音功能时安装 FFmpeg，确保它在 Agent 服务进程的 `PATH`；缺少转换器时返回错误，不会默默丢掉录音。音频只用于本次转写，不应把供应商凭证或私有聊天内容当测试样本。
 
-后台 ASR 测试发送 1 秒静音，合法空转写可证明接口能处理请求，但不代表有声识别质量已验收；缺少识别字段的 JSON、401/404/400 或实时协议不匹配均不能报成功。本轮已配置网关的真实结果是：`qwen-audio-3.1-realtime-plus` 文件端点 404；其可发现的 `qwen-audio-3.0-asr-flash` 原生路由提示 `model ... is not allowed on this route`，Chat Audio 为 400。这是实际供应商路由限制，当前不能宣称语音已经真实可用。`scripts/test_asr_protocol.py` 覆盖协议、空文本、HTTP错误、超时、密钥脱敏和浏览器录音转换；最终需用目标供应商正确模型与用户同意的短录音做接入验收。
+后台 STT 测试支持实际录音或上传音频，调用 `POST /api/agent/admin/models/{id}/transcribe`，不修改默认绑定。通用 `/models/{id}/test` API 仍保留 1 秒静音连通探测，不能代替真实人声识别质量验收。缺少识别字段、401/404/400 或实时协议不匹配不能报成功。先前真实网关验证曾出现实时模型文件端点 404、原生路由不允许和 Chat Audio 400，说明能发现模型名并不意味着网关开放该协议；最终以目标供应商和真实短录音验收为准。
 
 协议参考：[OpenAI Chat Audio](https://developers.openai.com/api/docs/guides/audio-chat-completions)、[Qwen3-ASR](https://help.aliyun.com/zh/model-studio/recording-file-recognition-qwen)、[Qwen-Audio 原生 ASR](https://help.aliyun.com/en/model-studio/qwen-audio-asr-http-api)、[Qwen 实时语音](https://help.aliyun.com/en/model-studio/qwen-audio-realtime-user-guides)。
+
+#### TTS 输出与 SDK
+
+语音合成使用独立的 `model_kind=tts` 和全局 `tts_model_id`。`POST /api/agent/audio/speech` 接受 `{text,voice?,response_format?,speed?}`，返回 `audio/*` 二进制并设置 `Cache-Control: no-store`。普通用户只能使用默认模型，管理员测试可额外传 `model_row_id`。浏览器应从状态接口读取 `tts.configured` 及格式、语速、字数限制，再用 Blob URL 播放或下载，不接收 Key。
+
+```python
+from webagent.sdk import SpeechClient
+
+speech = SpeechClient(agent_url=agent_url, internal_secret=internal_secret)
+audio_bytes, mime_type = speech.synthesize(
+    current_business_token,
+    "今日设备运行正常。",
+    response_format="wav",
+)
+```
+
+该示例在业务服务端使用已认证用户的 Token；SDK 不提升用户权限。OpenAI Speech 和 DashScope 两种 Qwen TTS HTTP schema 已适配，参数及下载边界见 [模型接入手册](MODELS.md#8-tts-协议)。单次输出最多 10 MB，不自动重试收费请求；当前聊天页未内置每条回答自动朗读，业务方可通过组件自行组合。
 
 ### 4.3 推理开关与供应商参数
 

@@ -9,37 +9,11 @@ import {
 } from "../api/agent";
 import { apiErrorMessage } from "../api/pagepilot";
 import type { AccessMode } from "../components/Composer/Composer";
+import { extractHtmlArtifacts } from "../lib/answerContent";
 import { ConversationRun } from "../lib/conversationRun";
-import type { ArtifactData, ChatMessage, MessagePart, ProcessData } from "../types";
+import type { ChatMessage, MessagePart, ProcessData } from "../types";
 
-export function extractHtmlArtifacts(content: string, messageId: string): { parts: MessagePart[]; artifacts: ArtifactData[] } {
-  const parts: MessagePart[] = [];
-  const artifacts: ArtifactData[] = [];
-  const blocks = /```(?:html|htm)\s*\n([\s\S]*?)```/gi;
-  let previous = 0;
-  let match: RegExpExecArray | null;
-  while ((match = blocks.exec(content)) !== null) {
-    const before = content.slice(previous, match.index);
-    if (before.trim()) parts.push({ kind: "markdown", content: before });
-    const html = match[1];
-    const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]*>/g, "").trim() || "HTML 页面";
-    const artifact: ArtifactData = { id: `${messageId}-html-${artifacts.length}`, title, html };
-    artifacts.push(artifact);
-    parts.push({ kind: "artifact", artifact });
-    previous = blocks.lastIndex;
-  }
-  const remainder = content.slice(previous);
-  if (remainder.trim()) {
-    if (previous === 0 && /^\s*(?:<!doctype\s+html|<html[\s>])/i.test(remainder)) {
-      const artifact: ArtifactData = { id: `${messageId}-html-0`, title: remainder.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]*>/g, "").trim() || "HTML 页面", html: remainder };
-      artifacts.push(artifact);
-      parts.push({ kind: "artifact", artifact });
-    } else {
-      parts.push({ kind: "markdown", content: remainder });
-    }
-  }
-  return { parts, artifacts };
-}
+export { extractHtmlArtifacts } from "../lib/answerContent";
 
 function processFromMessage(message: AgentMessage): ProcessData | null {
   const runs = message.tool_runs || [];
@@ -127,8 +101,16 @@ export function useAgentConversation(sessionId: string | undefined, onSessionCha
     const render = () => {
       if (sessionRef.current !== sessionId) return;
       lastRenderAt = Date.now();
-      const parts: MessagePart[] = [{ kind: "process", process: run.snapshot() }];
-      parts.push(...(run.completed ? extractHtmlArtifacts(run.answer, id).parts : run.answer ? [{ kind: "markdown" as const, content: run.answer }] : []));
+      const content = extractHtmlArtifacts(run.answer, id, !run.completed && !run.failed);
+      const process = run.snapshot();
+      if (content.pendingHtml && !run.waitingForModel && process.steps.at(-1)?.kind === "answer") {
+        process.title = "正在生成 HTML";
+        process.preview = `${content.pendingHtml.title} · 已接收 ${content.pendingHtml.characters.toLocaleString()} 字符`;
+        const step = process.steps.at(-1)!;
+        step.title = "生成 HTML 页面";
+        step.description = process.preview;
+      }
+      const parts: MessagePart[] = [{ kind: "process", process }, ...content.parts];
       if (run.approval) parts.push({ kind: "approval", approval: { id: run.approval.id, tool: run.approval.tool, title: "等待操作确认", description: run.approval.summary, arguments: run.approval.arguments, risk: run.approval.risk, status: "pending" } });
       setMessages((previous) => previous.map((message) => message.id === id ? { ...message, parts, streaming: !run.completed && !run.failed, usage: run.usage } : message));
     };

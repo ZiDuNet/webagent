@@ -13,8 +13,10 @@
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
+    "antd": "^6.1.0",
     "katex": "^0.19.1",
     "markdown-it": "^15.0.3",
+    "lucide-react": "^0.468.0",
     "mermaid": "^12.3.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

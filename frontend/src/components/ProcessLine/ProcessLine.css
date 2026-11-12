@@ -23,10 +23,18 @@
   border-color: var(--border);
 }
 
+.process__header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
 .process__summary {
   display: flex;
   align-items: center;
   width: 100%;
+  min-width: 0;
+  flex: 1;
   min-height: 43px;
   gap: 8px;
   padding: 0 12px 0 14px;
@@ -53,20 +61,75 @@
   white-space: nowrap;
 }
 
+.process__live-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.process__ticker {
+  min-width: 0;
+  height: 24px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.process__ticker-item {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  align-items: center;
+  animation: process-reveal 180ms ease-out both;
+}
+
 .process__preview {
+  position: relative;
   min-width: 0;
   flex: 1 1 120px;
   overflow: hidden;
   color: #8a9bb0;
   font-size: 12px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.process__preview::before {
-  margin-right: 8px;
-  color: #546377;
-  content: "·";
+.process__preview-text {
+  display: inline-block;
+  padding-left: 8px;
+}
+
+.process__preview-text.is-scrolling {
+  animation: process-text-scroll var(--process-travel-time) linear 500ms forwards;
+}
+
+.process__playback {
+  display: flex;
+  flex: none;
+  gap: 1px;
+  padding-right: 5px;
+}
+
+.process__playback button {
+  display: grid;
+  width: 25px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #93a6bd;
+  cursor: pointer;
+}
+
+.process__playback button:hover { color: #cdd7e4; background: rgba(101, 169, 255, 0.1); }
+.process__playback button:disabled { opacity: 0.3; cursor: default; }
+.process__previous { transform: rotate(180deg); }
+
+@keyframes process-text-scroll {
+  to { transform: translateX(var(--process-travel)); }
 }
 
 .process__activity {
@@ -160,7 +223,7 @@
 }
 
 .process__body {
-  max-height: min(42vh, 360px);
+  max-height: min(55vh, 560px);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 4px 12px 10px;
@@ -428,7 +491,13 @@
 
 @media (max-width: 540px) {
   .process__summary { min-height: 44px; gap: 6px; padding-inline: 10px; }
-  .process__title { max-width: 48%; font-size: 12px; }
+  .process__title { flex: 0 0 auto; max-width: 42%; font-size: 11px; }
+  .process__ticker-item:has(.process__title:only-child) .process__title { max-width: 100%; }
+  .process__playback { padding-right: 2px; }
+  .process__playback button { width: 44px; height: 44px; }
+  .process__playback button:first-child,
+  .process__playback button:last-child { display: none; }
+  .process__meta { font-size: 8.5px; }
   .process__badge { display: none; }
   .process--done .process__badge { display: inline; }
   .process__preview { font-size: 11px; }

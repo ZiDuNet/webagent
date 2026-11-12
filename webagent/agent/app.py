@@ -19,13 +19,15 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from webagent.agent import artifacts, db, dynamic_tools, pagepilot, publications, runtime, sessions
+from webagent.agent import artifacts, db, decision, dynamic_tools, pagepilot, publications, runtime, sessions
 from webagent.agent.llm import runtime_config, test_llm, transcribe_audio
+from webagent.agent.provider_presets import list_provider_presets
 from webagent.agent.providers import (
     ProviderError,
     enrich_model_defaults,
     list_remote_models,
     reasoning_config,
+    provider_requires_key,
     suggest_model_defaults,
     transcription_config,
     validate_base_url,
@@ -109,9 +111,11 @@ class ModelCreate(BaseModel):
         "vision",
         "asr",
         "asr_realtime",
+        "tts",
         "embedding",
         "rerank",
         "image_generation",
+        "decision",
     ] = "chat"
     enabled: bool = True
     is_default: bool = False
@@ -144,9 +148,11 @@ class ModelUpdate(BaseModel):
         "vision",
         "asr",
         "asr_realtime",
+        "tts",
         "embedding",
         "rerank",
         "image_generation",
+        "decision",
     ] | None = None
     enabled: bool | None = None
     is_default: bool | None = None
@@ -211,7 +217,15 @@ class DynamicToolTestBody(BaseModel):
 
 class TranscribeBody(BaseModel):
     audio_data_url: str = Field(min_length=32, max_length=20_000_000)
-    language: str = Field(default="zh", max_length=20)
+    language: str | None = Field(default=None, max_length=20)
+
+
+class SpeechBody(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    model_row_id: int | None = Field(default=None, gt=0)
+    voice: str | None = Field(default=None, min_length=1, max_length=160)
+    response_format: Literal["mp3", "wav", "opus", "aac", "flac", "pcm"] | None = None
+    speed: float | None = Field(default=None, ge=0.25, le=4)
 
 
 class SkillCreate(BaseModel):
@@ -240,12 +254,20 @@ class SkillUpdate(BaseModel):
 
 class ConfigUpdate(BaseModel):
     llm_temperature: float | None = Field(default=None, ge=0, le=2)
-    max_iterations: int | None = Field(default=None, ge=1, le=12)
-    max_tool_calls: int | None = Field(default=None, ge=1, le=50)
+    max_iterations: int | None = Field(default=None, ge=0)
+    max_tool_calls: int | None = Field(default=None, ge=0)
     max_run_seconds: int | None = Field(default=None, ge=10, le=900)
     context_max_tokens: int | None = Field(default=None, ge=0, le=1_000_000)
     context_compression: bool | None = None
     bm25_enabled: bool | None = None
+    tool_selection_mode: Literal["none", "bm25", "decision"] | None = None
+    decision_enabled: bool | None = None
+    decision_model_id: int | None = Field(default=None, ge=0)
+    decision_tools: bool | None = None
+    decision_skills: bool | None = None
+    decision_threshold: float | None = Field(default=None, gt=0, lt=1)
+    decision_min_count: int | None = Field(default=None, ge=1, le=200)
+    decision_timeout_seconds: float | None = Field(default=None, ge=1, le=30)
     context_reserve_tokens: int | None = Field(default=None, ge=0, le=100_000)
     compaction_model_id: int | None = None
     compaction_keep_ratio: float | None = Field(default=None, ge=0.2, le=0.9)
@@ -263,6 +285,7 @@ class ConfigUpdate(BaseModel):
     welcome_subtitle: str | None = Field(default=None, max_length=500)
     welcome_prompts: str | None = Field(default=None, max_length=4000)
     asr_model_id: int | None = None
+    tts_model_id: int | None = Field(default=None, ge=0)
     title_model_id: int | None = None
     fallback_model_id: int | None = None
     retry_enabled: bool | None = None
@@ -346,8 +369,8 @@ class AssistantCreate(BaseModel):
     prefetch_tools: list[str] = Field(default_factory=list, max_length=20)
     tool_names: list[str] = Field(default_factory=list, max_length=50)
     skill_ids: list[int] = Field(default_factory=list, max_length=50)
-    max_steps: int = Field(default=0, ge=0, le=12)
-    max_tool_calls: int = Field(default=0, ge=0, le=50)
+    max_steps: int = Field(default=0, ge=0)
+    max_tool_calls: int = Field(default=0, ge=0)
     max_run_seconds: int = Field(default=0, ge=0, le=900)
     context_max_tokens: int = Field(default=0, ge=0, le=1_000_000)
     memory_enabled: bool = True
@@ -368,8 +391,8 @@ class AssistantUpdate(BaseModel):
     prefetch_tools: list[str] | None = Field(default=None, max_length=20)
     tool_names: list[str] | None = Field(default=None, max_length=50)
     skill_ids: list[int] | None = Field(default=None, max_length=50)
-    max_steps: int | None = Field(default=None, ge=0, le=12)
-    max_tool_calls: int | None = Field(default=None, ge=0, le=50)
+    max_steps: int | None = Field(default=None, ge=0)
+    max_tool_calls: int | None = Field(default=None, ge=0)
     max_run_seconds: int | None = Field(default=None, ge=0, le=900)
     context_max_tokens: int | None = Field(default=None, ge=0, le=1_000_000)
     memory_enabled: bool | None = None
@@ -443,6 +466,7 @@ def _provider_public(provider: dict[str, Any]) -> dict[str, Any]:
         "base_url": provider["base_url"],
         "api_key_masked": _mask_key(provider.get("api_key", "")),
         "api_key_set": bool(provider.get("api_key", "").strip()),
+        "requires_key": provider_requires_key(provider),
         "extra_headers": provider.get("extra_headers", {}),
         "timeout_seconds": provider["timeout_seconds"],
         "enabled": provider["enabled"],
@@ -589,6 +613,15 @@ def _validate_extra_params(value: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_model_protocols(model: dict[str, Any], provider: dict[str, Any]) -> None:
     try:
+        if model.get("model_kind") == "decision":
+            decision.connection_config(model, provider)
+        if model.get("model_kind") == "tts":
+            from webagent.agent.speech import SpeechError, synthesis_config
+
+            try:
+                synthesis_config({**model, "enabled": True}, {**provider, "enabled": True, "api_key": provider.get("api_key") or "configuration-validation"})
+            except SpeechError as exc:
+                raise ProviderError(str(exc)) from exc
         reasoning_config(model)
         transcription_config(model, provider)
     except ProviderError as exc:
@@ -610,7 +643,7 @@ def _asr_status(config: dict[str, Any]) -> dict[str, Any]:
     provider = db.get_provider(int(model["provider_id"])) if model.get("provider_id") else None
     if not model.get("enabled") or not model.get("supports_transcription"):
         result["reason"] = "所选模型未启用语音转写能力"
-    elif not provider or not provider.get("enabled") or not provider.get("api_key"):
+    elif not provider or not provider.get("enabled") or (provider_requires_key(provider) and not provider.get("api_key")):
         result["reason"] = "语音模型的供应商未启用或尚未配置密钥"
     else:
         try:
@@ -625,6 +658,31 @@ def _asr_status(config: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _tts_status(config: dict[str, Any]) -> dict[str, Any]:
+    from webagent.agent.speech import SpeechError, synthesis_config
+
+    model_id = config.get("tts_model_id")
+    model = db.get_model(int(model_id)) if model_id else None
+    result: dict[str, Any] = {
+        "configured": False, "model_id": model_id,
+        "model_name": model.get("name", "") if model else "",
+        "reason": "管理员尚未设置默认语音合成模型",
+    }
+    if not model:
+        return result
+    provider = db.get_provider(int(model.get("provider_id") or 0))
+    if not provider:
+        result["reason"] = "语音合成模型的供应商不存在"
+        return result
+    try:
+        settings = synthesis_config(model, provider)
+        result.update(configured=True, reason="")
+        result.update({key: settings[key] for key in ("protocol", "voice", "response_format", "speed", "formats", "speed_min", "speed_max", "max_text_length") if key in settings})
+    except SpeechError as exc:
+        result["reason"] = str(exc)
+    return result
+
+
 def _config_public() -> dict[str, Any]:
     config = runtime_config()
     retry = config.get("retry") or {}
@@ -636,6 +694,10 @@ def _config_public() -> dict[str, Any]:
         "context_max_tokens": config["context_max_tokens"],
         "context_compression": config["context_compression"],
         "bm25_enabled": config["bm25_enabled"],
+        **{key: config[key] for key in (
+            "tool_selection_mode", "decision_enabled", "decision_model_id", "decision_tools",
+            "decision_skills", "decision_threshold", "decision_min_count", "decision_timeout_seconds",
+        )},
         "context_reserve_tokens": config["context_reserve_tokens"],
         "compaction_model_id": config["compaction_model_id"],
         "compaction_keep_ratio": config["compaction_keep_ratio"],
@@ -654,6 +716,7 @@ def _config_public() -> dict[str, Any]:
         "welcome_subtitle": config["welcome_subtitle"],
         "welcome_prompts": config["welcome_prompts"],
         "asr_model_id": config["asr_model_id"],
+        "tts_model_id": config["tts_model_id"],
         "title_model_id": config["title_model_id"],
         "fallback_model_id": config["fallback_model_id"],
         "provider_count": len(db.get_providers(include_disabled=True)),
@@ -974,12 +1037,8 @@ async def transcribe(
         raise AgentError("录音不能超过 12 MB", 413)
     try:
         result = await transcribe_audio(
-            audio=audio,
-            mime_type=mime_type,
-            filename="voice.webm",
-            model=model,
-            provider=provider,
-            language=body.language or "zh",
+            audio=audio, mime_type=mime_type, filename="voice.webm",
+            model=model, provider=provider, language=body.language or (model.get("extra_params") or {}).get("_asr", {}).get("language") or "zh",
         )
     except Exception as exc:  # noqa: BLE001
         raise AgentError(f"语音识别失败：{str(exc)[:400]}", 502) from exc
@@ -990,6 +1049,40 @@ async def transcribe(
         detail={"bytes": len(audio), "mime_type": mime_type},
     )
     return result
+
+
+@app.post("/api/audio/speech")
+async def audio_speech(
+    body: SpeechBody,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> Response:
+    from webagent.agent.speech import SpeechError, synthesize_speech
+
+    _verify_internal(x_internal_token)
+    user = await runtime.identity_from_token(_bearer(request))
+    config = runtime_config()
+    model_id = body.model_row_id or config.get("tts_model_id")
+    if body.model_row_id and not user.get("is_admin"):
+        raise AgentError("普通用户只能使用管理员指定的默认 TTS 模型", 403)
+    if not model_id:
+        raise AgentError("管理员尚未配置默认语音合成模型", 422)
+    model = db.get_model(int(model_id))
+    provider = db.get_provider(int(model.get("provider_id") or 0)) if model else None
+    if not model or not provider or model.get("model_kind") != "tts":
+        raise AgentError("语音合成模型不可用", 422)
+    try:
+        result = await synthesize_speech(
+            text=body.text, model=model, provider=provider, voice=body.voice,
+            response_format=body.response_format, speed=body.speed,
+        )
+    except SpeechError as exc:
+        raise AgentError(str(exc), 502) from exc
+    db.log_audit(
+        username=user["username"], action="agent.speech", resource=f"model:{model['id']}",
+        detail={"characters": len(body.text), "bytes": len(result["audio"]), "latency_ms": result["latency_ms"], "protocol": result["protocol"]},
+    )
+    return Response(content=result["audio"], media_type=result["mime_type"], headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/api/approvals/{approval_id}/approve")
@@ -1462,8 +1555,48 @@ async def update_config(
         values["context_max_tokens"] = str(body.context_max_tokens)
     if body.context_compression is not None:
         values["context_compression"] = "1" if body.context_compression else "0"
-    if body.bm25_enabled is not None:
-        values["bm25_enabled"] = "1" if body.bm25_enabled else "0"
+    current_config = runtime_config()
+    for key in ("compaction_model_id", "title_model_id", "fallback_model_id"):
+        reference = getattr(body, key)
+        if reference:
+            target = db.get_model(reference)
+            if not target or target.get("model_kind") not in {"chat", "vision"}:
+                raise AgentError("标题、摘要和降级用途只能选择对话模型", 422)
+    mode = body.tool_selection_mode or current_config["tool_selection_mode"]
+    if body.bm25_enabled is True and body.decision_enabled is True:
+        raise AgentError("BM25 与决策模型只能启用一个，也可以全部关闭", 422)
+    for requested, name in ((body.bm25_enabled, "bm25"), (body.decision_enabled, "decision")):
+        if requested is None:
+            continue
+        if body.tool_selection_mode is not None and requested != (mode == name):
+            raise AgentError("筛选策略与开关配置不一致", 422)
+        if requested:
+            mode = name
+        elif mode == name:
+            mode = "none"
+    if any(value is not None for value in (body.tool_selection_mode, body.bm25_enabled, body.decision_enabled)):
+        values["tool_selection_mode"] = mode
+        values["bm25_enabled"] = "1" if mode == "bm25" else "0"
+    for key in ("decision_model_id", "decision_threshold", "decision_min_count", "decision_timeout_seconds"):
+        value = getattr(body, key)
+        if value is not None:
+            values[key] = str(value)
+    for key in ("decision_tools", "decision_skills"):
+        value = getattr(body, key)
+        if value is not None:
+            values[key] = "1" if value else "0"
+    decision_fields = (
+        body.tool_selection_mode, body.decision_enabled, body.decision_model_id,
+        body.decision_tools, body.decision_skills,
+    )
+    if mode == "decision" and any(value is not None for value in decision_fields):
+        target = db.get_model(body.decision_model_id if body.decision_model_id is not None else current_config["decision_model_id"] or 0)
+        if not target or target.get("model_kind") != "decision" or not target.get("enabled") or not target.get("provider_enabled"):
+            raise AgentError("请先添加并启用一个决策模型，再启用决策筛选", 422)
+        scopes = [body.decision_tools, body.decision_skills]
+        effective_scopes = [value if value is not None else current_config[key] for value, key in zip(scopes, ("decision_tools", "decision_skills"))]
+        if not any(effective_scopes):
+            raise AgentError("决策筛选至少选择工具或 Skill 中的一项", 422)
     if body.context_reserve_tokens is not None:
         values["context_reserve_tokens"] = str(body.context_reserve_tokens)
     if body.compaction_model_id is not None:
@@ -1499,7 +1632,17 @@ async def update_config(
     if body.welcome_prompts is not None:
         values["welcome_prompts"] = body.welcome_prompts.strip()
     if body.asr_model_id is not None:
+        if body.asr_model_id:
+            target = db.get_model(body.asr_model_id)
+            if not target or target.get("model_kind") == "asr_realtime" or not target.get("supports_transcription"):
+                raise AgentError("默认 STT 必须是支持录音文件识别的模型", 422)
         values["asr_model_id"] = str(body.asr_model_id) if body.asr_model_id else ""
+    if body.tts_model_id is not None:
+        if body.tts_model_id:
+            target = db.get_model(body.tts_model_id)
+            if not target or target.get("model_kind") != "tts":
+                raise AgentError("默认 TTS 必须是语音合成模型", 422)
+        values["tts_model_id"] = str(body.tts_model_id) if body.tts_model_id else ""
     if body.title_model_id is not None:
         values["title_model_id"] = (
             str(body.title_model_id) if body.title_model_id else ""
@@ -1579,6 +1722,16 @@ async def admin_providers(
     await _admin(_bearer(request))
     items = [_provider_public(item) for item in db.get_providers(include_disabled=True)]
     return {"items": items, "total": len(items)}
+
+
+@app.get("/api/admin/providers/presets")
+async def admin_provider_presets(
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    await _admin(_bearer(request))
+    return {"items": list_provider_presets()}
 
 
 @app.post("/api/admin/providers", status_code=201)
@@ -1804,6 +1957,12 @@ async def admin_sync_model(
         str(model.get("model_id") or ""),
         str(provider.get("name") or ""),
     )
+    if model.get("model_kind") in {"decision", "tts", "asr", "asr_realtime", "image_generation", "embedding", "rerank"}:
+        kind = model["model_kind"]
+        defaults.update(model_kind=kind, supports_tools=False, supports_transcription=kind in {"asr", "asr_realtime"})
+        if kind != "decision":
+            defaults.update(supports_reasoning=False, reasoning_efforts=[], default_reasoning_effort="")
+    defaults["extra_params"] = model.get("extra_params") or {}
     defaults["metadata_source"] = "models.dev" if defaults.get("context_window") else model.get("metadata_source")
     if remote_name and not str(model.get("name") or "").strip():
         defaults["name"] = remote_name
@@ -1888,7 +2047,9 @@ async def admin_create_model(
     if not provider:
         raise AgentError("供应商不存在", 404)
     _validate_model_protocols(body.model_dump(), provider)
-    is_default = body.is_default or not db.get_models(include_disabled=True)
+    if body.is_default and body.model_kind not in {"chat", "vision"}:
+        raise AgentError("只有对话或视觉模型可以设为默认对话模型", 422)
+    is_default = body.model_kind in {"chat", "vision"} and (body.is_default or not db.default_model())
     supports_tools = body.supports_tools and body.model_kind in {"chat", "vision"}
     supports_transcription = body.supports_transcription or body.model_kind in {
         "asr",
@@ -1953,6 +2114,8 @@ async def admin_update_model(
     if "extra_params" in values:
         values["extra_params"] = _validate_extra_params(values["extra_params"])
     merged = {**current, **values}
+    if body.is_default and merged["model_kind"] not in {"chat", "vision"}:
+        raise AgentError("只有对话或视觉模型可以设为默认对话模型", 422)
     provider = db.get_provider(int(merged["provider_id"]))
     if not provider:
         raise AgentError("供应商不存在", 404)
@@ -1987,13 +2150,51 @@ async def admin_test_model(
     provider = db.get_provider(model["provider_id"])
     if not provider:
         raise AgentError("模型没有关联供应商", 400)
-    result = await test_llm(model, provider, runtime_config())
+    result = await test_llm(model, provider, {**runtime_config(), "demo_mode": False})
     db.log_audit(
         username=user["username"],
         action="model.test",
         resource=f"model:{model_row_id}",
         detail={"ok": result.get("ok"), "demo": result.get("demo")},
     )
+    return result
+
+
+@app.post("/api/admin/models/{model_row_id}/transcribe")
+async def admin_test_transcription(
+    model_row_id: int,
+    body: TranscribeBody,
+    request: Request,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> dict[str, Any]:
+    _verify_internal(x_internal_token)
+    user = await _admin(_bearer(request))
+    model = db.get_model(model_row_id)
+    if not model or not model.get("enabled") or not model.get("supports_transcription"):
+        raise AgentError("模型未启用语音转写能力", 422)
+    provider = db.get_provider(int(model.get("provider_id") or 0))
+    if not provider or not provider.get("enabled"):
+        raise AgentError("语音识别供应商不可用", 422)
+    ready, reason = runtime.provider_ready(provider)
+    if not ready:
+        raise AgentError(reason, 422)
+    if not body.audio_data_url.startswith("data:audio/") or ";base64," not in body.audio_data_url:
+        raise AgentError("请上传有效的音频 Data URI", 422)
+    header, payload = body.audio_data_url.split(",", 1)
+    try:
+        audio = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise AgentError("音频不是有效的 Base64 数据", 422) from exc
+    if not audio or len(audio) > 12 * 1024 * 1024:
+        raise AgentError("音频为空或超过 12 MB", 422)
+    try:
+        result = await transcribe_audio(
+            audio=audio, mime_type=header[5:].split(";")[0], filename="model-test.wav",
+            model=model, provider=provider, language=body.language or (model.get("extra_params") or {}).get("_asr", {}).get("language") or "zh",
+        )
+    except Exception as exc:
+        raise AgentError(f"语音识别测试失败：{str(exc)[:400]}", 502) from exc
+    db.log_audit(username=user["username"], action="model.transcribe_test", resource=f"model:{model_row_id}", detail={"bytes": len(audio), "protocol": result.get("protocol")})
     return result
 
 
@@ -2650,6 +2851,8 @@ async def status(
         "max_run_seconds": config["max_run_seconds"],
         "context_max_tokens": config["context_max_tokens"],
         "bm25_enabled": config["bm25_enabled"],
+        "tool_selection_mode": config["tool_selection_mode"],
+        "decision_enabled": config["decision_enabled"],
         "context_reserve_tokens": config["context_reserve_tokens"],
         "user_daily_token_limit": config["user_daily_token_limit"],
         "compaction_model_id": config["compaction_model_id"],
@@ -2663,5 +2866,6 @@ async def status(
         "fallback_model_id": config["fallback_model_id"],
         "title_model_id": config["title_model_id"],
         "asr": _asr_status(config),
+        "tts": _tts_status(config),
         "tool_retrieval_limit": 16,
     }

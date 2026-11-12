@@ -30,6 +30,8 @@
     clock: '<circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/>',
     wifi: '<path d="M3 9a14 14 0 0 1 18 0M6.5 12.5a9 9 0 0 1 11 0M10 16a4 4 0 0 1 4 0"/><circle cx="12" cy="19" r=".7"/>',
     brain: '<path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8A3 3 0 0 0 8 18h1V4z"/><path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8A3 3 0 0 1 16 18h-1V4z"/>',
+    mic: '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="M21 15l-5-5L5 21"/>',
   };
 
   function icon(name, size = 15) {
@@ -80,6 +82,15 @@
     liveRenderedHtml: "",
     liveRenderedText: "",
     liveToolRuns: [],
+    liveActivities: [],
+    liveActivitySequence: 0,
+    liveActivityId: null,
+    liveActivityAt: 0,
+    liveOutputActivity: null,
+    liveOutputLength: 0,
+    livePlaybackPaused: false,
+    livePlaybackInteracting: false,
+    livePreparingTools: new Set(),
     recording: false,
     recognition: null,
     mediaRecorder: null,
@@ -140,15 +151,6 @@
   const RISK_LABELS = { read: "读取", write: "写入", delete: "删除" };
   const MODE_LABELS = { agent: "多步", report: "单步报告" };
   const APPROVAL_MODE_LABELS = { confirm: "变更前确认", full_access: "完全访问" };
-  const MODEL_KIND_LABELS = {
-    chat: "对话",
-    vision: "视觉理解",
-    asr: "语音转写",
-    asr_realtime: "实时语音（暂不支持）",
-    embedding: "向量 Embedding",
-    rerank: "重排 Rerank",
-    image_generation: "图片生成",
-  };
   const REASONING_OPTIONS = [
     ["", "跟随模型"],
     ["off", "关闭深度思考"],
@@ -1641,6 +1643,108 @@
     }[status] || status || "完成";
   }
 
+  function addLiveActivity(title, preview = "", kind = "step") {
+    state.liveOutputActivity = null;
+    state.liveOutputLength = 0;
+    const activity = { id: `output-${++state.liveActivitySequence}`, title, preview, kind };
+    state.liveActivities.push(activity);
+    if (state.liveActivities.length > 300) state.liveActivities.splice(0, state.liveActivities.length - 300);
+    return activity;
+  }
+
+  function appendLiveOutput(title, text, kind) {
+    for (const character of String(text || "")) {
+      if (!state.liveOutputActivity || state.liveOutputActivity.title !== title) state.liveOutputActivity = addLiveActivity(title, "", kind);
+      state.liveOutputActivity.preview += character;
+      state.liveOutputLength += 1;
+      if (state.liveOutputLength >= 36 || (state.liveOutputLength >= 16 && /[。！？!?；;\n]/u.test(character))) {
+        state.liveOutputActivity = null;
+        state.liveOutputLength = 0;
+      }
+    }
+  }
+
+  function currentLiveActivity() {
+    const activities = state.liveActivities;
+    if (!activities.length) return { id: "connecting", title: "正在连接", preview: "" };
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let index = activities.findIndex((activity) => activity.id === state.liveActivityId);
+    if (reducedMotion && !state.livePlaybackPaused) return activities.at(-1);
+    if (index < 0) {
+      index = 0;
+      state.liveActivityId = activities[0].id;
+      state.liveActivityAt = Date.now();
+    }
+    const activity = activities[index];
+    const remaining = activities.length - index - 1;
+    const dwell = activity.preview ? remaining > 10 ? 600 : remaining > 3 ? 1100 : 2200 : 450;
+    if (!state.livePlaybackPaused && !state.livePlaybackInteracting && Date.now() - state.liveActivityAt >= dwell && index < activities.length - 1) {
+      state.liveActivityId = activities[index + 1].id;
+      state.liveActivityAt = Date.now();
+      return activities[index + 1];
+    }
+    return activity;
+  }
+
+  function livePlaybackControls() {
+    if (state.liveActivities.length < 2) return "";
+    return `<span class="process-playback" role="group" aria-label="实时过程播放控制"><button type="button" data-process-playback="previous" aria-label="上一条过程" title="上一条">‹</button><button type="button" data-process-playback="pause" aria-label="${state.livePlaybackPaused ? "继续播放过程" : "暂停播放过程"}" aria-pressed="${state.livePlaybackPaused}">${state.livePlaybackPaused ? "▷" : "Ⅱ"}</button><button type="button" data-process-playback="next" aria-label="下一条过程" title="下一条">›</button></span>`;
+  }
+
+  document.addEventListener("click", (event) => {
+    const target = event.target.closest("[data-process-playback]");
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const action = target.dataset.processPlayback;
+    if (action === "pause") {
+      state.livePlaybackPaused = !state.livePlaybackPaused;
+      state.livePlaybackInteracting = false;
+    } else {
+      const index = Math.max(0, state.liveActivities.findIndex((activity) => activity.id === state.liveActivityId));
+      const nextIndex = Math.max(0, Math.min(state.liveActivities.length - 1, index + (action === "previous" ? -1 : 1)));
+      state.liveActivityId = state.liveActivities[nextIndex]?.id;
+      state.livePlaybackPaused = true;
+    }
+    state.liveActivityAt = Date.now();
+    updateLiveProcessHeader();
+  });
+
+  function updateLiveProcessHeader() {
+    const root = state.streamEl?.querySelector("[data-live-process]");
+    const label = root?.querySelector("[data-process-label]");
+    const preview = root?.querySelector("[data-process-preview]");
+    if (!label || !preview || state.liveCompleted || state.liveError) return;
+    const activity = currentLiveActivity();
+    const line = root.querySelector(".process-line");
+    if (line && !line.dataset.playbackBound) {
+      line.dataset.playbackBound = "1";
+      const summary = line.querySelector(":scope > summary");
+      summary.addEventListener("mouseenter", () => { state.livePlaybackInteracting = true; updateLiveProcessHeader(); });
+      summary.addEventListener("mouseleave", () => { state.livePlaybackInteracting = false; updateLiveProcessHeader(); });
+      summary.addEventListener("focusin", () => { state.livePlaybackInteracting = true; updateLiveProcessHeader(); });
+      summary.addEventListener("focusout", (event) => { if (!summary.contains(event.relatedTarget)) { state.livePlaybackInteracting = false; updateLiveProcessHeader(); } });
+    }
+    if (label.textContent !== activity.title) label.textContent = activity.title;
+    if (preview.textContent !== activity.preview.replace(/\s+/g, " ")) preview.textContent = activity.preview.replace(/\s+/g, " ");
+    const overflow = Math.max(0, preview.scrollWidth - preview.parentElement.clientWidth);
+    if (preview.dataset.activityId !== activity.id || preview.dataset.overflow !== String(overflow)) {
+      preview.dataset.activityId = activity.id;
+      preview.dataset.overflow = String(overflow);
+      preview.getAnimations().forEach((animation) => animation.cancel());
+      if (overflow > 0 && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        preview.animate([{ transform: "translateX(0)" }, { transform: `translateX(-${overflow}px)` }], { duration: Math.max(1200, overflow / 150 * 1000), delay: 500, fill: "forwards", easing: "linear" });
+      }
+    }
+    preview.getAnimations().forEach((animation) => { if (state.livePlaybackPaused || state.livePlaybackInteracting) animation.pause(); else animation.play(); });
+    const controls = root.querySelector("[data-process-playback-controls]");
+    const controlsSignature = `${state.liveActivities.length > 1}:${state.livePlaybackPaused}`;
+    if (controls && controls.dataset.signature !== controlsSignature) {
+      controls.dataset.signature = controlsSignature;
+      controls.innerHTML = livePlaybackControls();
+    }
+  }
+
   function renderProcess(message, { streaming = false } = {}) {
     const meta = message.metadata || {};
     const runs = streaming ? state.liveToolRuns : (Array.isArray(message.tool_runs) ? message.tool_runs : []);
@@ -1651,7 +1755,6 @@
     const hasThinking = Boolean(thinkingText) || hadReasoning || (streaming && Boolean(state.liveThinking));
     const hasContent = streaming ? Boolean(state.liveText) : Boolean(message.content);
     const pending = runs.filter((run) => run.status === "pending").length;
-    const running = runs.filter((run) => run.status === "running").length;
     const errors = runs.filter((run) => ["error", "rejected"].includes(run.status)).length;
     const liveError = streaming && state.liveError;
     const failed = Boolean(liveError) || meta.status === "error" || errors > 0;
@@ -1667,16 +1770,7 @@
       label = liveError ? "执行中断" : `执行结束 · ${errors || 1} 个步骤未完成`;
     } else if (busy) {
       stateClass = "running";
-      if (running) {
-        const activeRun = runs.find((run) => run.status === "running");
-        label = `正在调用 ${activeRun?.tool || "工具"}…`;
-      } else if (hasThinking) {
-        label = "正在思考…";
-      } else if (hasContent) {
-        label = "正在生成回答…";
-      } else {
-        label = "正在准备…";
-      }
+      label = currentLiveActivity().title;
     }
     let seconds = meta.run?.elapsed_seconds;
     if (streaming) {
@@ -1724,14 +1818,16 @@
     const empty = !thinkingStep && !toolSteps && !answerStep
       ? '<div class="process-empty">本次没有调用工具，模型直接给出了回答。</div>'
       : "";
+    const activity = busy ? currentLiveActivity() : null;
     return `
       <details class="process-line ${stateClass}">
         <summary>
           <span class="process-state-icon">${stateIcon}</span>
-          <span class="process-label">${escapeHtml(label)}</span>
+          <span class="process-ticker"><span class="process-label" data-process-label>${escapeHtml(label)}</span>${busy ? `<span class="process-preview"><span data-process-preview>${escapeHtml(activity?.preview || "")}</span></span>` : ""}</span>
           ${secondsLabel ? `<span class="process-time" data-process-time>${escapeHtml(secondsLabel)}</span>` : ""}
           ${!busy && usageLabel ? `<span class="process-usage">${escapeHtml(usageLabel)}</span>` : ""}
           <span class="process-chevron">›</span>
+          ${busy ? `<span data-process-playback-controls>${livePlaybackControls()}</span>` : ""}
         </summary>
         <div class="process-body">
           ${thinkingStep}${toolSteps}${answerStep}${empty}
@@ -2183,7 +2279,7 @@
     state.processTimer = window.setInterval(() => {
       if (!state.sending || state.liveCompleted) return;
       applyLiveUI();
-    }, 500);
+    }, 200);
   }
 
   function stopProcessTicker() {
@@ -2225,18 +2321,22 @@
         state.liveToolsSignature = signature;
         const oldLine = processRoot.querySelector(".process-line");
         const wasOpen = Boolean(oldLine?.open);
+        const thinkingOpen = Boolean(processRoot.querySelector(".think-step")?.open);
         const openTools = new Set(
           [...processRoot.querySelectorAll(".tool-step[open]")].map((node) => node.dataset.callId)
         );
         processRoot.innerHTML = renderProcess(message, { streaming: true });
         const newLine = processRoot.querySelector(".process-line");
-        if (newLine) newLine.open = wasOpen;
+        if (newLine) newLine.open = !state.liveCompleted && !state.liveError && wasOpen;
+        const thinkingStep = processRoot.querySelector(".think-step");
+        if (thinkingStep) thinkingStep.open = thinkingOpen;
         [...processRoot.querySelectorAll(".tool-step")].forEach((node) => {
           if (openTools.has(node.dataset.callId)) node.open = true;
         });
       }
       const thinkingNode = processRoot.querySelector(".thinking-text");
-      if (thinkingNode) thinkingNode.textContent = state.liveThinking || "模型思考内容未保存。";
+      if (thinkingNode && thinkingNode.textContent !== state.liveThinking) thinkingNode.textContent = state.liveThinking || "模型思考内容未保存。";
+      updateLiveProcessHeader();
       const timeNode = processRoot.querySelector("[data-process-time]");
       const seconds = state.liveElapsed ?? (state.liveStartedAt ? (Date.now() - state.liveStartedAt) / 1000 : 0);
       const timeLabel = formatSeconds(seconds);
@@ -2272,6 +2372,16 @@
   function applyLiveEvent(eventName, data, eventId) {
     if (eventId) state.lastEventId = Number(eventId);
     const message = state.streamingMessage;
+    if (eventName === "run.phase") {
+      addLiveActivity(data.title || "正在准备运行环境", data.message || "");
+      scheduleLiveRender();
+      return;
+    }
+    if (eventName === "step.started") {
+      addLiveActivity("模型请求已发送", "等待上游返回新内容");
+      scheduleLiveRender();
+      return;
+    }
     if (eventName === "run.started") {
       if (data.approval_mode) {
         state.approvalMode = data.approval_mode === "full_access" ? "full_access" : "confirm";
@@ -2280,16 +2390,29 @@
       return;
     }
     if (eventName === "text.delta") {
+      appendLiveOutput("回答内容", data.delta || "", "answer");
       state.liveText += data.delta || "";
       if (message) message.content = state.liveText;
       scheduleLiveRender();
       return;
     }
     if (eventName === "thinking.delta") {
+      appendLiveOutput("模型思考", data.delta || "", "think");
       appendLiveThinking(data.delta || "");
       return;
     }
+    if (eventName === "tool.args.delta") {
+      const key = data.call_id || data.tool || "tool";
+      if (!state.livePreparingTools.has(key)) {
+        state.livePreparingTools.add(key);
+        addLiveActivity(`准备调用 ${data.tool || "工具"}`, "模型正在生成调用参数", "tool");
+        scheduleLiveRender();
+      }
+      return;
+    }
     if (eventName === "tool.started") {
+      addLiveActivity(`正在调用 ${data.tool || "工具"}`, "工具执行中", "tool");
+      if (data.arguments !== undefined) appendLiveOutput(`${data.tool || "工具"} · 参数`, typeof data.arguments === "string" ? data.arguments : JSON.stringify(data.arguments), "tool");
       state.liveToolRuns.push({
         call_id: data.call_id,
         tool: data.tool,
@@ -2303,6 +2426,8 @@
       return;
     }
     if (eventName === "tool.finished") {
+      addLiveActivity(`工具已返回 · ${data.tool || "工具"}`, data.summary || "", "tool");
+      if (data.result !== undefined) appendLiveOutput(`${data.tool || "工具"} · 结果`, typeof data.result === "string" ? data.result : JSON.stringify(data.result), "tool");
       const run = data.call_id
         ? state.liveToolRuns.find((item) => item.call_id === data.call_id)
         : [...state.liveToolRuns].reverse().find((item) => item.tool === data.tool && item.status === "running");
@@ -2312,6 +2437,7 @@
       return;
     }
     if (eventName === "tool.approval_required") {
+      addLiveActivity("等待操作确认", data.summary || data.tool || "", "approval");
       state.liveToolRuns.push({
         tool: data.tool,
         arguments: data.arguments || {},
@@ -2338,11 +2464,15 @@
       return;
     }
     if (eventName === "retry") {
+      addLiveActivity("请求重试", `${((data.delay_ms || 0) / 1000).toFixed(1)} 秒后重试`);
+      scheduleLiveRender();
       state.lastRun = { ...(state.lastRun || {}), retry_count: (state.lastRun?.retry_count || 0) + 1 };
       toast(`模型调用暂时失败，${Math.round((data.delay_ms || 0) / 100) / 10}s 后自动重试`, "warn", 2400);
       return;
     }
     if (eventName === "model.fallback") {
+      addLiveActivity("切换备用模型", data.to || "");
+      scheduleLiveRender();
       toast(`主模型失败，已降级到 ${data.to || "备用模型"}`, "warn", 4200);
       return;
     }
@@ -2488,6 +2618,15 @@
     state.liveRenderedHtml = "";
     state.liveRenderedText = "";
     state.liveToolRuns = [];
+    state.liveActivities = [];
+    state.liveActivitySequence = 0;
+    state.liveActivityId = null;
+    state.liveActivityAt = Date.now();
+    state.liveOutputActivity = null;
+    state.liveOutputLength = 0;
+    state.livePreparingTools = new Set();
+    state.livePlaybackPaused = false;
+    state.livePlaybackInteracting = false;
     state.liveToolsSignature = "";
     state.liveApprovalSignature = "";
     state.liveCompleted = null;
@@ -2756,7 +2895,7 @@
       context.context_tokens || state.usage?.prompt_tokens || 0
     );
     const modelWindow = Number(model?.context_window) || 0;
-    const reserve = Number(context.reserve_tokens || state.status?.context_reserve_tokens || 1600);
+    const reserve = Number(context.reserve_tokens ?? state.status?.context_reserve_tokens ?? 1600);
     const explicitBudget = Number(assistant?.context_max_tokens || state.status?.context_max_tokens || 0);
     const windowTokens = Number(modelWindow || context.context_window || 0);
     const cappedWindow = Math.max(2048, explicitBudget > 0 ? Math.min(windowTokens || explicitBudget, explicitBudget) : (windowTokens || 32768));
@@ -2784,8 +2923,8 @@
     const budgetRoot = $("#context-budget");
     if (budgetRoot) {
       const cells = [
-        ["推理轮次", `${run.steps_used || 0}/${assistant?.max_steps || state.status?.max_iterations || budget.max_steps || 6}`],
-        ["工具调用", `${run.tool_calls_used || 0}/${assistant?.max_tool_calls || state.status?.max_tool_calls || budget.max_tool_calls || 12}`],
+        ["推理轮次", `${run.steps_used || 0}/${(assistant?.max_steps || (state.status?.max_iterations ?? budget.max_steps ?? 6)) || "不限"}`],
+        ["工具调用", `${run.tool_calls_used || 0}/${(assistant?.max_tool_calls || (state.status?.max_tool_calls ?? budget.max_tool_calls ?? 12)) || "不限"}`],
         ["运行超时", `${Math.round(run.elapsed_seconds || 0)}s/${assistant?.max_run_seconds || state.status?.max_run_seconds || budget.max_run_seconds || 120}s`],
       ];
       budgetRoot.innerHTML = cells.map(([label, value]) => `<div class="budget-cell"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
@@ -3079,10 +3218,19 @@
   }
 
   /* ---------- Config page ---------- */
+  window.addEventListener("message", (event) => {
+    const frame = $("#models-settings-frame");
+    if (!frame || event.origin !== window.location.origin || event.source !== frame.contentWindow) return;
+    if (event.data?.type === "webagent.models.updated") {
+      loadAgentMeta().catch((error) => toast(error.message, "error"));
+    }
+  });
+
   async function loadConfigPage(force = false) {
     const guest = $("#config-guest");
     const admin = $("#config-admin");
     if (!state.user?.is_admin) {
+      $("#page-config").classList.remove("has-model-settings");
       guest.classList.remove("hidden");
       admin.classList.add("hidden");
       renderGuestConfig();
@@ -3104,20 +3252,11 @@
 
   async function loadConfigTab(tab, force = false) {
     const content = $("#config-content");
+    $("#page-config").classList.toggle("has-model-settings", tab === "models");
     content.innerHTML = '<div class="empty-config">正在加载…</div>';
     try {
-      if (tab === "providers") {
-        const data = await api("/api/agent/admin/providers");
-        state.config.providers = data.items || [];
-        renderProviders();
-      } else if (tab === "models") {
-        const [models, providers] = await Promise.all([
-          api("/api/agent/admin/models"),
-          api("/api/agent/admin/providers"),
-        ]);
-        state.config.models = models.items || [];
-        state.config.providers = providers.items || [];
-        renderModels();
+      if (tab === "models") {
+        content.innerHTML = '<iframe id="models-settings-frame" class="models-settings-frame" title="模型与供应商配置" src="/react/?view=models&amp;embed=1&amp;ui=models-v2"></iframe>';
       } else if (tab === "assistants") {
         const [assistants, tools, skills, models] = await Promise.all([
           api("/api/agent/admin/assistants"),
@@ -3131,14 +3270,16 @@
         state.config.models = models.items || [];
         renderAssistants();
       } else if (tab === "tools") {
-        const [data, dynamic, pilot] = await Promise.all([
+        const [data, dynamic, pilot, settings] = await Promise.all([
           api("/api/agent/admin/tools"),
           api("/api/agent/admin/dynamic-tools"),
           api("/api/agent/admin/pagepilot"),
+          api("/api/agent/config"),
         ]);
         state.config.tools = data.items || [];
         state.config.dynamicTools = dynamic.items || [];
         state.config.pagepilot = pilot.config || null;
+        state.config.settings = settings;
         renderToolsConfig(data);
       } else if (tab === "skills") {
         const data = await api("/api/agent/admin/skills");
@@ -3239,539 +3380,6 @@
     if (assistant) $("#welcome-subtitle").textContent = assistant.greeting || $("#welcome-subtitle").textContent;
   }
 
-  /* ----- Providers ----- */
-  function renderProviders() {
-    const items = state.config.providers;
-    $("#config-content").innerHTML = `
-      ${sectionHead("模型供应商", "只接入 OpenAI 兼容协议，一个适配器覆盖 OpenAI、DeepSeek、通义、Moonshot、vLLM 等服务。", `
-        <span class="count-pill">${items.length} 个</span>
-        <button class="primary-btn" data-action="provider-new">${icon("plus", 14)} 新增供应商</button>`)}
-      <div class="list-panel">${items.length ? items.map((item) => `
-        <div class="list-row ${item.enabled ? "" : "off"}">
-          <span class="assistant-icon">${icon("server", 14)}</span>
-          <div class="list-row-main">
-            <div class="list-row-title">
-              <strong>${escapeHtml(item.name)}</strong>
-              <code>${escapeHtml(item.base_url)}</code>
-              ${item.enabled ? '<span class="badge badge-green">启用</span>' : '<span class="badge">停用</span>'}
-              ${item.api_key_set ? '<span class="badge badge-blue">密钥已存</span>' : '<span class="badge badge-warn">缺少密钥</span>'}
-            </div>
-            <p>${escapeHtml(item.api_key_masked || "未配置 API Key")} · 超时 ${item.timeout_seconds}s</p>
-            <div class="list-row-meta">
-              <span>${item.model_count} 个模型</span>
-              <span>${escapeHtml(item.provider_type)}</span>
-              <span>${escapeHtml(Object.keys(item.extra_headers || {}).join(", ") || "无附加 Header")}</span>
-            </div>
-          </div>
-          <div class="list-row-actions">
-            <button class="ghost-btn" data-action="provider-test" data-id="${item.id}">测试连接</button>
-            <button class="ghost-btn" data-action="provider-discover" data-id="${item.id}">拉取模型</button>
-            <button class="mini-action" data-action="provider-edit" data-id="${item.id}" title="编辑">${icon("edit", 12)}</button>
-            <button class="mini-action danger" data-action="provider-delete" data-id="${item.id}" title="删除">${icon("trash", 12)}</button>
-          </div>
-        </div>`).join("") : '<div class="empty-config">还没有供应商，先添加一个 OpenAI 兼容服务。</div>'}</div>`;
-  }
-
-  function providerById(id) {
-    return state.config.providers.find((item) => Number(item.id) === Number(id));
-  }
-
-  function openProviderModal(provider = null) {
-    const editing = Boolean(provider);
-    openModal(`
-      <div class="modal-head">
-        <div><h3>${editing ? "编辑供应商" : "新增供应商"}</h3><p>API Key 只保存在 Agent 服务端，浏览器拿到的始终是掩码。</p></div>
-        <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
-      </div>
-      <form id="provider-form" class="modal-body">
-        <div class="form-grid">
-          <label class="field"><span>名称</span><input name="name" value="${escapeHtml(provider?.name || "")}" placeholder="DeepSeek" required></label>
-          <label class="field"><span>协议</span><input value="OpenAI Compatible" disabled></label>
-          <label class="field span-2"><span>Base URL</span><input name="base_url" value="${escapeHtml(provider?.base_url || "")}" placeholder="https://api.deepseek.com/v1" required></label>
-          <label class="field span-2"><span>API Key ${editing ? "（留空表示不修改）" : ""}</span><input name="api_key" type="password" value="" placeholder="${editing && provider?.api_key_set ? "已配置，留空保持不变" : "sk-..."}" autocomplete="new-password"></label>
-          <label class="field"><span>超时（秒）</span><input name="timeout_seconds" type="number" min="3" max="180" value="${provider?.timeout_seconds ?? 90}"></label>
-          <label class="field"><span>附加 Header（JSON）</span><input name="extra_headers" value="${escapeHtml(JSON.stringify(provider?.extra_headers || {}))}"></label>
-          <label class="field span-2"><span>状态</span>
-            <select name="enabled">
-              <option value="1" ${provider?.enabled !== false ? "selected" : ""}>启用</option>
-              <option value="0" ${provider?.enabled === false ? "selected" : ""}>停用</option>
-            </select>
-          </label>
-        </div>
-        <div class="modal-foot" style="padding:0">
-          <button type="button" class="ghost-btn" data-action="modal-close">取消</button>
-          <button type="submit" class="primary-btn">${editing ? "保存" : "创建"}</button>
-        </div>
-      </form>`, { wide: true });
-    $("#provider-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const form = event.target;
-      let headers = {};
-      try {
-        headers = JSON.parse(form.extra_headers.value || "{}");
-      } catch {
-        toast("附加 Header 必须是 JSON 对象", "warn");
-        return;
-      }
-      const payload = {
-        name: form.elements.namedItem("name").value.trim(),
-        base_url: form.base_url.value.trim(),
-        extra_headers: headers,
-        timeout_seconds: Number(form.timeout_seconds.value) || 90,
-        enabled: form.enabled.value === "1",
-      };
-      if (form.api_key.value.trim()) payload.api_key = form.api_key.value.trim();
-      try {
-        if (editing) {
-          await api(`/api/agent/admin/providers/${provider.id}`, { method: "PUT", body: payload });
-          toast("供应商已更新");
-        } else {
-          await api("/api/agent/admin/providers", { method: "POST", body: payload });
-          toast("供应商已创建");
-        }
-        closeModal();
-        await loadConfigTab("models");
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    });
-  }
-
-  async function testProvider(id, button) {
-    const original = button.textContent;
-    button.disabled = true;
-    button.textContent = "测试中…";
-    try {
-      const data = await api(`/api/agent/admin/providers/${id}/test`, { method: "POST" });
-      toast(data.message, data.ok ? "ok" : "error", 5000);
-    } catch (error) {
-      toast(error.message, "error", 5000);
-    } finally {
-      button.disabled = false;
-      button.textContent = original;
-    }
-  }
-
-  async function testModel(id, button) {
-    const model = state.config.models.find((item) => Number(item.id) === Number(id));
-    const kind = model?.model_kind || "chat";
-    const label = MODEL_KIND_LABELS[kind] || kind;
-    const original = button.textContent;
-    button.disabled = true;
-    button.textContent = "测试中…";
-    openModal(`
-      <div class="modal-head">
-        <div><h3>测试模型</h3><p>${escapeHtml(model?.name || "")} · ${escapeHtml(label)}</p></div>
-        <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
-      </div>
-      <div class="modal-body">
-        <div class="test-result" id="model-test-result">正在按「${escapeHtml(label)}」类型测试，请稍候…</div>
-      </div>`, { wide: false });
-    try {
-      const data = await api(`/api/agent/admin/models/${id}/test`, { method: "POST" });
-      const node = $("#model-test-result");
-      if (node) {
-        node.className = `test-result ${data.ok ? "ok" : "fail"}`;
-        node.innerHTML = `
-          <div class="model-test-row"><span>结果</span><strong>${data.ok ? "通过" : "失败"}</strong></div>
-          <div class="model-test-row"><span>类型</span><strong>${escapeHtml(MODEL_KIND_LABELS[data.kind] || data.kind || label)}</strong></div>
-          ${data.latency_ms != null ? `<div class="model-test-row"><span>耗时</span><strong>${data.latency_ms}ms</strong></div>` : ""}
-          <div class="model-test-reply">${escapeHtml(data.message || "没有返回内容")}</div>`;
-      }
-    } catch (error) {
-      const node = $("#model-test-result");
-      if (node) {
-        node.className = "test-result fail";
-        node.textContent = error.message;
-      }
-    } finally {
-      button.disabled = false;
-      button.textContent = original;
-    }
-  }
-
-  async function openDiscoverModal(provider) {
-    openModal(`
-      <div class="modal-head">
-        <div><h3>拉取模型</h3><p>${escapeHtml(provider.name)} · ${escapeHtml(provider.base_url)}</p></div>
-        <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
-      </div>
-      <div class="modal-body">
-        <div class="empty-config">正在读取供应商模型列表… <span id="discover-elapsed">0s</span></div>
-        <div class="discover-actions">
-          <button class="ghost-btn" type="button" data-action="modal-close">取消</button>
-          <button class="text-btn" type="button" data-action="model-new">跳过拉取，手工添加模型</button>
-        </div>
-      </div>`, { wide: true });
-    const startedAt = Date.now();
-    const timer = window.setInterval(() => {
-      const node = $("#discover-elapsed");
-      if (node) node.textContent = `${Math.floor((Date.now() - startedAt) / 1000)}s`;
-    }, 500);
-    try {
-      const data = await api(`/api/agent/admin/providers/${provider.id}/discover-models`);
-      if (!$("#discover-elapsed")) {
-        window.clearInterval(timer);
-        return;
-      }
-      const items = data.items || [];
-      window.clearInterval(timer);
-      openModal(`
-        <div class="modal-head">
-          <div><h3>拉取模型</h3><p>${escapeHtml(provider.name)} · 共 ${items.length} 个模型，已导入的会标记。</p></div>
-          <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
-        </div>
-        <form id="import-form" class="modal-body">
-          <div class="discover-toolbar">
-            <input id="discover-filter" placeholder="搜索模型 ID 或归属…" autocomplete="off">
-            <span class="discover-count">${items.length} 个模型</span>
-          </div>
-          <div class="import-list">
-            ${items.map((item) => `
-              <label class="import-row">
-                <input type="checkbox" name="model_ids" value="${escapeHtml(item.model_id)}" ${item.already_imported ? "disabled" : ""}>
-                <code>${escapeHtml(item.model_id)}</code>
-                <small>${escapeHtml(item.owned_by || "")}${item.already_imported ? " · 已导入" : ""}</small>
-              </label>`).join("")}
-          </div>
-          <div class="modal-foot" style="padding:14px 0 0">
-            <button type="button" class="ghost-btn" data-action="modal-close">取消</button>
-            <button type="submit" class="primary-btn">导入所选模型</button>
-          </div>
-        </form>`, { wide: true });
-      $("#discover-filter").addEventListener("input", (event) => {
-        const query = event.target.value.trim().toLowerCase();
-        $$(".import-row", $("#import-form")).forEach((row) => {
-          const text = row.textContent.toLowerCase();
-          row.classList.toggle("hidden", Boolean(query) && !text.includes(query));
-        });
-      });
-      $("#import-form").addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const selected = $$('input[name="model_ids"]:checked', event.target).map((item) => item.value);
-        if (!selected.length) {
-          toast("请选择要导入的模型", "warn");
-          return;
-        }
-        try {
-          const result = await api(`/api/agent/admin/providers/${provider.id}/import-models`, {
-            method: "POST",
-            body: { model_ids: selected },
-          });
-          toast(`已导入 ${result.imported.length} 个模型，跳过 ${result.skipped.length} 个`);
-          closeModal();
-          await loadConfigTab("models");
-        } catch (error) {
-          toast(error.message, "error", 5000);
-        }
-      });
-    } catch (error) {
-      window.clearInterval(timer);
-      openModal(`
-        <div class="modal-head"><div><h3>拉取失败</h3><p>${escapeHtml(error.message)}</p></div>
-        <button class="icon-btn" data-action="modal-close">${icon("x")}</button></div>
-        <div class="modal-foot"><button class="ghost-btn" data-action="modal-close">关闭</button></div>`);
-    }
-  }
-
-  /* ----- Models ----- */
-  function renderModels() {
-    const items = state.config.models;
-    const providers = state.config.providers;
-    $("#config-content").innerHTML = `
-      ${sectionHead("模型与供应商", "供应商连接和模型条目在同一页维护。新增模型时选择供应商，参数可从 models.dev 或供应商接口自动预填，管理员仍可覆盖。", `
-        <span class="count-pill">${items.length} 个</span>
-        <button class="ghost-btn" data-action="provider-new">${icon("plus", 14)} 新增供应商</button>
-        <button class="primary-btn" data-action="model-new">${icon("plus", 14)} 新增模型</button>`)}
-      <div class="provider-strip">
-        ${providers.length ? providers.map((provider) => `
-          <div class="provider-card ${provider.enabled ? "" : "off"}">
-            <div class="provider-card-head">
-              <span class="assistant-icon">${icon("server", 13)}</span>
-              <div><strong>${escapeHtml(provider.name)}</strong><code>${escapeHtml(provider.base_url)}</code></div>
-              ${provider.api_key_set ? '<span class="badge badge-blue">Key</span>' : '<span class="badge badge-warn">缺 Key</span>'}
-            </div>
-            <div class="provider-card-meta">
-              <span>${provider.model_count} 个模型</span>
-              <span>超时 ${provider.timeout_seconds}s</span>
-            </div>
-            <div class="provider-card-actions">
-              <button class="text-btn" data-action="provider-test" data-id="${provider.id}">测试</button>
-              <button class="text-btn" data-action="provider-discover" data-id="${provider.id}">拉取模型</button>
-              <button class="text-btn" data-action="provider-edit" data-id="${provider.id}">编辑</button>
-              <button class="text-btn danger-text" data-action="provider-delete" data-id="${provider.id}">删除</button>
-            </div>
-          </div>`).join("") : '<div class="empty-config">还没有供应商。先添加一个 OpenAI 兼容服务。</div>'}
-      </div>
-      <div class="list-panel">${items.length ? items.map((item) => `
-        <div class="list-row ${item.enabled && item.provider_enabled ? "" : "off"}">
-          <span class="assistant-icon">${icon("brain", 14)}</span>
-          <div class="list-row-main">
-            <div class="list-row-title">
-              <strong>${escapeHtml(item.name)}</strong>
-              <code>${escapeHtml(item.model_id)}</code>
-              <span class="badge">${escapeHtml(MODEL_KIND_LABELS[item.model_kind] || item.model_kind || "对话")}</span>
-              ${item.is_default ? '<span class="badge badge-green">默认</span>' : ""}
-              ${item.supports_tools ? '<span class="badge badge-blue">工具</span>' : '<span class="badge">无工具</span>'}
-              ${(item.capabilities || []).includes("image") ? '<span class="badge badge-blue">图像</span>' : ""}
-              ${item.supports_reasoning ? '<span class="badge badge-blue">思考</span>' : ""}
-              ${item.supports_transcription ? '<span class="badge badge-green">语音转写</span>' : ""}
-            </div>
-            <p>供应商：${escapeHtml(item.provider_name || "—")} · 温度 ${item.temperature} · top_p ${item.top_p}</p>
-            <div class="list-row-meta">
-              <span>上下文 ${item.context_window || 0}</span>
-              <span>输出 ${item.max_output_tokens || 0}</span>
-              <span>价格 ${formatPrice(item.input_price_per_1m)} / ${formatPrice(item.output_price_per_1m)} 每 1M</span>
-              <span>${Object.keys(item.extra_params || {}).length} 个额外参数</span>
-            </div>
-          </div>
-          <div class="list-row-actions">
-            <button class="ghost-btn" data-action="model-test" data-id="${item.id}">测试</button>
-            <button class="mini-action" data-action="model-edit" data-id="${item.id}" title="编辑">${icon("edit", 12)}</button>
-            <button class="mini-action danger" data-action="model-delete" data-id="${item.id}" title="删除">${icon("trash", 12)}</button>
-          </div>
-        </div>`).join("") : '<div class="empty-config">还没有模型。先新增供应商并拉取模型，或手动新增。</div>'}</div>`;
-  }
-
-  function openModelModal(model = null) {
-    const editing = Boolean(model);
-    if (!state.config.providers.length) {
-      toast("请先添加供应商", "warn");
-      return;
-    }
-    const capabilities = model?.capabilities || ["text"];
-    openModal(`
-      <div class="modal-head">
-        <div><h3>${editing ? "编辑模型" : "新增模型"}</h3><p>模型参数会覆盖全局默认值；额外参数直接合并进请求体。</p></div>
-        <button class="icon-btn" data-action="modal-close">${icon("x")}</button>
-      </div>
-      <form id="model-form" class="modal-body">
-        <div class="form-grid">
-          <label class="field"><span>供应商</span>
-            <select name="provider_id">${state.config.providers.map((provider) => `<option value="${provider.id}" ${Number(model?.provider_id) === Number(provider.id) ? "selected" : ""}>${escapeHtml(provider.name)}</option>`).join("")}</select>
-          </label>
-          <label class="field"><span>显示名称</span><input name="name" value="${escapeHtml(model?.name || "")}" placeholder="DeepSeek Chat" required></label>
-          <label class="field span-2"><span>模型 ID</span>
-            <div class="model-id-row">
-              <input name="model_id" id="model-id-input" list="model-id-options" value="${escapeHtml(model?.model_id || "")}" placeholder="deepseek-chat" autocomplete="off" required>
-              <datalist id="model-id-options"></datalist>
-              ${editing ? `<button type="button" class="ghost-btn" id="model-sync-btn" title="从供应商接口 / models.dev 同步参数">${icon("refresh", 13)} 同步模型信息</button>` : ""}
-            </div>
-          </label>
-          <label class="field"><span>模型类型</span>
-            <select name="model_kind">
-              ${Object.entries(MODEL_KIND_LABELS).map(([kind, label]) => `<option value="${kind}" ${(model?.model_kind || "chat") === kind ? "selected" : ""}>${label}</option>`).join("")}
-            </select>
-          </label>
-          <div class="model-audio-settings span-2" id="model-audio-settings">
-            <div class="form-grid">
-              <label class="field"><span>语音接入协议</span><select name="asr_protocol">
-                ${[["auto", "自动识别"], ["transcriptions", "OpenAI 文件转写"], ["chat_audio", "Chat Completions 音频"], ["dashscope", "DashScope 原生 ASR"]].map(([value, label]) => `<option value="${value}" ${(model?.extra_params?._asr?.protocol || "auto") === value ? "selected" : ""}>${label}</option>`).join("")}
-              </select></label>
-              <label class="field"><span>音频数据格式</span><select name="asr_data_format"><option value="" ${!model?.extra_params?._asr?.data_format ? "selected" : ""}>按模型自动选择</option><option value="data_uri" ${model?.extra_params?._asr?.data_format === "data_uri" ? "selected" : ""}>Data URI（Qwen）</option><option value="base64" ${model?.extra_params?._asr?.data_format === "base64" ? "selected" : ""}>纯 Base64</option></select></label>
-              <label class="field span-2"><span>自定义语音端点（可选）</span><input name="asr_endpoint" value="${escapeHtml(model?.extra_params?._asr?.endpoint || "")}" placeholder="留空自动；也可填同源 /api/... 路径"><small>不会把所有语音模型发到 /audio/transcriptions。实时 WebSocket 模型不能用于录音上传；不同域名请另建供应商。</small></label>
-            </div>
-          </div>
-          <div class="field span-2 model-suggest-hint" id="model-suggest-hint">${icon("activity", 13)} 输入模型 ID 后会自动读取 models.dev / 供应商元数据，仍可手工覆盖。</div>
-          <label class="field"><span>上下文窗口</span><input name="context_window" type="number" min="0" value="${model?.context_window ?? 32768}"></label>
-          <label class="field"><span>最大输出</span><input name="max_output_tokens" type="number" min="0" value="${model?.max_output_tokens ?? 8192}"></label>
-          <label class="field"><span>temperature</span><input name="temperature" type="number" step="0.1" min="0" max="2" value="${model?.temperature ?? 0.3}"></label>
-          <label class="field"><span>top_p</span><input name="top_p" type="number" step="0.05" min="0" max="1" value="${model?.top_p ?? 1}"></label>
-          <label class="field"><span>输入价格 / 1M tokens（USD）</span><input name="input_price_per_1m" type="number" step="0.0001" min="0" value="${model?.input_price_per_1m ?? 0}"></label>
-          <label class="field"><span>输出价格 / 1M tokens（USD）</span><input name="output_price_per_1m" type="number" step="0.0001" min="0" value="${model?.output_price_per_1m ?? 0}"></label>
-          <label class="field span-2"><span>额外请求参数（JSON）</span><input name="extra_params" value="${escapeHtml(JSON.stringify(model?.extra_params || {}))}" placeholder='{"reasoning_effort":"low"}'></label>
-          <label class="field"><span>思考强度选项（逗号分隔）</span><input name="reasoning_efforts" value="${escapeHtml((model?.reasoning_efforts || []).join(","))}" placeholder="minimal,low,medium,high,xhigh"></label>
-          <label class="field"><span>默认思考强度</span>
-            <select name="default_reasoning_effort">
-              ${REASONING_OPTIONS.map(([effort, label]) => `<option value="${effort}" ${(model?.default_reasoning_effort || "") === effort ? "selected" : ""}>${label}</option>`).join("")}
-            </select>
-          </label>
-          <div class="field span-2"><span>能力</span>
-            <div class="check-grid">
-              <label><input type="checkbox" name="capabilities" value="text" ${capabilities.includes("text") ? "checked" : ""}> <code>text</code> 文本</label>
-              <label><input type="checkbox" name="capabilities" value="image" ${capabilities.includes("image") ? "checked" : ""}> <code>image</code> 图像理解</label>
-              <label><input type="checkbox" name="supports_tools" ${model?.supports_tools !== false ? "checked" : ""}> 支持工具调用</label>
-              <label><input type="checkbox" name="supports_reasoning" ${model?.supports_reasoning ? "checked" : ""}> 支持思考 / reasoning</label>
-              <label><input type="checkbox" name="supports_reasoning_summary" ${model?.supports_reasoning_summary !== false ? "checked" : ""}> 展示思考摘要</label>
-              <label><input type="checkbox" name="supports_transcription" ${model?.supports_transcription ? "checked" : ""}> 语音转写（ASR）</label>
-              <label><input type="checkbox" name="is_default" ${model?.is_default ? "checked" : ""}> 设为默认模型</label>
-              <label><input type="checkbox" name="enabled" ${model?.enabled !== false ? "checked" : ""}> 启用模型</label>
-            </div>
-          </div>
-        </div>
-        <div class="modal-foot" style="padding:0">
-          <button type="button" class="ghost-btn" data-action="modal-close">取消</button>
-          <button type="submit" class="primary-btn">${editing ? "保存" : "创建"}</button>
-        </div>
-      </form>`, { wide: true });
-    const form = $("#model-form");
-    let suggestTimer = null;
-    const modelIdInput = $("#model-id-input");
-    const syncKind = () => {
-      const kind = form.model_kind.value;
-      $("#model-audio-settings").classList.toggle("hidden", !["asr", "asr_realtime"].includes(kind) && !form.supports_transcription.checked);
-      if (kind === "asr" || kind === "asr_realtime") {
-        form.supports_transcription.checked = true;
-        form.supports_tools.checked = false;
-      } else if (["embedding", "rerank", "image_generation"].includes(kind)) {
-        form.supports_tools.checked = false;
-      }
-      $$('input[name="capabilities"]', form).forEach((item) => {
-        if (item.value === "text") item.checked = true;
-        if (item.value === "image" && kind === "vision") item.checked = true;
-      });
-    };
-    form.model_kind.addEventListener("change", syncKind);
-    form.supports_transcription.addEventListener("change", syncKind);
-    syncKind();
-
-    const datalist = $("#model-id-options");
-    const refreshModelOptions = async () => {
-      const providerId = Number(form.provider_id.value);
-      if (!providerId || !datalist) return;
-      datalist.innerHTML = '<option value="">加载中…</option>';
-      try {
-        const data = await api(`/api/agent/admin/providers/${providerId}/discover-models`);
-        const options = (data.items || []).map((item) => item.model_id).filter(Boolean);
-        datalist.innerHTML = options.length
-          ? options.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("")
-          : '<option value=""></option>';
-      } catch {
-        datalist.innerHTML = '<option value=""></option>';
-      }
-    };
-    form.provider_id.addEventListener("change", refreshModelOptions);
-    refreshModelOptions();
-
-    const syncBtn = $("#model-sync-btn");
-    if (syncBtn && editing) {
-      syncBtn.addEventListener("click", async () => {
-        syncBtn.disabled = true;
-        syncBtn.innerHTML = `${icon("activity", 13)} 同步中…`;
-        try {
-          const data = await api(`/api/agent/admin/models/${model.id}/sync`, { method: "POST" });
-          const synced = data.model || {};
-          const f = $("#model-form");
-          if (synced.name) f.elements.namedItem("name").value = synced.name;
-          if (synced.model_kind) { f.model_kind.value = synced.model_kind; syncKind(); }
-          if (synced.context_window) f.context_window.value = synced.context_window;
-          if (synced.max_output_tokens) f.max_output_tokens.value = synced.max_output_tokens;
-          if (synced.input_price_per_1m != null) f.input_price_per_1m.value = synced.input_price_per_1m;
-          if (synced.output_price_per_1m != null) f.output_price_per_1m.value = synced.output_price_per_1m;
-          if (synced.temperature != null) f.temperature.value = synced.temperature;
-          if (synced.top_p != null) f.top_p.value = synced.top_p;
-          f.supports_tools.checked = synced.supports_tools !== false;
-          f.supports_reasoning.checked = Boolean(synced.supports_reasoning);
-          f.supports_reasoning_summary.checked = synced.supports_reasoning_summary !== false;
-          f.supports_transcription.checked = Boolean(synced.supports_transcription);
-          f.reasoning_efforts.value = (synced.reasoning_efforts || []).join(",");
-          f.default_reasoning_effort.value = synced.default_reasoning_effort || "";
-          const capabilitySet = new Set(synced.capabilities || ["text"]);
-          $$('input[name="capabilities"]', f).forEach((item) => { item.checked = capabilitySet.has(item.value); });
-          toast("已从供应商 / models.dev 同步模型参数");
-        } catch (error) {
-          toast(error.message, "error", 4800);
-        } finally {
-          syncBtn.disabled = false;
-          syncBtn.innerHTML = `${icon("refresh", 13)} 同步模型信息`;
-        }
-      });
-    }
-
-    modelIdInput.addEventListener("input", () => {
-      if (editing) return;
-      window.clearTimeout(suggestTimer);
-      suggestTimer = window.setTimeout(async () => {
-        const modelId = modelIdInput.value.trim();
-        if (modelId.length < 2) return;
-        const hint = $("#model-suggest-hint");
-        hint.innerHTML = `${icon("activity", 13)} 正在读取模型元数据…`;
-        try {
-          const data = await api(`/api/agent/admin/model-suggest?model_id=${encodeURIComponent(modelId)}&provider_id=${encodeURIComponent(form.provider_id.value)}`);
-          if (modelIdInput.value.trim() !== modelId) return;
-          const suggested = data.suggested || {};
-          $("#model-form").model_kind.value = suggested.model_kind || "chat";
-          syncKind();
-          $("#model-form").context_window.value = suggested.context_window || 0;
-          $("#model-form").max_output_tokens.value = suggested.max_output_tokens || 0;
-          $("#model-form").input_price_per_1m.value = suggested.input_price_per_1m || 0;
-          $("#model-form").output_price_per_1m.value = suggested.output_price_per_1m || 0;
-          $("#model-form").supports_tools.checked = suggested.supports_tools !== false;
-          $("#model-form").supports_reasoning.checked = Boolean(suggested.supports_reasoning);
-          $("#model-form").supports_reasoning_summary.checked = suggested.supports_reasoning_summary !== false;
-          $("#model-form").supports_transcription.checked = Boolean(suggested.supports_transcription);
-          $("#model-form").reasoning_efforts.value = (suggested.reasoning_efforts || []).join(",");
-          $("#model-form").default_reasoning_effort.value = suggested.default_reasoning_effort || "";
-          const capabilitySet = new Set(suggested.capabilities || ["text"]);
-          $$('input[name="capabilities"]', $("#model-form")).forEach((item) => {
-            item.checked = capabilitySet.has(item.value);
-          });
-          if (!$("#model-form").elements.namedItem("name").value.trim()) {
-            $("#model-form").elements.namedItem("name").value = modelId;
-          }
-          hint.innerHTML = `${icon("check", 13)} 已从 ${escapeHtml(suggested.metadata_source || "启发式规则")} 预填：上下文 ${suggested.context_window || 0} / 输出 ${suggested.max_output_tokens || 0}。仍可手工覆盖。`;
-        } catch (error) {
-          hint.innerHTML = `${icon("warning", 13)} 自动获取失败：${escapeHtml(error.message)}。可以继续手工填写。`;
-        }
-      }, 520);
-    });
-    $("#model-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const form = event.target;
-      let extra = {};
-      try {
-        extra = JSON.parse(form.extra_params.value || "{}");
-        if (!extra || typeof extra !== "object" || Array.isArray(extra)) throw new Error("invalid object");
-      } catch {
-        toast("额外请求参数必须是 JSON 对象", "warn");
-        return;
-      }
-      if (["asr", "asr_realtime"].includes(form.model_kind.value) || form.supports_transcription.checked) {
-        extra._asr = { protocol: form.asr_protocol.value };
-        if (form.asr_endpoint.value.trim()) extra._asr.endpoint = form.asr_endpoint.value.trim();
-        if (form.asr_data_format.value) extra._asr.data_format = form.asr_data_format.value;
-      }
-      const payload = {
-        provider_id: Number(form.provider_id.value),
-        name: form.elements.namedItem("name").value.trim(),
-        model_id: form.model_id.value.trim(),
-        model_kind: form.model_kind.value || "chat",
-        context_window: Number(form.context_window.value) || 0,
-        max_output_tokens: Number(form.max_output_tokens.value) || 0,
-        temperature: Number(form.temperature.value),
-        top_p: Number(form.top_p.value),
-        input_price_per_1m: Number(form.input_price_per_1m.value) || 0,
-        output_price_per_1m: Number(form.output_price_per_1m.value) || 0,
-        extra_params: extra,
-        capabilities: $$('input[name="capabilities"]:checked', form).map((item) => item.value),
-        supports_tools: form.supports_tools.checked,
-        supports_reasoning: form.supports_reasoning.checked,
-        supports_reasoning_summary: form.supports_reasoning_summary.checked,
-        supports_transcription: form.supports_transcription.checked,
-        reasoning_style: "effort",
-        reasoning_efforts: String(form.reasoning_efforts.value || "").split(",").map((item) => item.trim()).filter((item) => ["off", "none", "minimal", "low", "medium", "high", "xhigh"].includes(item)),
-        default_reasoning_effort: form.default_reasoning_effort.value || "",
-        metadata_source: model?.metadata_source || "manual",
-        is_default: form.is_default.checked,
-        enabled: form.enabled.checked,
-      };
-      if (!payload.capabilities.length) payload.capabilities = ["text"];
-      try {
-        if (editing) {
-          await api(`/api/agent/admin/models/${model.id}`, { method: "PUT", body: payload });
-          toast("模型已更新");
-        } else {
-          await api("/api/agent/admin/models", { method: "POST", body: payload });
-          toast("模型已创建");
-        }
-        closeModal();
-        await loadConfigTab("models");
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    });
-  }
-
   /* ----- Assistants ----- */
   function renderAssistants() {
     const items = state.config.assistants;
@@ -3832,7 +3440,7 @@
     };
     const tools = state.config.tools;
     const skills = state.config.skills;
-    const models = state.config.models;
+    const models = state.config.models.filter((model) => ["chat", "vision"].includes(model.model_kind || "chat"));
     const selectedTools = new Set(data.tool_names || []);
     const selectedPrefetch = new Set(data.prefetch_tools || []);
     const selectedSkills = new Set((data.skill_ids || []).map(Number));
@@ -3878,8 +3486,8 @@
               ${skills.length ? "" : '<span class="check-note">暂无技能</span>'}
             </div>
           </div>
-          <label class="field"><span>最大推理轮次（0 = 全局）</span><input name="max_steps" type="number" min="0" max="12" value="${data.max_steps || 0}"></label>
-          <label class="field"><span>最大工具调用（0 = 全局）</span><input name="max_tool_calls" type="number" min="0" max="50" value="${data.max_tool_calls || 0}"></label>
+          <label class="field"><span>最大推理轮次（0 = 跟随全局）</span><input name="max_steps" type="number" min="0" step="1" required value="${data.max_steps || 0}"><small>全局设为 0 时不限制轮次，仍受运行超时约束。</small></label>
+          <label class="field"><span>最大工具调用（0 = 跟随全局）</span><input name="max_tool_calls" type="number" min="0" step="1" required value="${data.max_tool_calls || 0}"><small>全局设为 0 时不限制调用次数，账号权限和审批仍生效。</small></label>
           <label class="field"><span>运行超时秒（0 = 全局）</span><input name="max_run_seconds" type="number" min="0" max="900" value="${data.max_run_seconds || 0}"></label>
           <label class="field"><span>上下文上限（0 = 全局）</span><input name="context_max_tokens" type="number" min="0" value="${data.context_max_tokens || 0}"></label>
           <label class="field"><span>可见角色 / 用户（逗号分隔，* = 全部）</span><input name="allowed_roles" value="${escapeHtml((data.allowed_roles || ["*"]).join(", "))}"></label>
@@ -3977,10 +3585,14 @@
           <button class="primary-btn" data-action="pagepilot-config">${pilotEnabled ? "管理连接" : "接入 PagePilot"}</button>
         </div>
       </section>
-      <div class="settings-note" style="margin:0 0 10px">${icon("search", 14)}<span>工具较多时先按账号权限、助手白名单和四态过滤，再按需检索，只把最相关的 16 个 Schema 注入模型。关闭 BM25 后会注入全部可用工具，适合工具很少但需要全量能力的场景。</span></div>
+      <div class="settings-note" style="margin:0 0 10px">${icon("search", 14)}<span>先按账号权限、助手白名单和四态过滤。BM25 与决策模型最多开启一种，也可以都关闭；筛选不会扩大用户权限。</span></div>
       <div class="inline-switch tool-bm25-switch">
-        <div><strong>BM25 工具检索</strong><small>${state.status?.bm25_enabled === false ? "已关闭：全部可用工具都会进入模型上下文" : "已开启：工具较多时按查询召回 Top 16"}</small></div>
-        <label class="switch"><input type="checkbox" data-config-toggle="bm25" ${state.status?.bm25_enabled === false ? "" : "checked"}><span class="switch-track"></span></label>
+        <div><strong>BM25 工具检索</strong><small>本地检索 Top 16；开启时自动关闭决策筛选。</small></div>
+        <label class="switch"><input type="checkbox" data-config-toggle="bm25" aria-label="启用 BM25 工具检索" ${state.config.settings?.bm25_enabled === false ? "" : "checked"}><span class="switch-track"></span></label>
+      </div>
+      <div class="inline-switch tool-bm25-switch">
+        <div><strong>决策模型筛选</strong><small>开启时自动关闭 BM25。模型、阈值与范围在左侧「模型」页统一配置。</small></div>
+        <label class="switch"><input type="checkbox" data-config-toggle="decision" aria-label="启用决策模型筛选" ${state.config.settings?.decision_enabled ? "checked" : ""}><span class="switch-track"></span></label>
       </div>
       ${Object.entries(groups).map(([category, tools]) => `
         <div class="tool-group">
@@ -4427,6 +4039,8 @@
       const messageHtml = messages.length ? messages.map((message) => {
         const runs = message.tool_runs || [];
         const usage = message.metadata?.usage || {};
+        const retrieval = message.metadata?.tool_retrieval;
+        const scored = retrieval?.decision;
         return `
           <div class="session-detail-message ${escapeHtml(message.role)}">
             <div class="msg-head">
@@ -4435,6 +4049,7 @@
             </div>
             <div class="msg-text">${renderMarkdown(message.content || "（无正文）")}</div>
             ${runs.length ? `<div class="admin-tool-runs">${runs.map((run, index) => renderProcessToolStep(run, index)).join("")}</div>` : ""}
+            ${retrieval ? `<details class="retrieval-diagnostics"><summary>候选筛选 · ${escapeHtml({none: "全部关闭", bm25: "BM25", decision: "决策模型"}[retrieval.mode] || retrieval.reason)} · ${retrieval.eligible} → ${retrieval.selected} 个工具${scored ? ` · ${scored.latency_ms || 0}ms${scored.fallback ? " · 已回退全量候选" : ""}` : ""}</summary><div>${scored?.model ? `<p>决策模型：${escapeHtml(scored.model)}</p>` : ""}${scored ? `<p>结果：${escapeHtml(scored.reason || "")} · 候选 ${scored.candidates || 0} 项</p>` : ""}${scored?.scores ? `<pre>${escapeHtml(JSON.stringify(scored.scores, null, 2))}</pre>` : ""}</div></details>` : ""}
             ${usage.total_tokens ? `<div class="msg-usage">${formatTokens(usage.prompt_tokens)} in · ${formatTokens(usage.completion_tokens)} out · ${formatCost(usage.cost_usd)}${usage.retry_count ? ` · ${usage.retry_count} 次重试` : ""}</div>` : ""}
           </div>`;
       }).join("") : '<div class="empty-config">没有消息</div>';
@@ -4511,7 +4126,8 @@
   /* ----- Settings ----- */
   function renderSettingsConfig() {
     const config = state.config.settings || {};
-    const models = state.config.models || [];
+    const allModels = state.config.models || [];
+    const models = allModels.filter((model) => ["chat", "vision"].includes(model.model_kind || "chat"));
     const compactionModel = models.find((item) => Number(item.id) === Number(config.compaction_model_id));
     $("#config-content").innerHTML = `
       ${sectionHead("运行设置", "全局默认值。助手可以覆盖步数、工具调用、超时和上下文上限。", "")}
@@ -4520,11 +4136,11 @@
           <div class="settings-section-title">模型与上下文</div>
           <div class="form-grid">
             <label class="field"><span>temperature</span><input name="llm_temperature" type="number" step="0.1" min="0" max="2" value="${config.llm_temperature ?? 0.3}"></label>
-            <label class="field"><span>最大推理轮次</span><input name="max_iterations" type="number" min="1" max="12" value="${config.max_iterations ?? 6}"></label>
-            <label class="field"><span>最大工具调用</span><input name="max_tool_calls" type="number" min="1" max="50" value="${config.max_tool_calls ?? 12}"></label>
-            <label class="field"><span>运行超时（秒）</span><input name="max_run_seconds" type="number" min="10" max="900" value="${config.max_run_seconds ?? 120}"></label>
+            <label class="field"><span>最大推理轮次（0 = 不限）</span><input name="max_iterations" type="number" min="0" step="1" required value="${config.max_iterations ?? 6}"><small>每次模型请求计一轮；取消次数限制后，仍受运行超时约束。</small></label>
+            <label class="field"><span>最大工具调用（0 = 不限）</span><input name="max_tool_calls" type="number" min="0" step="1" required value="${config.max_tool_calls ?? 12}"><small>一次运行的实际工具执行次数，不改变账号权限与审批规则。</small></label>
+            <label class="field"><span>运行超时（秒）</span><input name="max_run_seconds" type="number" min="10" max="900" value="${config.max_run_seconds ?? 120}"><small>单次任务的总时限，范围 10–900 秒；次数不限时仍保留该边界。</small></label>
             <label class="field"><span>上下文上限（0 = 跟随模型窗口）</span><input name="context_max_tokens" type="number" min="0" value="${config.context_max_tokens ?? 0}"></label>
-            <label class="field"><span>安全余量（tokens）</span><input name="context_reserve_tokens" type="number" min="0" max="100000" value="${config.context_reserve_tokens ?? 1600}"></label>
+            <label class="field"><span>上下文安全余量（tokens）</span><input name="context_reserve_tokens" type="number" min="0" max="100000" value="${config.context_reserve_tokens ?? 1600}"><small>从模型窗口中额外留出的空间，缓冲系统提示、工具定义和 token 估算误差；与回复输出预留分别计算。默认 1600，设为 0 不额外预留。</small></label>
             <label class="field"><span>压缩摘要模型</span>
               <select name="compaction_model_id">
                 <option value="0" ${!config.compaction_model_id ? "selected" : ""}>跟随主模型</option>
@@ -4546,7 +4162,7 @@
             <label class="field"><span>语音识别（ASR）模型</span>
               <select name="asr_model_id">
                 <option value="0" ${!config.asr_model_id ? "selected" : ""}>未配置（语音按钮禁用）</option>
-                ${models.filter((model) => model.supports_transcription && model.model_kind !== "asr_realtime" && !/realtime|real-time/i.test(model.model_id || "")).map((model) => `<option value="${model.id}" ${Number(config.asr_model_id) === Number(model.id) ? "selected" : ""}>${escapeHtml(model.name)}</option>`).join("")}
+                ${allModels.filter((model) => model.supports_transcription && model.model_kind !== "asr_realtime" && !/realtime|real-time/i.test(model.model_id || "")).map((model) => `<option value="${model.id}" ${Number(config.asr_model_id) === Number(model.id) ? "selected" : ""}>${escapeHtml(model.name)}</option>`).join("")}
               </select>
               <small>仅用于录音文件识别。实时 WebSocket 模型不能在这里使用；请先在模型中选择正确语音协议并测试。</small>
             </label>
@@ -4740,38 +4356,6 @@
       return;
     }
     if (action === "admin-session-detail") { await openAdminSessionDetail(id); return; }
-    if (action === "provider-new") { openProviderModal(); return; }
-    if (action === "provider-edit") { openProviderModal(providerById(id)); return; }
-    if (action === "provider-test") { testProvider(id, target); return; }
-    if (action === "provider-discover") { openDiscoverModal(providerById(id)); return; }
-    if (action === "provider-delete") {
-      const provider = providerById(id);
-      if (!(await confirmDialog({ title: "删除供应商", message: `删除「${provider.name}」？其下有模型时会被拒绝。`, confirmText: "删除", danger: true }))) return;
-      try {
-        await api(`/api/agent/admin/providers/${id}`, { method: "DELETE" });
-        toast("供应商已删除");
-        await loadConfigTab("models");
-      } catch (error) { toast(error.message, "error"); }
-      return;
-    }
-    if (action === "model-new") { openModelModal(); return; }
-    if (action === "model-edit") {
-      openModelModal(state.config.models.find((item) => Number(item.id) === Number(id)));
-      return;
-    }
-    if (action === "model-test") {
-      await testModel(id, target);
-      return;
-    }
-    if (action === "model-delete") {
-      if (!(await confirmDialog({ title: "删除模型", message: "删除后使用该模型的助手会回退到默认模型。", confirmText: "删除", danger: true }))) return;
-      try {
-        await api(`/api/agent/admin/models/${id}`, { method: "DELETE" });
-        toast("模型已删除");
-        await loadConfigTab("models");
-      } catch (error) { toast(error.message, "error"); }
-      return;
-    }
     if (action === "dynamic-tool-new") { openDynamicToolModal(); return; }
     if (action === "pagepilot-config") { openPagePilotModal(); return; }
     if (action === "pagepilot-test") { testPagePilot(target); return; }
@@ -4914,13 +4498,14 @@
       } else if (kind === "memory") {
         await api(`/api/agent/memories/${toggle.dataset.id}`, { method: "PATCH", body: { enabled } });
         toast(enabled ? "记忆已启用" : "记忆已停用", "ok", 1800);
-      } else if (kind === "bm25") {
+      } else if (kind === "bm25" || kind === "decision") {
         const result = await api("/api/agent/config", {
           method: "PUT",
-          body: { bm25_enabled: enabled },
+          body: { [kind === "bm25" ? "bm25_enabled" : "decision_enabled"]: enabled },
         });
-        state.status = { ...(state.status || {}), bm25_enabled: result.bm25_enabled };
-        toast(enabled ? "BM25 工具检索已开启" : "BM25 已关闭，全部工具将进入上下文", "ok", 2400);
+        state.config.settings = result;
+        state.status = { ...(state.status || {}), ...result };
+        toast(result.decision_enabled ? "决策筛选已开启，BM25 已关闭" : result.bm25_enabled ? "BM25 已开启，决策筛选已关闭" : "两种筛选均已关闭，保留全部已授权候选", "ok", 2400);
         await loadConfigTab("tools");
       }
     } catch (error) {

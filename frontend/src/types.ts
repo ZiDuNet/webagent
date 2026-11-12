@@ -14,6 +14,15 @@ export interface ProcessStep {
   result?: unknown;
   /** 思考原文（仅 think 步骤，可能不落库） */
   reasoning?: string;
+  content?: string;
+}
+
+export interface ProcessActivity {
+  id: string;
+  title: string;
+  preview: string;
+  kind?: ProcessStepKind;
+  sourceStepId?: string;
 }
 
 export interface ProcessData {
@@ -26,6 +35,7 @@ export interface ProcessData {
   startedAt?: number;
   activityAt?: number;
   waitingForModel?: boolean;
+  activities?: ProcessActivity[];
   /** 思考原文是否已入库 */
   reasoningStored?: boolean;
 }

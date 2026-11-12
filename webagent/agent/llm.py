@@ -29,6 +29,7 @@ from webagent.agent.db import get_settings
 from webagent.agent.providers import (
     ProviderError,
     chat_base_url,
+    provider_requires_key,
     reasoning_config,
     request_headers,
     transcription_config,
@@ -177,16 +178,27 @@ def runtime_config() -> dict[str, Any]:
     if default_approval_mode not in {"confirm", "full_access"}:
         default_approval_mode = "confirm"
     allow_full_access = settings.get("allow_full_access", "1") == "1"
+    selection_mode = settings.get("tool_selection_mode", "")
+    if selection_mode not in {"none", "bm25", "decision"}:
+        selection_mode = "bm25" if settings.get("bm25_enabled", "1") == "1" else "none"
     return {
         "temperature": max(0.0, min(temperature, 2.0)),
-        "max_iterations": max(1, min(max_iterations, 12)),
-        "max_tool_calls": max(1, min(max_tool_calls, 50)),
+        "max_iterations": max(0, max_iterations),
+        "max_tool_calls": max(0, max_tool_calls),
         "max_run_seconds": max(10, min(max_run_seconds, 900)),
         "context_max_tokens": (
             0 if context_max_tokens <= 0 else max(4096, min(context_max_tokens, 1_000_000))
         ),
         "context_compression": settings.get("context_compression", "1") == "1",
-        "bm25_enabled": settings.get("bm25_enabled", "1") == "1",
+        "tool_selection_mode": selection_mode,
+        "bm25_enabled": selection_mode == "bm25",
+        "decision_enabled": selection_mode == "decision",
+        "decision_model_id": _int_setting(settings, "decision_model_id", 0) or None,
+        "decision_tools": settings.get("decision_tools", "1") == "1",
+        "decision_skills": settings.get("decision_skills", "1") == "1",
+        "decision_threshold": max(0.01, min(_float_setting(settings, "decision_threshold", 0.6), 0.99)),
+        "decision_min_count": max(1, min(_int_setting(settings, "decision_min_count", 8), 200)),
+        "decision_timeout_seconds": max(1, min(_float_setting(settings, "decision_timeout_seconds", 5), 30)),
         "context_reserve_tokens": max(
             0, min(context_reserve_tokens, 100_000)
         ),
@@ -211,6 +223,7 @@ def runtime_config() -> dict[str, Any]:
         "welcome_subtitle": settings.get("welcome_subtitle", "").strip(),
         "welcome_prompts": settings.get("welcome_prompts", "").strip(),
         "asr_model_id": asr_model_id or None,
+        "tts_model_id": _int_setting(settings, "tts_model_id", 0) or None,
         "title_model_id": title_model_id or None,
         "fallback_model_id": fallback_model_id or None,
         "retry": retry_config(settings),
@@ -220,7 +233,7 @@ def runtime_config() -> dict[str, Any]:
 def provider_ready(provider: dict[str, Any]) -> tuple[bool, str]:
     if not provider.get("enabled", True):
         return False, "供应商已被管理员停用"
-    if not str(provider.get("api_key", "")).strip():
+    if provider_requires_key(provider) and not str(provider.get("api_key", "")).strip():
         return False, f"供应商「{provider.get('name', '')}」尚未配置 API Key"
     return True, ""
 
@@ -245,8 +258,8 @@ def resolve_budget(
             value = int(assistant.get(source) or 0)
             if value > 0:
                 budget[key] = value
-    budget["max_steps"] = max(1, min(budget["max_steps"], 12))
-    budget["max_tool_calls"] = max(1, min(budget["max_tool_calls"], 50))
+    budget["max_steps"] = max(0, budget["max_steps"])
+    budget["max_tool_calls"] = max(0, budget["max_tool_calls"])
     budget["max_run_seconds"] = max(10, min(budget["max_run_seconds"], 900))
     if budget["context_max_tokens"] > 0:
         budget["context_max_tokens"] = max(
@@ -870,6 +883,7 @@ async def chat_completion(
     reasoning_effort: str | None = None,
     on_event: EventCallback | None = None,
 ) -> dict[str, Any]:
+    started = time.monotonic()
     try:
         async with asyncio.timeout_at(deadline):
             return await _chat_completion(
@@ -880,6 +894,13 @@ async def chat_completion(
                 reasoning_effort=reasoning_effort, on_event=on_event,
             )
     except TimeoutError as exc:
+        if purpose == "decision":
+            db.record_llm_call(
+                session_id=session_id, username=username, model=str(model.get("model_id", "")),
+                provider=str(provider.get("name", "")), purpose=purpose, attempt=1,
+                status="error", error="决策请求达到时间上限",
+                latency_ms=int((time.monotonic() - started) * 1000),
+            )
         raise LLMError("本次运行已达到时间上限，模型请求已停止", retryable=False) from exc
 
 
@@ -1066,6 +1087,50 @@ async def test_llm(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     kind = str(model.get("model_kind") or "chat")
+    if kind == "decision":
+        from webagent.agent.decision import test_decision
+
+        return await test_decision(model, provider, config)
+    if kind == "tts":
+        from webagent.agent.speech import SpeechError, synthesize_speech
+
+        started = time.monotonic()
+        if config.get("demo_mode"):
+            return {
+                "ok": False,
+                "demo": True,
+                "kind": kind,
+                "message": "演示模式不会执行真实语音合成，请关闭演示模式后测试。",
+                "latency_ms": 0,
+            }
+        try:
+            result = await synthesize_speech("你好，语音合成测试。", model, provider)
+        except SpeechError as exc:
+            return {
+                "ok": False,
+                "demo": False,
+                "kind": kind,
+                "message": str(exc),
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
+        encoded = base64.b64encode(result["audio"]).decode("ascii")
+        return {
+            "ok": True,
+            "demo": False,
+            "kind": kind,
+            "message": (
+                "语音合成接口连通，已返回原始 PCM 音频，浏览器试听需要支持 PCM 解码的播放器。"
+                if result["response_format"] == "pcm"
+                else "语音合成接口连通，已返回可试听音频。"
+            ),
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "protocol": result["protocol"],
+            "usage": result["usage"],
+            "audio": {
+                "data_url": f"data:{result['mime_type']};base64,{encoded}",
+                "mime_type": result["mime_type"],
+            },
+        }
     if config["demo_mode"]:
         return {
             "ok": True,
@@ -1106,12 +1171,15 @@ async def test_llm(
                 "latency_ms": int((time.monotonic() - started) * 1000),
             }
         if kind == "image_generation":
+            options = model.get("extra_params") or {}
+            image_params = {key: options[key] for key in ("size", "quality", "style", "response_format", "background", "output_format", "output_compression", "moderation") if key in options}
+            image_params.setdefault("size", "1024x1024")
             async with _client(provider) as client:
                 image = await client.images.generate(
                     model=str(model["model_id"]),
                     prompt="A simple blue circle on a white background",
-                    size="1024x1024",
                     n=1,
+                    **image_params,
                 )
             item = image.data[0] if getattr(image, "data", None) else None
             has_image = bool(
@@ -1125,6 +1193,10 @@ async def test_llm(
                 "kind": kind,
                 "message": "生图接口连通，已返回图片数据。",
                 "latency_ms": int((time.monotonic() - started) * 1000),
+                "image": {
+                    **({"data_url": f"data:image/{'jpeg' if image_params.get('output_format') in {'jpg', 'jpeg'} else image_params.get('output_format') or 'png'};base64,{item.b64_json}"} if getattr(item, "b64_json", None) else {}),
+                    **({"url": item.url} if getattr(item, "url", None) else {}),
+                },
             }
         if kind == "embedding":
             async with _client(provider) as client:
@@ -1149,13 +1221,15 @@ async def test_llm(
             config=config,
             username="admin",
             purpose="test",
-            max_tokens_override=16,
+            reasoning_effort="off" if reasoning_config(model)["can_disable"] else None,
+            max_tokens_override=256,
         )
+        reply = str(result.get("content") or "").strip()
         return {
-            "ok": True,
+            "ok": bool(reply),
             "demo": False,
             "kind": kind,
-            "message": (result.get("content") or "（模型返回空文本）").strip()[:500],
+            "message": reply[:500] if reply else "模型接口已响应，但未返回正文。请检查模型类型、推理参数和输出上限后重试。",
             "usage": result.get("usage") or {},
             "latency_ms": int((time.monotonic() - started) * 1000),
         }
@@ -1164,7 +1238,7 @@ async def test_llm(
             "ok": False,
             "demo": False,
             "kind": kind,
-            "message": str(exc)[:500],
+            "message": _asr_error_detail({"message": str(exc)}, provider),
             "attempts": exc.attempts,
             "latency_ms": int((time.monotonic() - started) * 1000),
         }
@@ -1173,7 +1247,7 @@ async def test_llm(
             "ok": False,
             "demo": False,
             "kind": kind,
-            "message": str(exc)[:500],
+            "message": _asr_error_detail({"message": str(exc)}, provider),
             "latency_ms": int((time.monotonic() - started) * 1000),
         }
 

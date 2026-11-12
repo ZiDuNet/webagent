@@ -45,6 +45,7 @@ export type {
   MessagePart,
   MessageRole,
   ModelOption,
+  ProcessActivity,
   ProcessData,
   ProcessStatus,
   ProcessStep,
@@ -53,3 +54,5 @@ export type {
   UsageData,
 } from "./types";
 export { DataChart } from "./components/Markdown/DataChart";
+export { ModelsSettings } from "./components/ModelsSettings/ModelsSettings";
+export type { ModelsSettingsProps } from "./components/ModelsSettings/ModelsSettings";

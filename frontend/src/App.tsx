@@ -229,7 +229,7 @@ export default function App() {
   const configuredCap = assistants.find((assistant) => assistant.id === assistantId)?.context_max_tokens || status?.context_max_tokens || 0;
   const modelWindow = selectedModel?.context_window || configuredCap || 32768;
   const cappedWindow = Math.max(2048, configuredCap > 0 ? Math.min(modelWindow, configuredCap) : modelWindow);
-  const totalTokens = Math.max(1200, cappedWindow - Math.min(selectedModel?.max_output_tokens || 0, Math.floor(cappedWindow / 2)) - (status?.context_reserve_tokens || 1600));
+  const totalTokens = Math.max(1200, cappedWindow - Math.min(selectedModel?.max_output_tokens || 0, Math.floor(cappedWindow / 2)) - (status?.context_reserve_tokens ?? 1600));
   const displayedError = error || conversation.error || voice.error;
   const welcomePrompts = Array.isArray(status?.welcome_prompts) ? status.welcome_prompts : String(status?.welcome_prompts || "").split("\n").filter(Boolean);
 
@@ -247,7 +247,7 @@ export default function App() {
         <header className="workspace__header">
           <button type="button" className="header-icon-button mobile-nav-button" aria-label="打开侧边栏" onClick={() => setNavOpen(true)}><Icon name="menu" size={16} /></button>
           <div className="workspace__identity"><span className="workspace__avatar"><Icon name="sparkles" size={16} /></span><div className="workspace__title"><strong>{activeSession?.title || "智能助手"}</strong><span><i />{status?.demo_mode ? "后台已开启模拟模式" : "业务账号已连接"}</span></div></div>
-          <div className="workspace__actions"><button type="button" className="header-button" onClick={() => setPublishedOpen(true)}><Icon name="globe" size={14} /><span>已发布</span></button><button type="button" className="header-icon-button" disabled={conversation.streaming} aria-label="刷新会话" onClick={() => void perform(async () => { await refreshSessions(); conversation.refresh(); })}><Icon name="refresh" size={15} /></button><a className="header-icon-button" aria-label="打开业务系统配置" title="业务系统" href={businessUrl} target="_blank" rel="noopener noreferrer"><Icon name="settings" size={15} /></a></div>
+          <div className="workspace__actions"><button type="button" className="header-button" onClick={() => setPublishedOpen(true)}><Icon name="globe" size={14} /><span>已发布</span></button><button type="button" className="header-icon-button" disabled={conversation.streaming} aria-label="刷新会话" onClick={() => void perform(async () => { await refreshSessions(); conversation.refresh(); })}><Icon name="refresh" size={15} /></button>{user.is_admin && <a className="header-icon-button" aria-label="打开模型配置" title="模型配置" href="?view=models"><Icon name="settings" size={15} /></a>}<a className="header-icon-button" aria-label="打开业务系统配置" title="业务系统" href={businessUrl} target="_blank" rel="noopener noreferrer"><Icon name="external" size={15} /></a></div>
         </header>
         <div className="workspace__body">
           {(loading || conversation.loading) && <p className="app-loading" role="status"><Icon name="loader" className="wa-spinner" size={14} />正在读取会话…</p>}

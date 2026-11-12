@@ -23,7 +23,7 @@ WebAgent 是面向业务系统二次开发的 Agent 接入框架与可运行 Dem
 ![390px 正式移动界面：左侧巡检结论与 Mermaid，右侧工具选择](docs/images/chat-mobile.jpg)
 
 <details>
-<summary>展开查看工具过程、Mermaid、设备表与管理员后台（6 张）</summary>
+<summary>展开查看工具过程、Mermaid、设备表与管理员后台</summary>
 
 ### 工具过程
 
@@ -45,13 +45,21 @@ WebAgent 是面向业务系统二次开发的 Agent 接入框架与可运行 Dem
 
 ### 模型管理
 
-供应商连接与模型条目在同一页维护，支持拉取模型、同步元信息、能力参数和测试。截图中的预置条目尚未配置 Key，不表示已连接这些供应商。
+参考 Octop 的模型池与供应商卡片，按对话、语音、生图、决策四类管理。支持同品牌多个连接、自定义供应商、模型 ID 下拉/手填、按需拉取和参数同步。截图来自隔离测试实例，验收网关不代表真实厂商连接。
 
 ![管理员模型页：供应商、模型能力、上下文参数与测试入口](docs/images/admin-models.jpg)
 
+### 决策与语音
+
+决策页完整展示模型绑定、工具 / Skill 范围、阈值、触发数量和超时。BM25 与决策是两个互斥开关，可以全部关闭。语音页分别维护 STT 与 TTS，支持上传录音转写测试和语音合成试听。
+
+![决策配置：模型绑定、互斥开关、范围、阈值和超时](docs/images/admin-decision.jpg)
+
+![语音配置：STT 与 TTS 模型、独立默认绑定与测试入口](docs/images/admin-voice.jpg)
+
 ### 工具治理
 
-管理员维护四态工具、动态 HTTP 工具、PagePilot 连接器与 BM25 开关。工具来源会标识为 MCP、内置 Tool 或 HTTP 连接器，不把所有工具统称为 MCP。
+管理员维护四态工具、动态 HTTP 工具、PagePilot 连接器与 BM25 / 决策开关。两种筛选最多启用一个，也可全部关闭。工具来源会标识为 MCP、内置 Tool 或 HTTP 连接器。
 
 ![管理员工具页：PagePilot 接入、BM25 开关与工具状态](docs/images/admin-tools.jpg)
 
@@ -63,7 +71,7 @@ WebAgent 是面向业务系统二次开发的 Agent 接入框架与可运行 Dem
 
 </details>
 
-截图采自正式程序，不是原型图：聊天来自真实模型与只读工具，管理页来自无密钥的独立演示实例，两者数据量可能不同。截图日期、取景与更新说明见 [截图说明](docs/images/README.md)。
+截图采自正式程序：聊天来自真实模型与只读工具，管理页来自独立验收实例。新版模型页中的“验收”条目使用本机测试网关；其他品牌模板未填 Key，不代表已接入。截图日期与来源见 [截图说明](docs/images/README.md)。
 
 ## 快速启动
 
@@ -129,12 +137,14 @@ python run_demo.py --open
 ### 配置真实模型
 
 1. 用管理员登录，打开右上角配置入口，进入 **AI 配置 → 模型**。
-2. 新增或编辑模型，在同一表单配置供应商、OpenAI-compatible Base URL 与 API Key。
-3. 拉取供应商模型列表后选择模型 ID，或手工填写，再同步模型元信息；核对能力、上下文窗口、输出上限和价格。
-4. 执行模型测试，启用该模型并按需设为默认；测试与真实聊天都会产生上游调用费用。
+2. 点击供应商模板或自定义供应商，填写 Base URL、Key 和超时；同一连接可复用多个模型，同品牌也可添加多个连接。
+3. 新增模型，选择或输入模型 ID，按需拉取列表、同步模型元信息，再核对能力、上下文窗口、输出上限和价格。语音模型分别配置 STT / TTS 协议。
+4. 执行分类真实测试，启用对话模型并按需设为默认；管理员测试不受演示模式影响，会请求供应商，可能产生费用。
 5. 在 **运行设置**中关闭演示模式并保存，再回到聊天页选择模型。
 
 当前主对话实现 **OpenAI-compatible Chat Completions**，不表示已经兼容供应商的所有专有协议。模型发现和 models.dev 元数据只辅助填参，实际工具、多模态和推理能力仍以目标网关测试为准。真实模式缺少有效配置时返回错误，不伪造回答。
+
+STT / TTS 在语音页独立绑定；决策页提供 Jev、Microsoft、Laya、OpenAI JSON 和自定义服务配置。完整参数与协议边界见 [模型接入手册](docs/MODELS.md)。
 
 ## 功能概览
 
@@ -145,13 +155,13 @@ python run_demo.py --open
 | 会话 | 用户隔离、重命名、分叉、删除、消息编辑/删除；管理员筛选、查看与导出 |
 | 运行时 | 自研单 Agent loop、不同助手配置、最大步数/工具次数/时长、重试、可选降级模型 |
 | 上下文与记忆 | 跟随模型的预算、自动/手动压缩、独立摘要模型、用户手动长期记忆、思考存储开关 |
-| 工具与 Skill | 示例 MCP、动态 HTTP 工具、内置 Tool、四态治理、可关闭 BM25、知识型 Skill 渐进加载 |
+| 工具与 Skill | 示例 MCP、动态 HTTP 工具、内置 Tool、四态治理、互斥且可全关的 BM25 / 决策筛选、知识型 Skill 渐进加载 |
 | 权限与审计 | 继承登录用户身份、工具授权过滤、写/删审批、业务 API 最终 RBAC、业务与 Agent 双侧审计 |
-| 模型管理 | 供应商与模型同页配置、模型列表发现、元数据同步、能力参数、模型类型相关测试 |
+| 模型管理 | Octop 风格模型池、12 个供应商模板、多连接与自定义供应商、手填/下拉 ID、按需发现与同步、分类真实测试 |
 | HTML 与发布 | 隔离 HTML 预览、保存 PNG、PagePilot 新建/更新、本地发布归属和版本记录 |
-| 多模态 | 图片输入；录音经已配置的文件 ASR 转为文字后发送，未配置或协议不支持时禁用 |
+| 多模态与语音 | 图片输入；STT 录音转文字后发送；独立 TTS 配置、合成试听和服务端 SDK，未配置即关闭 |
 
-**前端现状**：`frontend/` 是 React + TypeScript 聊天及可复用组件，`web/` 是 HTML/JS 完整业务与配置后台；二者在同一实例共享后端、登录态与权限。不是整套管理后台都已迁移到 React。
+**前端现状**：`frontend/` 提供 React + TypeScript 聊天和 Ant Design 模型管理组件；`web/` 保留业务与其他配置后台，模型菜单嵌入同一个 React 管理组件。二者共享后端、登录态与权限。
 
 **助手 ≠ 多 Agent**：助手是提示词、默认模型、工具白名单、Skill 和预算的一组配置。普通助手由模型决定是否及如何调用工具；单步报告助手按配置预采集只读数据，再生成报告。手动预览、发布等 UI 操作也不是“AI 自主工具调用”。
 
@@ -203,7 +213,7 @@ flowchart LR
 | 不可见默认启用 | — | — | ✓ |
 | 不可见不可用 | — | — | — |
 
-四态不替代账号授权与审批。BM25 只对通过授权的候选工具做相关性检索，通常召回 16 个 Schema；固定启用工具和运行时 Skill 工具可能额外加入，所以不是总工具数的绝对上限。关闭 BM25 后注入全部合规候选工具，工具很多时注意上下文占用。
+四态不替代账号授权与审批。BM25 只对通过授权的候选工具检索 Top 16；固定工具和 Skill 工具可能额外加入。决策模型可按任务对工具与 Skill 评分，支持普通 OpenAI 对话评分或 Octop 风格 Decisions 接口。两个开关可以都关闭，开启一个自动关闭另一个；决策异常保留全量授权候选。详见 [运行配置](docs/RUNTIME.md#决策模型)。
 
 ## 业务接入与 SDK
 
@@ -310,6 +320,9 @@ python scripts/test_asr_protocol.py
 python scripts/test_publications.py
 python scripts/test_publications_api.py
 python scripts/test_review_regressions.py
+python scripts/test_decision.py
+python scripts/test_speech.py
+python scripts/test_model_settings.py
 (cd frontend && npm run test:conversation && npm run build)
 git diff --check
 ```
@@ -341,6 +354,7 @@ Dockerfile           React 构建 + Python 运行时镜像
 | [架构设计](docs/ARCHITECTURE.md) | 服务职责、权限传播、Agent loop、存储与演进方向 |
 | [业务系统对接手册](docs/INTEGRATION.md) | 身份、MCP / HTTP / 直连 Tool、SDK、BFF、SSE、验收清单 |
 | [运行配置说明](docs/RUNTIME.md) | 模型、推理、ASR、上下文压缩、重试、隐私与容量 |
+| [模型接入手册](docs/MODELS.md) | 多供应商、STT / TTS、生图、决策、分类测试与管理组件 |
 | [部署手册](docs/DEPLOYMENT.md) | Compose、环境变量、独立数据卷、备份恢复与生产边界 |
 | [React 接入说明](frontend/README.md) | 聊天组件、过程交互、发布记录、移动端与协议接入 |
 | [审查与验收](docs/REVIEW.md) | 已执行检查、隔离测试方法与已知限制 |

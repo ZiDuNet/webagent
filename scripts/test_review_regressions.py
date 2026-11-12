@@ -320,6 +320,107 @@ class ReviewRegressions(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(abs(ctx.started_at - time.monotonic()), 1)
 
+    async def test_runtime_limits_accept_zero_and_values_beyond_old_caps(self) -> None:
+        for steps, calls in ((0, 0), (80, 300)):
+            with patch.object(runtime, "identity_from_token", AsyncMock(return_value=USER)):
+                async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=agent_app.app), base_url="http://test") as client:
+                    response = await client.put("/api/config", headers={"Authorization": "Bearer fixture", "X-Internal-Token": INTERNAL_SECRET}, json={"max_iterations": steps, "max_tool_calls": calls})
+            self.assertEqual(response.status_code, 200)
+            config = llm.runtime_config()
+            budget = llm.resolve_budget(config, {"max_steps": 0, "max_tool_calls": 0})
+            self.assertEqual(budget["max_steps"], steps)
+            self.assertEqual(budget["max_tool_calls"], calls)
+            self.assertEqual(budget["max_run_seconds"], 120)
+        overrides = llm.resolve_budget(config, {"max_steps": 100, "max_tool_calls": 500})
+        self.assertEqual(overrides["max_steps"], 100)
+        self.assertEqual(overrides["max_tool_calls"], 500)
+        for schema in (agent_app.AssistantCreate(name="测试", max_steps=80, max_tool_calls=300), agent_app.AssistantUpdate(max_steps=80, max_tool_calls=300)):
+            self.assertEqual(schema.max_steps, 80)
+            self.assertEqual(schema.max_tool_calls, 300)
+
+    def test_zero_context_reserve_is_not_replaced_with_default(self) -> None:
+        model = {"context_window": 32768, "max_output_tokens": 4096}
+        self.assertEqual(context._context_budget(model, {"context_reserve_tokens": 0})[0], 28672)
+        self.assertEqual(context._context_budget(model, {})[0], 27072)
+
+    async def test_unlimited_loop_runs_more_than_twelve_rounds_and_fifty_tools(self) -> None:
+        spec = ToolSpec("stats", "统计", {}, "", "read", "测试")
+        ctx = runtime.AgentContext(
+            token="fixture", user=USER,
+            model={"id": 1, "name": "fixture", "model_id": "fixture", "context_window": 32768},
+            provider={"name": "fixture"}, config={"demo_mode": False, "context_reserve_tokens": 1600}, skills=[],
+            all_tools=[spec], tools=[spec], global_tool_settings={}, requested_tools=None,
+            budget={"max_steps": 0, "max_tool_calls": 0, "max_run_seconds": 120, "context_max_tokens": 32768},
+        )
+        async def timed_completion(**_kwargs):
+            await asyncio.sleep(0.01)
+        completions = [
+            {"tool_calls": [{"id": f"call-{round_index}-{tool_index}", "name": "stats", "arguments": {}} for tool_index in range(4)]}
+            for round_index in range(13)
+        ] + [{"content": "完成", "tool_calls": []}]
+        completion_iterator = iter(completions)
+        async def timed_completion(**_kwargs):
+            await asyncio.sleep(0.01)
+            return next(completion_iterator)
+        completion = AsyncMock(side_effect=timed_completion)
+        execute = AsyncMock(return_value=(runtime.ToolExecution(ok=True, text="成功"), {}))
+        with patch.object(runtime, "chat_completion", completion), patch.object(runtime, "_execute_emitting", execute):
+            result = await runtime._llm_loop(ctx, [], [], [])
+        self.assertEqual(result["status"], "ok", result["answer"])
+        self.assertEqual(ctx.steps_used, 14)
+        self.assertEqual(ctx.tool_calls_used, 52)
+        self.assertEqual(execute.await_count, 52)
+
+    async def test_positive_limits_stop_execution_without_counting_unexecuted_tools(self) -> None:
+        spec = ToolSpec("stats", "统计", {}, "", "read", "测试")
+        for steps, calls, expected in ((1, 0, "推理轮次"), (0, 1, "工具调用上限")):
+            ctx = runtime.AgentContext(
+                token="fixture", user=USER,
+                model={"id": 1, "name": "fixture", "model_id": "fixture", "context_window": 32768},
+                provider={"name": "fixture"}, config={"demo_mode": False}, skills=[],
+                all_tools=[spec], tools=[spec], global_tool_settings={}, requested_tools=None,
+                budget={"max_steps": steps, "max_tool_calls": calls, "max_run_seconds": 120, "context_max_tokens": 32768},
+            )
+            async def next_completion(**_kwargs):
+                return {"tool_calls": [{"id": "call", "name": "stats", "arguments": {}}]}
+            completion = AsyncMock(side_effect=next_completion)
+            execute = AsyncMock(return_value=(runtime.ToolExecution(ok=True, text="成功"), {}))
+            with patch.object(runtime, "chat_completion", completion), patch.object(runtime, "_execute_emitting", execute):
+                result = await runtime._llm_loop(ctx, [], [], [])
+            self.assertEqual(result["status"], "error")
+            self.assertIn(expected, result["answer"])
+            self.assertEqual(ctx.tool_calls_used, 1)
+            self.assertEqual(execute.await_count, 1)
+
+    async def test_unlimited_counts_still_obey_runtime_deadline(self) -> None:
+        ctx = runtime.AgentContext(
+            token="fixture", user=USER,
+            model={"id": 1, "name": "fixture", "model_id": "fixture", "context_window": 32768},
+            provider={"name": "fixture"}, config={"demo_mode": False}, skills=[],
+            all_tools=[], tools=[], global_tool_settings={}, requested_tools=None,
+            budget={"max_steps": 0, "max_tool_calls": 0, "max_run_seconds": 10, "context_max_tokens": 32768},
+            started_at=time.monotonic() - 11,
+        )
+        completion = AsyncMock()
+        with patch.object(runtime, "chat_completion", completion):
+            result = await runtime._llm_loop(ctx, [], [], [])
+        completion.assert_not_awaited()
+        self.assertEqual(result["status"], "error")
+        self.assertIn("10 秒上限", result["answer"])
+
+    async def test_unlimited_tools_allow_report_prefetch(self) -> None:
+        spec = ToolSpec("stats", "统计", {}, "", "read", "测试")
+        ctx = runtime.AgentContext(
+            token="fixture", user=USER, model={}, provider={}, config={}, skills=[],
+            all_tools=[spec], tools=[spec], global_tool_settings={}, requested_tools=None,
+            assistant={"prefetch_tools": ["stats"]},
+            budget={"max_steps": 0, "max_tool_calls": 0, "max_run_seconds": 120},
+        )
+        with patch.object(runtime, "_execute_emitting", AsyncMock(return_value=(runtime.ToolExecution(ok=True, text="数据"), {}))):
+            prefetched, _runs = await runtime._run_prefetch(ctx, [])
+        self.assertEqual(len(prefetched), 1)
+        self.assertEqual(ctx.tool_calls_used, 1)
+
     async def test_background_title_does_not_overwrite_manual_rename(self) -> None:
         sessions.rename_session(self.session["id"], USER["id"], "新对话")
         ctx = runtime.AgentContext(

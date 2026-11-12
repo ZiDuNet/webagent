@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ConversationRun } from "../src/lib/conversationRun.ts";
+import { extractHtmlArtifacts } from "../src/lib/answerContent.ts";
+import { nextProcessActivity, processActivities } from "../src/lib/processActivity.ts";
 
 test("preparation phases reflect real server work before the first model round", () => {
   const run = new ConversationRun(1000);
@@ -124,4 +126,117 @@ test("multiple tool requests stay pending until each is actually executed", () =
   run.accept("tool.finished", { tool: "first", call_id: "first", status: "ok" });
   run.accept("tool.started", { tool: "second", call_id: "second", arguments: {} });
   assert.deepEqual(run.steps.map((step) => step.status), ["done", "running"]);
+});
+
+test("streaming HTML is hidden from Markdown while its progress remains available", () => {
+  const result = extractHtmlArtifacts("说明\n```html\n<!doctype html><html><head><title>设备总览</title></head><body>", "message", true);
+  assert.deepEqual(result.parts, [{ kind: "markdown", content: "说明\n" }]);
+  assert.equal(result.pendingHtml.title, "设备总览");
+  assert.ok(result.pendingHtml.characters > 30);
+  assert.equal(result.artifacts.length, 0);
+});
+
+test("partial fence headers do not flash HTML code into the conversation", () => {
+  for (const prefix of ["```", "```h", "```ht", "```html", "~~~html"]) {
+    const result = extractHtmlArtifacts(prefix, "message", true);
+    assert.deepEqual(result.parts, []);
+    assert.ok(result.pendingHtml);
+  }
+});
+
+test("completed HTML fences become cards without consuming following Markdown", () => {
+  const result = extractHtmlArtifacts("```html\n<html><title>总览</title></html>\n```\n已完成 **报告**。", "message", true);
+  assert.equal(result.parts[0].kind, "artifact");
+  assert.equal(result.parts[0].artifact.title, "总览");
+  assert.equal(result.parts[1].content, "\n已完成 **报告**。");
+  assert.equal(result.pendingHtml, undefined);
+});
+
+test("HTML inside other code fences is preserved verbatim", () => {
+  const content = '````markdown\n```html\n<html>示例</html>\n```\n````\n普通文本';
+  const result = extractHtmlArtifacts(content, "message", true);
+  assert.deepEqual(result.parts, [{ kind: "markdown", content }]);
+  assert.equal(result.pendingHtml, undefined);
+});
+
+test("raw HTML documents stream as progress and keep trailing text after closure", () => {
+  const html = "<!DOCTYPE html><html><title>报告</title><body>数据</body></html>";
+  assert.deepEqual(extractHtmlArtifacts(html.slice(0, -8), "message", true).parts, []);
+  for (const prefix of ["<", "<!doc", "<ht"]) assert.deepEqual(extractHtmlArtifacts(prefix, "message", true).parts, []);
+  const result = extractHtmlArtifacts(`${html}\n下一步`, "message", true);
+  assert.equal(result.artifacts[0].html, html);
+  assert.equal(result.parts[1].content, "\n下一步");
+});
+
+test("multiple HTML artifacts and interrupted output retain their contents", () => {
+  const result = extractHtmlArtifacts("~~~html\n<html>第一份</html>\n~~~\n说明\n```html\n<html>第二份", "message");
+  assert.equal(result.artifacts.length, 2);
+  assert.notEqual(result.artifacts[0].id, result.artifacts[1].id);
+  assert.equal(result.artifacts[1].html, "<html>第二份");
+  assert.equal(result.parts[1].content, "\n说明\n");
+});
+
+test("ordinary text, Mermaid and non-HTML code retain incremental rendering", () => {
+  for (const content of ["正文 **继续", "```mermaid\ngraph TD; A-->B", "```python\nprint(1)", "1 < 2"]) {
+    assert.deepEqual(extractHtmlArtifacts(content, "message", true).parts, [{ kind: "markdown", content }]);
+  }
+});
+
+test("single-line playback contains phases, reasoning, safe tool inputs, results and answer in order", () => {
+  const run = new ConversationRun();
+  run.accept("run.phase", { phase: "context", title: "检查上下文" });
+  run.accept("step.started", { step: 1 });
+  run.accept("thinking.delta", { delta: "先读取设备统计，再分析离线设备。" });
+  run.accept("tool.started", { tool: "设备统计", call_id: "stats", arguments: { status: "offline" } });
+  run.accept("tool.finished", { tool: "设备统计", call_id: "stats", status: "ok", summary: "共 12 台", result: { total: 12 } });
+  run.accept("step.started", { step: 2 });
+  run.accept("thinking.delta", { delta: "已有结果，整理可操作的建议。" });
+  run.accept("text.delta", { delta: "共查询到 **12 台设备**。" });
+  const activities = processActivities(run.snapshot());
+  assert.deepEqual(activities.map((activity) => activity.title), [
+    "检查上下文", "模型请求已发送", "模型思考", "正在调用 设备统计", "设备统计 · 参数",
+    "工具已返回 · 设备统计", "设备统计 · 结果", "模型请求已发送", "模型思考", "回答内容",
+  ]);
+  assert.equal(activities[2].preview, "先读取设备统计，再分析离线设备。");
+  assert.equal(activities[4].preview, '{"status":"offline"}');
+  assert.equal(activities[6].preview, '{"total":12}');
+  assert.equal(activities.at(-1).preview, "共查询到 **12 台设备**。");
+  assert.ok(activities.every((activity) => !/第 \d+ 轮|已完成 ·/.test(activity.title)));
+  run.accept("run.completed", { status: "ok", answer: "完成" });
+  assert.deepEqual(processActivities(run.snapshot()).map((activity) => activity.title), ["已完成"]);
+});
+
+test("long output is split into readable sequential fragments without losing content", () => {
+  const run = new ConversationRun();
+  const reasoning = "逐项核对设备。🙂".repeat(30);
+  for (const delta of [reasoning.slice(0, 57), reasoning.slice(57)]) run.accept("thinking.delta", { delta });
+  const activities = processActivities(run.snapshot());
+  assert.ok(activities.length > 3);
+  assert.ok(activities.every((activity) => Array.from(activity.preview).length <= 36));
+  assert.equal(activities.map((activity) => activity.preview).join(""), reasoning);
+  assert.equal(run.steps[0].reasoning, reasoning);
+});
+
+test("playback keeps its current item while new tokens arrive and never replays completed round labels", () => {
+  const run = new ConversationRun();
+  run.accept("thinking.delta", { delta: "片段一" });
+  const previous = run.snapshot();
+  const selected = previous.activities[0].id;
+  run.accept("thinking.delta", { delta: "继续片段一" });
+  assert.equal(run.snapshot().activities[0].id, selected);
+  assert.equal(previous.activities[0].preview, "片段一");
+  assert.equal(nextProcessActivity(run.snapshot().activities, selected), selected);
+  run.accept("text.delta", { delta: "回答" });
+  assert.equal(nextProcessActivity(run.snapshot().activities, selected), run.snapshot().activities[1].id);
+  assert.equal(nextProcessActivity(run.snapshot().activities, "expired"), selected);
+});
+
+test("playback bounds retained fragments while keeping complete reasoning and answer details", () => {
+  const run = new ConversationRun();
+  const text = "内容".repeat(6000);
+  run.accept("thinking.delta", { delta: text });
+  run.accept("text.delta", { delta: text });
+  assert.equal(run.snapshot().activities.length, 300);
+  assert.equal(run.steps.find((step) => step.kind === "think").reasoning, text);
+  assert.equal(run.steps.find((step) => step.kind === "answer").content, text);
 });

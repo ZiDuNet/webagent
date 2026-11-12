@@ -79,11 +79,11 @@ MCP 服务使用 `X-Internal-Token` 做服务间鉴权。该密钥只解决“�
   ∩ 助手工具白名单
   ∩ 管理员四态配置
   ∩ 用户本轮勾选
-  -> BM25 检索
-  -> 最多注入 16 个工具 Schema
+  -> 可选 BM25 或决策模型筛选，二者可全关
+  -> 注入最终候选工具 Schema
 ```
 
-四种治理状态为：可见可选、可见固定、不可见默认启用、不可见不可用，对所有工具生效，写/删工具也可以隐藏。隐藏只改变用户侧可见性和勾选能力，审批卡与业务 API 的 RBAC 仍然生效。BM25 只在已经通过权限和四态过滤的工具中做名称、描述、分类和参数名检索，目的是控制大量工具带来的上下文成本，不是权限判断。BM25 可以关闭；关闭后全部可用工具直接进入上下文。
+四种治理状态为：可见可选、可见固定、不可见默认启用、不可见不可用，对所有工具生效。隐藏只改变用户侧可见性和勾选能力，审批与业务 RBAC 仍然执行。BM25 对已授权候选做关键词检索 Top 16，固定工具可能额外加入；决策模型独立评分工具和 Skill。两开关最多启用一个，可全部关闭；决策失败保留全量候选，不暗中切 BM25。筛选用于控制上下文成本，不决定权限。
 
 ### 2.3 Agent Gateway `:8010`
 
@@ -96,7 +96,7 @@ verify internal token
   -> load enabled skills and user memory
   -> list MCP + dynamic HTTP tools
   -> filter by permission ∩ assistant whitelist ∩ four-state policy ∩ user selection
-  -> BM25 rank and inject at most 16 tool schemas
+  -> optional BM25 or decision scoring, or preserve all candidates
   -> build/compact context and fit model budget
   -> run Agent loop
   -> read tools execute immediately
@@ -110,9 +110,9 @@ Agent 服务同时负责管理员配置：
 
 - 模型接入（当前仅 OpenAI-compatible）：供应商 Base URL、加密 API Key、额外 Header、超时、模型发现和测试。
 - 模型参数：能力、上下文窗口、输出上限、思考能力与强度、多模态、价格和额外请求参数。
-- 默认模型、降级模型、标题生成模型、上下文压缩模型、ASR 模型；标题/压缩模型留空时继承主模型，ASR 未配置则关闭语音输入。
+- 默认模型、降级模型、标题生成模型、上下文压缩模型、STT、TTS 与决策模型；标题/压缩模型留空时继承主模型，STT / TTS 未配置即关闭各自能力。
 - 助手配置（提示词、默认模型、工具白名单、记忆开关）
-- 工具四态、动态 HTTP 工具与 BM25 检索
+- 工具四态、动态 HTTP 工具与互斥且可全关的 BM25 / 决策筛选
 - PagePilot 发布连接器（REST，Token 加密）、按业务用户隔离的本地页面/版本，以及服务端 HTML 截图
 - Skill 与参考文件
 - 上下文、压缩、运行上限、全局重试和额度设置
@@ -133,7 +133,8 @@ Agent 服务同时负责管理员配置：
 - 支持图片附件、手动压缩、长期记忆管理和设备统计结果数据卡/条形图。
 - 管理员配置 ASR 模型后，输入框旁语音按钮可用；识别完成后直接发送；未配置时按钮禁用。
 - 管理页支持模型、助手、工具、Skill、会话、用户、审计、运行设置和用量统计。
-- 原生 HTML/JS 管理台与独立 React 接入界面并行；React 提供可复用聊天组件和真实登录、对话、发布/记录页面，不代表原生管理台已全部迁移。移动样式模拟小程序端，实际微信原生组件接入仍需按同一接口契约实现。
+- HTML/JS 后台与 React 聊天并行；模型配置已提取为可复用 `ModelsSettings`（Ant Design 6），后台通过同源 iframe嵌入，独立入口为 `/react/?view=models`。其余管理模块仍为 HTML。移动视口复用相同接口与权限，微信原生接入需单独实现组件。
+- 模型页参考 Octop 的四类模型池与供应商卡片；支持 12 个品牌模板、自定义连接、同品牌多账号、连接复用、分类真实测试。STT / TTS 独立绑定；TTS 可通过业务 BFF 或 `SpeechClient` 返回二进制音频，当前聊天未自动朗读。协议边界见 [模型接入手册](MODELS.md)。
 
 ### 2.5 代码目录
 
@@ -147,6 +148,9 @@ webagent/
     context.py          # 上下文构建、预算、自动/手动/溢出压缩
     llm.py              # OpenAI-compatible 请求、重试、usage 归一化
     providers.py        # 模型发现、models.dev 元数据与能力预填
+    provider_presets.py # 供应商品牌模板，不自动创建连接
+    speech.py           # OpenAI / DashScope TTS、音频大小与下载约束
+    decision.py         # 权限过滤后的可选候选评分
     sessions.py         # 会话、消息、标题与用量持久化
     db.py               # Agent SQLite schema 与查询
     crypto.py           # API Key 加密与迁移

@@ -13,11 +13,13 @@
 | [chat-mermaid.jpg](chat-mermaid.jpg) | Mermaid 横向图、回答用量与关闭思考选项 | 真实模型基于已查询结果生成摘要，本轮未再次调用工具 |
 | [chat-mobile.jpg](chat-mobile.jpg) | 移动对话、模型/推理入口、工具弹层 | 相同正式 React 应用置于两个 `390 × 660` CSS px 视口 |
 | [business-devices.jpg](business-devices.jpg) | 设备统计、表格、筛选与操作 | 独立 Compose 演示实例的设备种子数据 |
-| [admin-models.jpg](admin-models.jpg) | 供应商与模型卡片、能力、测试入口 | 独立 Compose 演示实例，未配置真实 Key |
+| [admin-models.jpg](admin-models.jpg) | 新版 React 模型池、品牌卡片、自定义供应商入口 | 独立临时库，本机验收网关，其他品牌未填 Key；1280 × 960 |
+| [admin-decision.jpg](admin-decision.jpg) | 决策模型绑定、互斥且可全关的开关、范围、阈值、数量和超时 | 同一隔离验收实例；1280 × 1200 |
+| [admin-voice.jpg](admin-voice.jpg) | STT / TTS 模型池、独立默认绑定与测试入口 | 同一隔离验收实例；1280 × 1200 |
 | [admin-tools.jpg](admin-tools.jpg) | 工具四态、BM25、PagePilot 入口 | 独立 Compose 演示实例，未配置 PagePilot Token |
 | [admin-runtime.jpg](admin-runtime.jpg) | 上下文、运行上限、辅助模型、重试 | 独立 Compose 演示实例，默认设置 |
 
-所有截图尺寸为 `1280 × 720`。移动图在同一取景页中并列加载正式应用，以展示两个实际交互状态；取景页已删除，不是额外产品页面或交付的小程序。聊天库和后台截图使用独立实例，因此设备数量、模型和配置不应被当成同一数据库快照。
+未单独标注的截图尺寸为 `1280 × 720`。移动图在同一取景页中并列加载正式应用，以展示两个实际交互状态；取景页已删除，不是交付的小程序。聊天库、旧后台截图和新版模型截图使用独立实例，数量与配置不是同一数据库快照。新版“验收”条目使用本机测试网关验证请求与渲染，不代表真实厂商认证。
 
 ## 更新规范
 
