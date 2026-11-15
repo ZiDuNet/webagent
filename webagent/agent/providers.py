@@ -92,7 +92,7 @@ def transcription_config(
     if language is not None and (not isinstance(language, str) or len(language) > 20):
         raise ProviderError("语音识别语言必须是最多 20 个字符的字符串")
     protocol = str(settings.get("protocol") or "auto").strip().lower()
-    if protocol not in {"auto", "transcriptions", "chat_audio", "dashscope"}:
+    if protocol not in {"auto", "transcriptions", "chat_audio", "dashscope", "realtime"}:
         raise ProviderError(f"不支持的语音协议：{protocol}")
     lower = str(model.get("model_id") or "").lower()
     base_url = validate_base_url(provider["base_url"])
@@ -111,7 +111,35 @@ def transcription_config(
         else:
             protocol = "transcriptions"
     endpoint = str(settings.get("endpoint") or "").strip()
-    if not endpoint:
+    if protocol == "realtime":
+        parsed_base = urlparse(base_url)
+        expected_scheme = "wss" if parsed_base.scheme == "https" else "ws"
+        if not endpoint:
+            endpoint = f"{expected_scheme}://{parsed_base.netloc}/api-ws/v1/realtime"
+        elif endpoint.startswith("/") and not endpoint.startswith("//"):
+            endpoint = urljoin(f"{expected_scheme}://{parsed_base.netloc}/", endpoint)
+        else:
+            parsed_endpoint = urlparse(endpoint)
+            if parsed_endpoint.scheme not in {"http", "https", "ws", "wss"}:
+                raise ProviderError("实时语音端点必须使用 HTTP(S) 或 WS(S)")
+            endpoint_scheme = "wss" if parsed_endpoint.scheme in {"https", "wss"} else "ws"
+            endpoint = parsed_endpoint._replace(scheme=endpoint_scheme).geturl()
+        parsed_endpoint = urlparse(endpoint)
+        target_scheme = "wss" if parsed_endpoint.scheme == "wss" else "ws"
+        base_port = parsed_base.port or (443 if parsed_base.scheme == "https" else 80)
+        target_port = parsed_endpoint.port or (443 if target_scheme == "wss" else 80)
+        if (
+            target_scheme != expected_scheme
+            or parsed_endpoint.hostname is None
+            or parsed_endpoint.hostname.lower() != (parsed_base.hostname or "").lower()
+            or target_port != base_port
+            or parsed_endpoint.username
+            or parsed_endpoint.password
+            or parsed_endpoint.query
+            or parsed_endpoint.fragment
+        ):
+            raise ProviderError("实时语音端点必须与供应商地址同源，且不能包含凭据、查询参数或片段")
+    elif not endpoint:
         if protocol == "dashscope":
             parsed = urlparse(base_url)
             native_path = "/api/v1/services/aigc/multimodal-generation/generation"
@@ -128,7 +156,7 @@ def transcription_config(
         endpoint = urljoin(f"{base_url}/", endpoint)
     else:
         endpoint = validate_base_url(endpoint)
-    if endpoint:
+    if endpoint and protocol != "realtime":
         parsed = urlparse(endpoint)
         provider_origin = urlparse(base_url)
         if (

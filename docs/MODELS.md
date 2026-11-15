@@ -47,13 +47,13 @@
 **实现支持**：
 
 - 供应商预置：OpenAI / DeepSeek / Qwen(DashScope) / GLM(智谱) / Moonshot(Kimi) / MiniMax / Doubao(火山方舟) / SiliconFlow / OpenRouter / Ollama / LM Studio / 自定义。
-- STT：OpenAI Whisper(`transcriptions`) + Qwen 语音(`chat_audio` / `dashscope` 原生)。
+- STT：OpenAI Whisper(`transcriptions`) + Qwen 语音(`chat_audio` / `dashscope` 原生 / 实时 WebSocket)。
 - TTS：OpenAI Speech(`/audio/speech`) + DashScope Qwen TTS（以 `speech.py` / `test_speech.py` 落地为准）。
 - 决策：OpenRouter Decisions API（Jev / Microsoft）与 Laya 本地服务，及通用 `chat_completions` 评分器。
 
 **不实现**：
 
-- Anthropic / Gemini 原生协议、realtime WebSocket 文件转写、rerank 自动测试、非 OpenAI Images 生图协议。
+- Anthropic / Gemini 原生协议、rerank 自动测试、非 OpenAI Images 生图协议。
 
 ---
 
@@ -226,10 +226,10 @@ ASR 模型 `model_kind ∈ {asr, asr_realtime}`，`extra_params._asr.protocol` �
 | `transcriptions` | `{base}/audio/transcriptions` | multipart `file` + `model` + `language` | OpenAI Whisper 等 |
 | `chat_audio` | `{base}/chat/completions` | `input_audio` 内容块；`data_format=base64` 或 `data_uri` | OpenAI GPT-Audio / Qwen 语音模型 |
 | `dashscope` | DashScope 原生 `multimodal-generation/generation` | `input.messages` + `parameters`，`X-DashScope-SSE: disable` | `qwen-audio-3.*` |
-| `realtime` | WebSocket | 实时流 | 仅实时；**不支持文件转写**，测试时明确报错 |
+| `realtime` | `wss://{provider-host}/api-ws/v1/realtime?model={model_id}` | WebSocket 事件 + 16 kHz 单声道 PCM | Qwen 实时 ASR |
 
-- `auto`：按 `model_id` 关键字自动推断（`realtime` / `qwen*asr` / `gpt-audio*` / 默认 `transcriptions`）。
-- OpenAI Transcriptions 使用 multipart 原文件；Chat Audio / 原生协议需要时经 FFmpeg 转为单声道 16kHz WAV（缺少转换器时明确提示）。
+- `auto`：按 `model_id` 关键字自动推断（实时模型优先、再识别 `qwen*asr` / `gpt-audio*`，否则使用 `transcriptions`）。
+- OpenAI Transcriptions 使用 multipart 原文件；Chat Audio / 原生协议 / 实时协议需要时经 FFmpeg 转换音频。实时协议以 WebSocket PCM 分片发送；已是 16 kHz 单声道 PCM 的 WAV 不需 FFmpeg，压缩录音需安装 FFmpeg。
 - 页面测试支持录制或上传实际音频，调用管理员专用转写接口，不修改默认 STT 绑定。旧的通用模型测试 API 仍保留 1 秒静音连通测试，不能据此确认有声识别质量。
 - 独立绑定：`asr_model_id`；留空 = 关闭，前端语音按钮置灰。
 
@@ -279,7 +279,7 @@ TTS 已落地于 `webagent/agent/speech.py`，协议 `_tts.protocol` 支持 `ope
 |---|---|---|
 | `chat` / `vision` | 发送 `"Hi"`，输出上限 256；支持时关闭思考 | 必须有回复正文，空文本不报成功；回显 usage 与延迟 |
 | `asr` | 页面上传/录制真实音频；通用测试 API 使用 1 秒静音 | 返回转写结果；空音频/缺少识别结果不能当真实识别成功 |
-| `asr_realtime` | 页面明确禁用文件测试 | 提示实时 WebSocket 尚未实现 |
+| `asr_realtime` 或实时模型 ID | 上传/录制音频后经 WebSocket 发起实时会话 | 必须收到 `session.finished`；缺少最终转写事件时失败 |
 | `image_generation` | 生图 `blue circle`，默认 `1024x1024` | 返回 `url` 或 `b64_json`（尺寸不支持时按模型能力调整） |
 | `tts` | 合成一段测试文本 | 管理端返回可试听音频；demo 测试不伪造成功；PCM 提示下载播放 |
 | `decision` | 对“查询设备”单候选评分 | 返回 `score ∈ [0,1]`，回显 usage |
@@ -288,7 +288,7 @@ TTS 已落地于 `webagent/agent/speech.py`，协议 `_tts.protocol` 支持 `ope
 
 > 供应商“测试”按钮只代表**发现/连接测试**；专用 `decision` / `tts` 等即使供应商没有 `/models`，仍可直接对单个模型测试。
 
-> 除“连接测试”外，ASR/TTS 还提供管理端**真实音频测试**：`POST /api/admin/models/{id}/transcribe` 上传/录制音频转写，TTS 测试返回可试听音频。
+> ASR 测试使用管理端 `POST /api/admin/models/{id}/transcribe` 和上传/录制的真实音频；TTS 测试使用 `POST /api/admin/models/{id}/test`，可传入测试文本并返回可试听音频、协议和耗时。两者都是真实供应商调用，可能产生费用。
 
 ---
 

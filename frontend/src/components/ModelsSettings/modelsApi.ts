@@ -108,6 +108,11 @@ export function modelKindLabel(kind: ModelKind): string {
   return { chat: "对话", vision: "视觉对话", asr: "STT 文件识别", asr_realtime: "STT 实时识别", tts: "TTS 语音合成", image_generation: "图片生成", decision: "决策", embedding: "Embedding", rerank: "Rerank" }[kind] ?? kind;
 }
 
+export function effectiveModelKind(model: Pick<ConfiguredModel, "model_id" | "model_kind">): ModelKind {
+  if (model.model_kind === "asr" && /realtime|real-time/i.test(model.model_id)) return "asr_realtime";
+  return model.model_kind;
+}
+
 export function modelCategory(kind: ModelKind): ModelsCategory {
   if (kind === "asr" || kind === "asr_realtime" || kind === "tts") return "voice";
   if (kind === "image_generation") return "image";

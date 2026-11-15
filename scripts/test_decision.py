@@ -101,6 +101,21 @@ class DecisionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(endpoint=endpoint), self.assertRaises(ProviderError):
                 decision.connection_config({"extra_params": {"_decision": {"protocol": "decisions", "endpoint": endpoint}}}, self.provider)
 
+    def test_aliyun_systemone_keeps_compatible_mode_base_path(self) -> None:
+        provider = {
+            **self.provider,
+            "base_url": "https://workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        }
+        model = {
+            "model_id": "decision-model-preview",
+            "extra_params": {"_decision": {"protocol": "chat_completions", "endpoint": "/systemone"}},
+        }
+        config = decision.connection_config(model, provider)
+        self.assertEqual(config, {
+            "protocol": "decisions",
+            "endpoint": "https://workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/systemone",
+        })
+
     def test_incomplete_invalid_or_nonfinite_scores_rejected(self) -> None:
         for scores in ({}, {"x": True}, {"x": float("nan")}, {"x": 2}, {"x": "bad"}):
             with self.subTest(scores=scores), self.assertRaises(ValueError):

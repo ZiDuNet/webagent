@@ -153,11 +153,49 @@ class AudioProtocolTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(llm.LLMError, "缺少识别结果"):
             await self.request("whisper-1", {"ok": True}, allow_empty=True)
 
-    async def test_realtime_has_explicit_protocol_error_without_http_request(self) -> None:
-        with self.assertRaisesRegex(llm.LLMError, "WebSocket"):
-            await self.request("qwen-audio-3.1-realtime-plus", {})
-        self.assertFalse(self.requests)
+    async def test_realtime_model_defaults_to_websocket_protocol(self) -> None:
+        self.assertEqual(guess_model_kind("qwen3-asr-flash-realtime"), "asr_realtime")
         self.assertEqual(guess_model_kind("qwen-audio-3.1-realtime-plus"), "asr_realtime")
+        config = transcription_config(
+            {"model_id": "qwen3-asr-flash-realtime", "model_kind": "asr_realtime", "extra_params": {"_asr": {}}},
+            self.provider,
+        )
+        self.assertEqual(config["protocol"], "realtime")
+        self.assertEqual(config["endpoint"], "wss://provider.example/api-ws/v1/realtime")
+
+    async def test_realtime_websocket_sends_pcm_and_reads_final_transcript(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, object]] = []
+                self.events = [
+                    {"type": "session.updated"},
+                    {"type": "conversation.item.input_audio_transcription.completed", "transcript": "识别成功"},
+                    {"type": "session.finished"},
+                ]
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def send(self, message: str) -> None:
+                self.sent.append(json.loads(message))
+
+            async def recv(self) -> str:
+                return json.dumps(self.events.pop(0))
+
+        websocket = FakeWebSocket()
+        with patch("websockets.asyncio.client.connect", return_value=websocket) as connect:
+            result = await self.request("qwen3-asr-flash-realtime", {}, options={"protocol": "realtime"})
+
+        self.assertEqual(result["text"], "识别成功")
+        self.assertEqual(result["protocol"], "realtime")
+        self.assertEqual(connect.call_args.args[0], "wss://provider.example/api-ws/v1/realtime?model=qwen3-asr-flash-realtime")
+        self.assertEqual(connect.call_args.kwargs["additional_headers"]["Authorization"], "Bearer fixture-api-key")
+        self.assertEqual(websocket.sent[0]["type"], "session.update")
+        self.assertTrue(all(item["type"] == "input_audio_buffer.append" for item in websocket.sent[1:-2]))
+        self.assertEqual([item["type"] for item in websocket.sent[-2:]], ["input_audio_buffer.commit", "session.finish"])
 
     async def test_http_error_keeps_status_and_redacts_credentials(self) -> None:
         with self.assertRaises(llm.LLMError) as raised:

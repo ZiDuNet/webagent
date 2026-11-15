@@ -6,7 +6,7 @@ import { DecisionSettings } from "./DecisionSettings";
 import { ModelEditor, type DecisionPresetDraft } from "./ModelEditor";
 import { ModelTestDialog } from "./ModelTestDialog";
 import { ProviderEditor } from "./ProviderEditor";
-import { modelCategory, modelKindLabel, modelsRequest, type ConfiguredModel, type ModelKind, type ModelPreset, type ModelProvider, type ModelsCategory, type ModelsRuntimeConfig } from "./modelsApi";
+import { effectiveModelKind, modelCategory, modelKindLabel, modelsRequest, type ConfiguredModel, type ModelKind, type ModelPreset, type ModelProvider, type ModelsCategory, type ModelsRuntimeConfig } from "./modelsApi";
 import "./ModelsSettings.css";
 
 export interface ModelsSettingsProps {
@@ -132,14 +132,14 @@ function ModelsSettingsContent({ baseUrl = "/api/agent", initialCategory = "chat
     return <article key={model.id} className={`ms-model-row ${disabled ? "is-disabled" : ""}`}>
       <span className={`ms-model-symbol ms-kind-${modelCategory(model.model_kind)}`}>{model.model_kind === "tts" ? <Volume2 size={18} /> : modelCategory(model.model_kind) === "voice" ? <Mic size={18} /> : model.model_kind === "image_generation" ? <Image size={18} /> : model.model_kind === "decision" ? <Scale size={18} /> : <MessageSquareText size={18} />}</span>
       <div className="ms-model-info">
-        <div className="ms-model-name"><strong>{model.name}</strong>{model.is_default && <Tag color="green" icon={<Check size={11} />}>默认</Tag>}{config?.asr_model_id === model.id && <Tag color="cyan">默认 STT</Tag>}{config?.tts_model_id === model.id && <Tag color="cyan">默认 TTS</Tag>}{config?.decision_model_id === model.id && <Tag color="purple">决策绑定</Tag>}<Tag bordered={false}>{modelKindLabel(model.model_kind)}</Tag></div>
+        <div className="ms-model-name"><strong>{model.name}</strong>{model.is_default && <Tag color="green" icon={<Check size={11} />}>默认</Tag>}{config?.asr_model_id === model.id && <Tag color="cyan">默认 STT</Tag>}{config?.tts_model_id === model.id && <Tag color="cyan">默认 TTS</Tag>}{config?.decision_model_id === model.id && <Tag color="purple">决策绑定</Tag>}<Tag bordered={false}>{modelKindLabel(effectiveModelKind(model))}</Tag></div>
         <code>{model.model_id}</code>
         <small>{provider?.name || model.provider_name || "供应商不存在"}{["chat", "vision"].includes(model.model_kind) && model.context_window ? ` · ${new Intl.NumberFormat("zh-CN").format(model.context_window)} 上下文` : ""}{provider?.enabled === false ? " · 连接已停用" : !model.enabled ? " · 模型已停用" : ""}</small>
       </div>
       <div className="ms-model-actions">
         <Tooltip title={model.enabled ? "停用模型" : "启用模型"}><Switch size="small" checked={model.enabled} loading={working} disabled={Boolean(busy)} aria-label={`${model.enabled ? "停用" : "启用"}${model.name}`} onChange={(enabled) => updateModel(model, { enabled }, enabled ? "模型已启用。" : "模型已停用。")} /></Tooltip>
         <Button size="small" icon={<FlaskConical size={13} />} disabled={Boolean(busy)} onClick={() => setTesting(model)}>测试</Button>
-        <Button size="small" icon={<Pencil size={13} />} onClick={() => setModelDraft({ model, kind: model.model_kind })}>编辑</Button>
+        <Button size="small" icon={<Pencil size={13} />} onClick={() => setModelDraft({ model, kind: effectiveModelKind(model) })}>编辑</Button>
         <Popconfirm title="删除这个模型配置？" description="不会删除供应商连接。相关默认绑定将由服务端清理。" okText="删除" cancelText="取消" onConfirm={() => run(`model:${model.id}`, async (signal) => { await modelsRequest(baseUrl, `/admin/models/${model.id}`, { method: "DELETE", signal }); setNotice("模型配置已删除。"); changed(); })}><Button size="small" danger icon={<Trash2 size={13} />} aria-label={`删除模型 ${model.name}`} disabled={Boolean(busy)} /></Popconfirm>
         {(model.model_kind === "chat" || model.model_kind === "vision") && !model.is_default && <Button type="text" size="small" disabled={disabled || Boolean(busy)} onClick={() => updateModel(model, { is_default: true }, "默认对话模型已更新。")}>设为默认</Button>}
         <Button type="text" size="small" icon={<RefreshCw size={12} className={working ? "ms-spin" : ""} />} loading={working} disabled={Boolean(busy)} onClick={() => void run(`model:${model.id}`, async (signal) => { await modelsRequest(baseUrl, `/admin/models/${model.id}/sync`, { method: "POST", signal }, 20_000); setNotice("模型元信息已同步，专用协议配置保持原值。"); changed(); })}>同步信息</Button>
@@ -189,16 +189,17 @@ function VoiceBindings({ baseUrl, config, models, onSaved }: { baseUrl: string; 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => { setAsrId(config.asr_model_id || undefined); setTtsId(config.tts_model_id || undefined); }, [config.asr_model_id, config.tts_model_id]);
-  const options = (kind: ModelKind, selectedId?: number) => {
-    const available = models.filter((model) => model.model_kind === kind);
+  const options = (kind: ModelKind | ModelKind[], selectedId?: number) => {
+    const kinds = Array.isArray(kind) ? kind : [kind];
+    const available = models.filter((model) => kinds.includes(model.model_kind));
     const result = available.map((model) => ({ value: model.id, label: `${model.name} · ${model.provider_name || "自定义连接"}${!model.enabled || model.provider_enabled === false ? "（已停用）" : ""}`, disabled: !model.enabled || model.provider_enabled === false }));
     if (selectedId && !available.some((model) => model.id === selectedId)) result.push({ value: selectedId, label: `原绑定模型 #${selectedId} 已不可用`, disabled: true });
     return result;
   };
-  const unavailable = (id: number | undefined, kind: ModelKind) => Boolean(id && !models.some((model) => model.id === id && model.model_kind === kind && model.enabled && model.provider_enabled !== false));
+  const unavailable = (id: number | undefined, kind: ModelKind | ModelKind[]) => Boolean(id && !models.some((model) => model.id === id && (Array.isArray(kind) ? kind : [kind]).includes(model.model_kind) && model.enabled && model.provider_enabled !== false));
   const save = async () => {
     setSaving(true); setError("");
     try { onSaved(await modelsRequest<ModelsRuntimeConfig>(baseUrl, "/config", { method: "PUT", body: JSON.stringify({ asr_model_id: asrId || 0, tts_model_id: ttsId || 0 }) })); } catch (failure) { setError(apiErrorMessage(failure)); } finally { setSaving(false); }
   };
-  return <section className="ms-section"><div className="ms-section-heading"><div><h2><AudioLines size={18} />语音默认绑定</h2><p>两个能力独立启用；清空后保存即关闭。实时 STT 暂不用于浏览器文件转写。</p></div></div><div className="ms-form-grid"><label className="ms-binding-field"><span><Mic size={15} />默认 STT 识别模型</span><Select aria-label="默认 STT 识别模型" allowClear placeholder="未配置，语音输入关闭" value={asrId} onChange={setAsrId} options={options("asr", asrId)} disabled={saving} /></label><label className="ms-binding-field"><span><Volume2 size={15} />默认 TTS 合成模型</span><Select aria-label="默认 TTS 合成模型" allowClear placeholder="未配置，语音合成关闭" value={ttsId} onChange={setTtsId} options={options("tts", ttsId)} disabled={saving} /></label></div>{(unavailable(asrId, "asr") || unavailable(ttsId, "tts")) && <Alert type="warning" showIcon title="当前绑定模型或供应商已不可用。请改选已启用模型，或清空绑定后保存。" />}{error && <Alert type="error" title={error} showIcon role="alert" />}<div className="ms-form-footer"><span>保存后对业务系统用户生效。</span><Button type="primary" icon={<Check size={15} />} loading={saving} onClick={() => void save()}>保存语音绑定</Button></div></section>;
+  return <section className="ms-section"><div className="ms-section-heading"><div><h2><AudioLines size={18} />语音默认绑定</h2><p>文件 STT 与实时 WebSocket STT 都可作为语音输入模型；清空后保存即关闭。</p></div></div><div className="ms-form-grid"><label className="ms-binding-field"><span><Mic size={15} />默认 STT 识别模型</span><Select aria-label="默认 STT 识别模型" allowClear placeholder="未配置，语音输入关闭" value={asrId} onChange={setAsrId} options={options(["asr", "asr_realtime"], asrId)} disabled={saving} /></label><label className="ms-binding-field"><span><Volume2 size={15} />默认 TTS 合成模型</span><Select aria-label="默认 TTS 合成模型" allowClear placeholder="未配置，语音合成关闭" value={ttsId} onChange={setTtsId} options={options("tts", ttsId)} disabled={saving} /></label></div>{(unavailable(asrId, ["asr", "asr_realtime"]) || unavailable(ttsId, "tts")) && <Alert type="warning" showIcon title="当前绑定模型或供应商已不可用。请改选已启用模型，或清空绑定后保存。" />}{error && <Alert type="error" title={error} showIcon role="alert" />}<div className="ms-form-footer"><span>保存后对业务系统用户生效。</span><Button type="primary" icon={<Check size={15} />} loading={saving} onClick={() => void save()}>保存语音绑定</Button></div></section>;
 }

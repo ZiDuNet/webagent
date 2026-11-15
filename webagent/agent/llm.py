@@ -14,6 +14,7 @@ import wave
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx2
 from openai import (
@@ -1085,6 +1086,8 @@ async def test_llm(
     model: dict[str, Any],
     provider: dict[str, Any],
     config: dict[str, Any],
+    *,
+    tts_test_text: str | None = None,
 ) -> dict[str, Any]:
     kind = str(model.get("model_kind") or "chat")
     if kind == "decision":
@@ -1104,7 +1107,11 @@ async def test_llm(
                 "latency_ms": 0,
             }
         try:
-            result = await synthesize_speech("你好，语音合成测试。", model, provider)
+            result = await synthesize_speech(
+                tts_test_text if tts_test_text is not None else "你好，语音合成测试。",
+                model,
+                provider,
+            )
         except SpeechError as exc:
             return {
                 "ok": False,
@@ -1327,6 +1334,50 @@ def _transcript_text(value: Any) -> str:
     return str(audio.get("transcript") or "") if isinstance(audio, dict) else ""
 
 
+async def _prepare_realtime_pcm(audio: bytes) -> bytes:
+    try:
+        with wave.open(io.BytesIO(audio), "rb") as wav:
+            if (
+                wav.getframerate() == 16000
+                and wav.getnchannels() == 1
+                and wav.getsampwidth() == 2
+            ):
+                if wav.getnframes() > 16000 * 60:
+                    raise LLMError("实时语音测试单次最多支持 60 秒音频", retryable=False)
+                return wav.readframes(wav.getnframes())
+    except (wave.Error, EOFError):
+        pass
+
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        raise LLMError("实时语音协议需要 FFmpeg 将录音转换为 16 kHz 单声道 PCM；请安装 FFmpeg", retryable=False)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            executable, "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+            "-t", "61", "-f", "s16le", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            output, error = await asyncio.wait_for(process.communicate(audio), timeout=15)
+        except BaseException:
+            if process.returncode is None:
+                process.kill()
+            await process.communicate()
+            raise
+    except TimeoutError as exc:
+        raise LLMError("录音格式转换超过 15 秒，请缩短音频后重试", retryable=False) from exc
+    except OSError as exc:
+        raise LLMError("无法启动 FFmpeg，请检查服务端安装状态", retryable=False) from exc
+    if process.returncode != 0 or not output:
+        detail = error.decode("utf-8", errors="replace").strip()[:180]
+        raise LLMError(f"录音无法转换为实时 ASR 格式{f'：{detail}' if detail else ''}", retryable=False)
+    if len(output) > 16000 * 2 * 60:
+        raise LLMError("实时语音测试单次最多支持 60 秒音频", retryable=False)
+    return output
+
+
 def _asr_error_detail(value: Any, provider: dict[str, Any]) -> str:
     if isinstance(value, dict):
         error = value.get("error") or value
@@ -1344,6 +1395,109 @@ def _asr_error_detail(value: Any, provider: dict[str, Any]) -> str:
             message = message.replace(secret, "[redacted]")
     message = re.sub(r"data:audio/[^\s\"']+", "[audio]", message)
     return message[:240]
+
+
+async def _transcribe_realtime(
+    *, audio: bytes, model: dict[str, Any], provider: dict[str, Any],
+    settings: dict[str, str], language: str, allow_empty: bool,
+) -> dict[str, Any]:
+    try:
+        from websockets.asyncio.client import connect
+        from websockets.exceptions import InvalidStatus, WebSocketException
+    except ImportError as exc:
+        raise LLMError("实时语音适配依赖 websockets 未安装，请重新安装项目依赖", retryable=False) from exc
+
+    pcm = await _prepare_realtime_pcm(audio)
+    parsed = urlsplit(settings["endpoint"])
+    url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode({"model": str(model["model_id"])}), ""))
+    headers = request_headers(provider)
+    headers["OpenAI-Beta"] = "realtime=v1"
+    try:
+        timeout = min(max(float(provider.get("timeout_seconds") or 60), 3), 180)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise LLMError("语音供应商超时配置必须是有效数字", retryable=False) from exc
+    transcript = ""
+    try:
+        async with asyncio.timeout(timeout):
+            async with connect(
+                url,
+                additional_headers=headers,
+                open_timeout=min(10.0, timeout),
+                close_timeout=5,
+                max_size=1024 * 1024,
+                proxy=None,
+            ) as websocket:
+                await websocket.send(json.dumps({
+                    "event_id": "webagent-session-update",
+                    "type": "session.update",
+                    "session": {
+                        "modalities": ["text"],
+                        "input_audio_format": "pcm",
+                        "sample_rate": 16000,
+                        "turn_detection": None,
+                        **({"input_audio_transcription": {"language": language}} if language else {}),
+                    },
+                }))
+                async with asyncio.timeout(min(10.0, timeout)):
+                    while True:
+                        event = json.loads(await websocket.recv())
+                        if event.get("type") == "error" or event.get("error"):
+                            raise LLMError(_asr_error_detail(event, provider), retryable=False)
+                        if event.get("type") == "session.updated":
+                            break
+                for offset in range(0, len(pcm), 3200):
+                    await websocket.send(json.dumps({
+                        "event_id": f"webagent-audio-{offset}",
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(pcm[offset:offset + 3200]).decode("ascii"),
+                    }))
+                await websocket.send(json.dumps({"event_id": "webagent-audio-commit", "type": "input_audio_buffer.commit"}))
+                await websocket.send(json.dumps({"event_id": "webagent-session-finish", "type": "session.finish"}))
+                while True:
+                    event = json.loads(await websocket.recv())
+                    if event.get("type") == "error" or event.get("error"):
+                        raise LLMError(_asr_error_detail(event, provider), retryable=False)
+                    if event.get("type") == "conversation.item.input_audio_transcription.completed":
+                        transcript = str(event.get("transcript") or "").strip()
+                    if event.get("type") == "session.finished":
+                        break
+    except LLMError:
+        raise
+    except InvalidStatus as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in {401, 403}:
+            message = "API Key 无效、地域不匹配或未开通实时 ASR 模型权限"
+        elif status == 404:
+            message = "实时 ASR WebSocket 地址或 Workspace ID 不正确"
+        elif status == 400:
+            message = "模型 ID 或实时 ASR 请求参数不受此端点支持"
+        else:
+            message = "请检查实时 ASR 端点、模型权限和供应商状态"
+        raise LLMError(
+            f"实时语音 WebSocket 握手失败（HTTP {status or '未知'}）：{message}",
+            status_code=status,
+            retryable=status in RETRYABLE_STATUSES,
+        ) from exc
+    except TimeoutError as exc:
+        raise LLMError(f"实时语音识别超时（{timeout:.0f}s），请检查音频长度或供应商响应", retryable=True) from exc
+    except WebSocketException as exc:
+        raise LLMError(
+            _asr_error_detail({"message": f"实时语音 WebSocket 连接失败：{str(exc)[:200]}"}, provider),
+            retryable=True,
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise LLMError(
+            _asr_error_detail({"message": f"实时语音连接或响应异常：{str(exc)[:200]}"}, provider),
+            retryable=True,
+        ) from exc
+    if not transcript and not allow_empty:
+        raise LLMError("实时语音识别没有返回文本，请确认录音包含清晰人声", retryable=False)
+    return {
+        "text": transcript,
+        "model": model["model_id"],
+        "provider": provider["name"],
+        "protocol": "realtime",
+    }
 
 
 async def transcribe_audio(
@@ -1369,9 +1523,13 @@ async def transcribe_audio(
         raise LLMError(str(exc), retryable=False) from exc
     protocol = settings["protocol"]
     if protocol == "realtime":
-        raise LLMError(
-            f"模型「{model['model_id']}」使用 WebSocket 实时语音协议，不能用作当前录音文件转写；请选择文件 ASR 模型，或由管理员配置供应商明确支持的 HTTP 语音协议",
-            retryable=False,
+        return await _transcribe_realtime(
+            audio=audio,
+            model=model,
+            provider=provider,
+            settings=settings,
+            language=language,
+            allow_empty=allow_empty,
         )
     timeout = min(max(float(provider.get("timeout_seconds") or 60), 3), 180)
     headers = request_headers(provider)

@@ -89,7 +89,7 @@ export function AdminModels() {
 
 模型列表不在打开页面时自动拉取供应商目录；只有管理员点击后才访问 `/models` 或 models.dev。可手输 ID，读取有 12 秒超时和取消按钮。12 个品牌模板不代表已适配所有厂商原生协议，边界见 [模型接入手册](../docs/MODELS.md)。
 
-语音页独立设置 STT 和 TTS 默认绑定；支持上传 / 录制测试音频和 TTS 合成试听。`POST /api/agent/audio/speech` 返回音频二进制，业务界面可用 Blob URL 接入播放；当前聊天页未自动朗读回答。实时 WebSocket 语音仍预留。
+语音页独立设置 STT 和 TTS 默认绑定；支持上传 / 录制测试音频和 TTS 合成试听。`POST /api/agent/audio/speech` 返回音频二进制，业务界面可用 Blob URL 接入播放；当前聊天页未自动朗读回答。实时 STT 上传录音后由服务端转 PCM，并通过 WebSocket 与供应商实时协议通信。
 
 ## 发布记录接入
 
@@ -205,7 +205,7 @@ App 从 `/api/agent/models` 读取服务端归一化的 `supports_reasoning`、`
 }
 ```
 
-协议为 `auto | transcriptions | chat_audio | dashscope`。`endpoint` 可空，或填写供应商 URL/相对路径。文件识别与 WebSocket 实时 ASR 是两种能力，实时模型不能直接作为浏览器录音文件转写模型。私有 `_asr` 参数由后端消费，不能当作普通对话参数发给模型。
+协议为 `auto | transcriptions | chat_audio | dashscope | realtime`。`endpoint` 可空，或填写供应商 URL/相对路径。实时模型可用上传/录制音频测试：服务端将音频规范化为 PCM 后经 WebSocket 发送；私有 `_asr` 参数由后端消费，不能当作普通对话参数发给模型。
 
 ## 流式聊天和上下文
 

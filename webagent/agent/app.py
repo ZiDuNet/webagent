@@ -215,6 +215,10 @@ class DynamicToolTestBody(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
+class ModelTestBody(BaseModel):
+    text: str | None = Field(default=None, max_length=4000)
+
+
 class TranscribeBody(BaseModel):
     audio_data_url: str = Field(min_length=32, max_length=20_000_000)
     language: str | None = Field(default=None, max_length=20)
@@ -652,10 +656,7 @@ def _asr_status(config: dict[str, Any]) -> dict[str, Any]:
         try:
             protocol = transcription_config(model, provider)["protocol"]
             result["protocol"] = protocol
-            if protocol == "realtime":
-                result["reason"] = "所选模型使用 WebSocket 实时语音协议，不能用于当前录音文件转写"
-            else:
-                result.update(configured=True, reason="")
+            result.update(configured=True, reason="")
         except ProviderError as exc:
             result["reason"] = str(exc)
     return result
@@ -1643,8 +1644,8 @@ async def update_config(
     if body.asr_model_id is not None:
         if body.asr_model_id:
             target = db.get_model(body.asr_model_id)
-            if not target or target.get("model_kind") == "asr_realtime" or not target.get("supports_transcription"):
-                raise AgentError("默认 STT 必须是支持录音文件识别的模型", 422)
+            if not target or target.get("model_kind") not in {"asr", "asr_realtime"} or not target.get("supports_transcription"):
+                raise AgentError("默认 STT 必须是支持语音识别的模型", 422)
         values["asr_model_id"] = str(body.asr_model_id) if body.asr_model_id else ""
     if body.tts_model_id is not None:
         if body.tts_model_id:
@@ -2149,6 +2150,7 @@ async def admin_update_model(
 async def admin_test_model(
     model_row_id: int,
     request: Request,
+    body: ModelTestBody | None = None,
     x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ) -> dict[str, Any]:
     _verify_internal(x_internal_token)
@@ -2159,7 +2161,12 @@ async def admin_test_model(
     provider = db.get_provider(model["provider_id"])
     if not provider:
         raise AgentError("模型没有关联供应商", 400)
-    result = await test_llm(model, provider, {**runtime_config(), "demo_mode": False})
+    result = await test_llm(
+        model,
+        provider,
+        {**runtime_config(), "demo_mode": False},
+        tts_test_text=body.text if body else None,
+    )
     db.log_audit(
         username=user["username"],
         action="model.test",

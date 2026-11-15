@@ -86,7 +86,7 @@ done
 ## 已知边界
 
 - 原生配置管理台和 React 聊天组件并存；React 不是整套后台的完全重写。移动验收是响应式 Web，不是微信原生小程序真机认证。
-- 已适配 STT 文件转写、OpenAI / DashScope HTTP TTS，未实现 WebSocket 实时语音或聊天自动朗读；各品牌模板没有逐家付费认证，最终按目标供应商实际路由验收。
+- 已适配 STT 文件转写与实时 WebSocket ASR、OpenAI / DashScope HTTP TTS；各品牌模板没有逐家付费认证，最终按目标供应商实际路由和短音频验收。
 - MCP 为远程 Streamable HTTP 配置入口；没有后台管理任意 stdio/SSE 服务器的完整控制面。原生 Tool、HTTP 连接器与 PagePilot REST 走各自适配路径。
 - Agent/SSE 运行锁和重放缓存仍在单进程内，保持单 worker；服务重启不恢复正在运行的任务。持久化审批不等于持久化任务调度。
 - 长期记忆当前手动维护；自动提取、租户知识库、任意脚本沙箱等不属于此次落地范围。第三方知识库可通过受控工具扩展。

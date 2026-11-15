@@ -137,6 +137,21 @@ class ModelSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(test.call_args.args[2]["demo_mode"])
 
+    async def test_admin_tts_test_uses_supplied_text_and_returns_standard_result(self) -> None:
+        test = AsyncMock(return_value={"ok": True, "kind": "tts", "protocol": "openai", "latency_ms": 12})
+        with patch.object(agent_app, "test_llm", test):
+            response = await self.request("POST", f"/api/admin/models/{self.tts['id']}/test", {"text": "请读出这句话。"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["protocol"], "openai")
+        self.assertEqual(test.call_args.kwargs["tts_test_text"], "请读出这句话。")
+
+    async def test_tts_model_test_synthesizes_the_supplied_text(self) -> None:
+        generated = {"audio": b"ID3" + bytes(32), "mime_type": "audio/mpeg", "response_format": "mp3", "protocol": "openai", "usage": {}}
+        with patch.object(speech, "synthesize_speech", AsyncMock(return_value=generated)) as synthesize:
+            result = await llm.test_llm(self.tts, db.get_provider(self.provider["id"]), {**llm.runtime_config(), "demo_mode": False}, tts_test_text="请读出这句话。")
+        self.assertTrue(result["ok"])
+        self.assertEqual(synthesize.call_args.args[0], "请读出这句话。")
+
     async def test_chat_test_requires_reply_and_masks_upstream_credentials(self) -> None:
         with patch.object(llm, "chat_completion", AsyncMock(return_value={"content": "", "usage": {"total_tokens": 5}})):
             result = await llm.test_llm(self.chat, db.get_provider(self.provider["id"]), {"demo_mode": False})

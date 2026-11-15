@@ -33,8 +33,8 @@ export function ModelTestDialog({ baseUrl, model, provider, onClose }: ModelTest
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordTimerRef = useRef<number | null>(null);
   const aliveRef = useRef(true);
-  const isAsr = model.model_kind === "asr";
-  const isRealtime = model.model_kind === "asr_realtime";
+  const isRealtime = model.model_kind === "asr_realtime" || (model.model_kind === "asr" && /realtime|real-time/i.test(model.model_id));
+  const isAsr = model.model_kind === "asr" || model.model_kind === "asr_realtime";
 
   useEffect(() => {
     aliveRef.current = true;
@@ -98,7 +98,6 @@ export function ModelTestDialog({ baseUrl, model, provider, onClose }: ModelTest
 
   const test = async () => {
     if (testing) return;
-    if (isRealtime) return;
     if (isAsr && !audio) { setError("请先录音或上传实际音频，测试结果不会修改默认模型绑定。"); return; }
     setTesting(true);
     setError("");
@@ -115,14 +114,8 @@ export function ModelTestDialog({ baseUrl, model, provider, onClose }: ModelTest
         const response = await modelsRequest<{ text: string; protocol: string }>(baseUrl, `/admin/models/${model.id}/transcribe`, { method: "POST", signal: controller.signal, body: JSON.stringify({ audio_data_url: dataUrl }) }, timeout);
         if (!controller.signal.aborted) setResult({ ok: true, text: response.text, message: response.text ? "音频识别完成" : "接口返回空文本，请检查音频是否包含人声。", protocol: response.protocol });
       } else if (model.model_kind === "tts") {
-        const speech = await fetch(`${baseUrl.replace(/\/$/, "")}/audio/speech`, { method: "POST", signal: controller.signal, credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: speechText, model_row_id: model.id }) });
-        if (!speech.ok) {
-          const detail = await speech.json().catch(() => ({})) as { detail?: string };
-          throw new Error(detail.detail || `语音合成失败（HTTP ${speech.status}）`);
-        }
-        const blob = await speech.blob();
-        const dataUrl = await readAudio(blob);
-        if (!controller.signal.aborted) setResult({ ok: true, message: blob.type.includes("pcm") ? "已生成原始 PCM 音频，请下载后使用支持的播放器或解码工具。" : "语音已生成，可在下方试听或下载。", audio: { data_url: dataUrl, mime_type: blob.type } });
+        const response = await modelsRequest<ModelTestResult>(baseUrl, `/admin/models/${model.id}/test`, { method: "POST", signal: controller.signal, body: JSON.stringify({ text: speechText }) }, timeout);
+        if (!controller.signal.aborted) setResult(response);
       } else {
         const response = await modelsRequest<ModelTestResult>(baseUrl, `/admin/models/${model.id}/test`, { method: "POST", signal: controller.signal }, timeout);
         if (!controller.signal.aborted) setResult(response);
@@ -146,12 +139,12 @@ export function ModelTestDialog({ baseUrl, model, provider, onClose }: ModelTest
   const asrOptions = model.extra_params?._asr as Record<string, unknown> | undefined;
   const speechVoice = String(ttsOptions?.voice || (ttsOptions?.protocol === "dashscope" ? nativeAudioTts ? "longanhuan_v3.1" : "Cherry" : "alloy"));
 
-  return <Modal open title={<span className="ms-modal-title"><FlaskConical size={18} />测试模型</span>} onCancel={onClose} width={620} className="ms-modal ms-test-modal" footer={<><Button onClick={onClose}>关闭</Button>{testing ? <Button icon={<CircleStop size={15} />} onClick={stop}>取消等待</Button> : <Button type="primary" icon={<FlaskConical size={15} />} disabled={isRealtime || recording || requestingMic || (model.model_kind === "tts" && !speechText.trim())} onClick={() => void test()}>开始真实测试</Button>}</>}>
+  return <Modal open title={<span className="ms-modal-title"><FlaskConical size={18} />测试模型</span>} onCancel={onClose} width={620} className="ms-modal ms-test-modal" footer={<><Button onClick={onClose}>关闭</Button>{testing ? <Button icon={<CircleStop size={15} />} onClick={stop}>取消等待</Button> : <Button type="primary" icon={<FlaskConical size={15} />} disabled={recording || requestingMic || (model.model_kind === "tts" && !speechText.trim())} onClick={() => void test()}>开始真实测试</Button>}</>}>
     <div className="ms-test-target"><strong>{model.name}</strong><code>{model.model_id}</code><span>{provider?.name} · {provider?.base_url}</span></div>
     {isAsr && <div className="ms-test-parameters"><Tag>语言 {String(asrOptions?.language || "zh")}</Tag><Tag>协议 {String(asrOptions?.protocol || "auto")}</Tag></div>}
     {model.model_kind === "tts" && <div className="ms-test-parameters"><Tag>{String(ttsOptions?.protocol || "openai")}</Tag><Tag>音色 {speechVoice}</Tag><Tag>{outputFormat.toUpperCase()}</Tag><Tag>语速 {String(ttsOptions?.speed || 1)}</Tag></div>}
-    {isRealtime ? <Alert type="warning" showIcon title="当前尚未实现 WebSocket 实时语音测试。请使用 STT 文件识别模型；不能用静音文件假装验证实时协议。" /> : isAsr ? <>
-      <p className="ms-dialog-intro">上传或录制一段包含人声的音频，直接测试这个模型，不需要设为默认。</p>
+    {isAsr ? <>
+      <p className="ms-dialog-intro">{isRealtime ? "该模型使用 WebSocket 实时协议。上传或录制一段包含人声的音频，服务端会转换为 16 kHz PCM 后按实时协议测试。" : "上传或录制一段包含人声的音频，直接测试这个模型，不需要设为默认。"}</p>
       <Space wrap><Button icon={recording ? <Square size={14} /> : <Mic size={15} />} danger={recording} disabled={testing} loading={requestingMic} onClick={() => void toggleRecording()}>{recording ? "停止录音" : "录制测试音频"}</Button><Upload showUploadList={false} accept="audio/*,.wav,.mp3,.m4a,.webm,.ogg,.flac" beforeUpload={(file) => { selectAudio(file, file.name); return false; }} disabled={testing || recording || requestingMic}><Button icon={<UploadIcon size={14} />}>上传音频</Button></Upload></Space>
       {recording && <p className="ms-recording" role="status"><span className="ms-status-dot is-on" />正在录音，最长 60 秒…</p>}
       {audio && <div className="ms-test-audio"><span>{audio.name}</span><audio controls src={audioUrl} /></div>}

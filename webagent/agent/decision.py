@@ -30,8 +30,25 @@ def connection_config(model: dict[str, Any], provider: dict[str, Any]) -> dict[s
         raise ProviderError("决策协议仅支持 chat_completions 或 decisions")
     base = validate_base_url(provider["base_url"])
     endpoint = str(options.get("endpoint") or "").strip()
+    parsed_base = urlparse(base)
+    model_id = str(model.get("model_id") or "").strip().lower()
+    aliyun_systemone = (
+        model_id == "decision-model-preview"
+        and parsed_base.hostname is not None
+        and parsed_base.hostname.lower().endswith("aliyuncs.com")
+        and parsed_base.path.rstrip("/").endswith("/compatible-mode/v1")
+    )
+    if aliyun_systemone:
+        protocol = "decisions"
+        if not endpoint or endpoint.rstrip("/") == "/systemone":
+            endpoint = f"{base}/systemone"
     if not endpoint:
-        endpoint = f"{base}/chat/completions" if protocol == "chat_completions" else base
+        if protocol == "chat_completions":
+            endpoint = f"{base}/chat/completions"
+        elif (parsed_base.hostname or "").lower() == "openrouter.ai":
+            endpoint = f"{parsed_base.scheme}://{parsed_base.netloc}/api/alpha/decisions"
+        else:
+            raise ProviderError("原生 Decisions 协议需要填写决策端点；阿里云百炼 SystemOne 会自动使用 /systemone")
     elif endpoint.startswith("/") and not endpoint.startswith("//"):
         endpoint = urljoin(f"{base}/", endpoint)
     endpoint = validate_base_url(endpoint)

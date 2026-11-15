@@ -422,11 +422,11 @@ attempt 1 -> 失败 -> 指数退避 + jitter -> attempt 2 -> ... -> 上限
 | `transcriptions` | multipart 文件上传，读取顶层 `text` |
 | `chat_audio` | `messages[].content[].input_audio`，读取 Chat Completions 结果；标准为 Base64+格式，Qwen 默认 data URI |
 | `dashscope` | 原生多模态端点；兼容 Qwen3-ASR 与 Qwen-Audio-3.x 的不同音频结构及输出 |
-| 自动识别的 `realtime` | WebSocket 专用；当前录音文件上传入口明确拒绝 |
+| 自动识别的 `realtime` | WebSocket 专用；录音文件先规范化为 16 kHz 单声道 PCM，再以实时事件协议发送 |
 
 `_asr.endpoint` 可覆盖同源路径，不能把供应商 Key 转发到其他域名；跨域服务应建立独立供应商。Chat Audio/原生适配在需要时使用 FFmpeg 将浏览器 WebM/Opus、OGG、MP4 转为单声道 16 kHz WAV。转换失败、缺少 FFmpeg、超时、网关拒绝和无文本结果有不同错误；静音连接测试可接受合法空转写，但不能把缺失结果字段的 JSON 当成功。
 
-模型列表只证明供应商声明了 ID，不证明对应路由已开放。本轮真实静音测试中，配置的 `qwen-audio-3.1-realtime-plus` 文件转写为 404；同网关 `qwen-audio-3.0-asr-flash` 的原生请求被拒绝为 `model ... is not allowed on this route`，兼容 Chat Audio 也为 400。当前不能宣称这套真实语音配置已可用；隔离 Mock 回归证明适配构建和解析符合协议，供应商开通情况必须独立验证。
+模型列表只证明供应商声明了 ID，不证明对应路由已开放。历史测试曾在具体网关遇到实时模型 HTTP 404、原生路由拒绝模型和 Chat Audio 400；因此隔离 Mock 回归只能证明适配构建和解析符合协议，不能代替目标供应商真实短音频验收。
 
 推理控制通过 `providers.reasoning_config` 归一化：DeepSeek 混合模型用 `thinking.type=disabled/enabled`，Qwen 混合模型用 `enable_thinking=false/true`，标准模型在明确支持时用 `reasoning_effort=none`。用户的显式选择在合并默认额外参数后应用，防止模型默认开启覆盖用户关闭。固定推理模型不暴露虚假关闭选项，不支持的选择返回能力错误。`_reasoning`、`_asr` 等框架元数据不会发送给模型；供应商非标准参数通过 SDK 的 `extra_body` 发送。
 

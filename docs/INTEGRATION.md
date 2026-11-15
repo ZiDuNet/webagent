@@ -448,18 +448,18 @@ React 的 `answerContent.ts` 按流式累积内容提取 HTML；`ConversationRun
 }
 ```
 
-`protocol` 支持 `auto`、`transcriptions`、`chat_audio`、`dashscope`；`endpoint` 和 `data_format` 可省略。上例端点仅演示供应商相对路径，使用网关时应按该网关实际路由填写，不能照搬到另一家。端点必须与供应商 Base URL 同源，跨域服务另建供应商。
+`protocol` 支持 `auto`、`transcriptions`、`chat_audio`、`dashscope`、`realtime`；`endpoint` 和 `data_format` 可省略。上例端点仅演示供应商相对路径，使用网关时应按该网关实际路由填写，不能照搬到另一家。端点必须与供应商 Base URL 同源，跨域服务另建供应商。
 
 | 协议 | 文件与请求结构 |
 |---|---|
 | `transcriptions` | multipart 文件到 Base URL + `/audio/transcriptions`；典型为 Whisper/OpenAI 转写 |
 | `chat_audio` | Chat Completions `input_audio`；标准为 Base64+`format`，Qwen 默认 `data:audio/...;base64,...` |
 | `dashscope` | 原生 `/api/v1/services/aigc/multimodal-generation/generation`；按模型家族选择 Qwen3-ASR 的 `audio` 或 Qwen-Audio-3.x 的 `input_audio` |
-| 自动识别的实时模型 | `*-realtime*` 使用 WebSocket，当前录音文件入口明确报错，不改走文件转写假装可用 |
+| `realtime` | `wss://{provider-host}/api-ws/v1/realtime?model={model_id}`；上传录音转换为 16 kHz 单声道 PCM 后分片发送 |
 
-Chat Audio/原生适配在需要时调用系统 FFmpeg 将 WebM/Opus、OGG、MP4 转成单声道 16 kHz WAV。部署语音功能时安装 FFmpeg，确保它在 Agent 服务进程的 `PATH`；缺少转换器时返回错误，不会默默丢掉录音。音频只用于本次转写，不应把供应商凭证或私有聊天内容当测试样本。
+Chat Audio/原生/实时适配在需要时调用系统 FFmpeg 将 WebM/Opus、OGG、MP4 转成单声道 16 kHz WAV。部署语音功能时安装 FFmpeg，确保它在 Agent 服务进程的 `PATH`；缺少转换器时返回错误，不会默默丢掉录音。音频只用于本次转写，不应把供应商凭证或私有聊天内容当测试样本。
 
-后台 STT 测试支持实际录音或上传音频，调用 `POST /api/agent/admin/models/{id}/transcribe`，不修改默认绑定。通用 `/models/{id}/test` API 仍保留 1 秒静音连通探测，不能代替真实人声识别质量验收。缺少识别字段、401/404/400 或实时协议不匹配不能报成功。先前真实网关验证曾出现实时模型文件端点 404、原生路由不允许和 Chat Audio 400，说明能发现模型名并不意味着网关开放该协议；最终以目标供应商和真实短录音验收为准。
+后台 STT 测试支持实际录音或上传音频，调用 `POST /api/agent/admin/models/{id}/transcribe`，不修改默认绑定。通用 `/models/{id}/test` API 仍保留 1 秒静音连通探测，不能代替真实人声识别质量验收。缺少识别字段、401/404/400 或实时协议不匹配不能报成功。能发现模型名不意味着网关开放对应协议；最终以目标供应商和真实短录音验收为准。
 
 协议参考：[OpenAI Chat Audio](https://developers.openai.com/api/docs/guides/audio-chat-completions)、[Qwen3-ASR](https://help.aliyun.com/zh/model-studio/recording-file-recognition-qwen)、[Qwen-Audio 原生 ASR](https://help.aliyun.com/en/model-studio/qwen-audio-asr-http-api)、[Qwen 实时语音](https://help.aliyun.com/en/model-studio/qwen-audio-realtime-user-guides)。
 
