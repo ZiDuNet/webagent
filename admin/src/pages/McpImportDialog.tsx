@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Alert, Input, Modal } from "antd";
 import { apiErrorMessage, controlRequest } from "../api/pagepilot";
 
-const example = { mcpServers: { "业务连接器": { type: "streamable-http", url: "https://business.example/mcp", headers: {}, tool_policies: { search: { permission: "device:read", risk: "read" } } } } };
+const example = { mcpServers: { "业务连接器": { type: "streamable-http", url: "https://business.example/mcp", headers: {}, tool_policies: { search: { permission: "record:read", risk: "read" } } } } };
 
 export default function McpImportDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
   const [value, setValue] = useState(JSON.stringify(example, null, 2));

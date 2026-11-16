@@ -7,7 +7,6 @@ import { z } from "zod";
 import { config, envFlag, rootDir } from "./config.js";
 import { Store } from "./store.js";
 import { Auth } from "./auth.js";
-import { DemoBusiness } from "./business.js";
 import { ToolRegistry } from "./tools.js";
 import { Providers } from "./providers.js";
 import { Decision } from "./decision.js";
@@ -22,13 +21,12 @@ import { chatRoutes } from "./chat-routes.js";
 import { voiceRoutes } from "./voice.js";
 import { AppError, type IdentityAdapter, type ToolSpec } from "./types.js";
 
-export interface AppOptions { store?: Store; identityAdapter?: IdentityAdapter; tools?: ToolSpec[]; demoBusiness?: boolean; staticUi?: boolean; serveAdmin?: boolean; serveChat?: boolean; logger?: boolean }
+export interface AppOptions { store?: Store; identityAdapter?: IdentityAdapter; tools?: ToolSpec[]; staticUi?: boolean; serveAdmin?: boolean; serveChat?: boolean; logger?: boolean; warmCatalogue?: boolean }
 export async function createWebAgent(options: AppOptions = {}) {
   const app = Fastify({ logger: options.logger ?? true, bodyLimit: 19000000, requestTimeout: 120000, logController: new LogController({ disableRequestLogging: true }) });
-  const demoBusiness = options.demoBusiness !== false && !options.identityAdapter;
-  const store = options.store || new Store(); await store.initialize(demoBusiness);
+  const store = options.store || new Store(); await store.initialize();
   const skills = new SkillLibrary(store.dataDir);
-  skills.initialize(store, { demoBusiness });
+  skills.initialize(store);
   await app.register(cookie);
   app.addHook("onRequest", async (request, reply) => {
     reply.header("X-Content-Type-Options", "nosniff").header("Referrer-Policy", "strict-origin-when-cross-origin");
@@ -53,9 +51,8 @@ export async function createWebAgent(options: AppOptions = {}) {
   const registry = new ToolRegistry(store, auth);
   const providers = new Providers(store); const decision = new Decision(store, providers); const speech = new Speech(providers); const publications = new Publications(store);
   // Warm the models.dev cache in the background; never block server startup on the network.
-  void providers.ensureCatalogue(0).catch(() => {});
-  if (demoBusiness) { const business = new DemoBusiness(store, auth); business.routes(app); for (const tool of business.tools()) registry.register(tool); }
-  else app.get("/api/me", async (request) => ({ user: await auth.user(request) }));
+  if (options.warmCatalogue ?? envFlag("WEBAGENT_MODELSDEV_WARMUP", true)) void providers.ensureCatalogue(0).catch(() => {});
+  app.get("/api/me", async (request) => ({ user: await auth.user(request) }));
   for (const tool of options.tools || []) registry.register(tool);
   for (const tool of publications.tools()) registry.register(tool);
   const runtime = new PiRuntime(store, auth, registry, providers, decision, skills); const runs = new Runs(store, auth, runtime); const core = new CoreMaintenance();
@@ -77,7 +74,7 @@ export async function createWebAgent(options: AppOptions = {}) {
     }
   }
   const purge = setInterval(() => store.purge(), 3600000); purge.unref();
-  app.addHook("preClose", async () => { clearInterval(purge); await runs.shutdown(); await runtime.shutdown(); });
+  app.addHook("preClose", async () => { clearInterval(purge); providers.close(); await runs.shutdown(); await runtime.shutdown(); });
   app.addHook("onClose", async () => { if (!options.store) store.close(); });
   return { app, ...services };
 }

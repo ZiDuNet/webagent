@@ -12,19 +12,22 @@ import type { Row } from "../src/types.js";
 
 test("STT and TTS select their actual protocols and reject cross-origin endpoints", async () => {
   const upstream = await mockServer((body, request, response) => {
-    if (request.url === "/v1/audio/transcriptions") { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify({ text: "今天的设备报告" })); return true; }
+    if (request.url === "/v1/audio/transcriptions") { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify({ text: "今天的业务报告" })); return true; }
     if (request.url === "/v1/audio/speech") { assert.equal(body.input, "你好"); response.writeHead(200, { "Content-Type": "audio/mpeg" }); response.end(Buffer.from("ID3-test-audio")); return true; }
     if (request.url === "/api/v1/services/aigc/multimodal-generation/generation") { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify({ output: { audio: { data: Buffer.from("RIFF-test-wav").toString("base64") } } })); return true; }
     return false;
   });
   const service = await fixture(upstream.baseUrl);
   try {
-    const stt = service.store.insert("models", { name: "STT", provider_id: service.model!.provider_id, model_id: "whisper-1", model_kind: "asr" });
-    const tts = service.store.insert("models", { name: "TTS", provider_id: service.model!.provider_id, model_id: "tts-1", model_kind: "tts" });
+    const stt = service.store.config.insertModel({
+       name: "STT", provider_id: service.model!.provider_id, model_id: "whisper-1", model_kind: "asr" });
+    const tts = service.store.config.insertModel({
+       name: "TTS", provider_id: service.model!.provider_id, model_id: "tts-1", model_kind: "tts" });
     const transcript = await service.speech.transcribe(stt, `data:audio/wav;base64,${Buffer.from("RIFF-file").toString("base64")}`);
-    assert.equal(transcript.text, "今天的设备报告"); assert.equal(transcript.protocol, "transcriptions");
+    assert.equal(transcript.text, "今天的业务报告"); assert.equal(transcript.protocol, "transcriptions");
     const audio = await service.speech.synthesize(tts, "你好"); assert.equal(audio.mime_type, "audio/mpeg"); assert.equal(audio.bytes.toString(), "ID3-test-audio");
-    const qwen = service.store.insert("models", { name: "Qwen TTS", provider_id: service.model!.provider_id, model_id: "qwen3-tts-flash", model_kind: "tts" });
+    const qwen = service.store.config.insertModel({
+       name: "Qwen TTS", provider_id: service.model!.provider_id, model_id: "qwen3-tts-flash", model_kind: "tts" });
     assert.equal((await service.speech.synthesize(qwen, "你好")).bytes.toString(), "RIFF-test-wav");
     assert.equal(asrConfig({ model_id: "qwen3-asr-flash", model_kind: "asr" }, { base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" }).protocol, "chat_audio");
     assert.equal(asrConfig({ model_id: "qwen3-asr-flash-realtime", model_kind: "asr_realtime" }, { base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" }).endpoint, "wss://dashscope.aliyuncs.com/api-ws/v1/realtime");
@@ -46,11 +49,12 @@ test("MCP uses the official HTTP transport, encrypted credentials, and explicit 
   http.listen(0, "127.0.0.1"); await once(http, "listening");
   const service = await fixture();
   try {
-    const server = service.store.insert("mcp_servers", { name: "MCP fixture", config: { url: `http://127.0.0.1:${(http.address() as { port: number }).port}/mcp`, secret: encrypt(JSON.stringify({ headers: { Authorization: "Bearer mcp-test-key" } })) } });
+    const server = service.store.saveMcpServer(undefined, { name: "MCP fixture", config: { url: `http://127.0.0.1:${(http.address() as { port: number }).port}/mcp`, secret: encrypt(JSON.stringify({ headers: { Authorization: "Bearer mcp-test-key" } })) } });
     const tools = await service.registry.discoverServer(server); assert.equal(tools[0].name, "lookup");
-    service.store.update("mcp_servers", server.id, { config: { ...server.config, cached_tools: tools } });
+    service.store.saveMcpServer(server, { config: { ...server.config, cached_tools: tools } });
     assert.equal((await service.registry.all()).some((tool) => tool.source === "mcp"), false);
-    service.store.update("mcp_servers", server.id, { config: { ...server.config, cached_tools: tools, tool_policies: { lookup: { permission: "device:read", risk: "read" } } } });
+    service.identities.user1.permissions = ["profile:read", "business:read"];
+    service.store.saveMcpServer(server, { config: { ...server.config, cached_tools: tools, tool_policies: { lookup: { permission: "business:read", risk: "read" } } } });
     const user = await service.auth.identity(service.credential());
     const allowed = await service.registry.permitted(user, service.runtime.assistant(user)); const tool = allowed.find((item) => item.source === "mcp")!;
     assert.ok(tool);

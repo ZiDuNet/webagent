@@ -8,7 +8,8 @@ import { Store } from "../src/store.js";
 
 test("legacy SQLite user_id NOT NULL tables migrate to stable owner keys", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "webagent-pi-migration-"));
-  const db = new DatabaseSync(path.join(dir, "agent.db"));
+  fs.mkdirSync(path.join(dir, "runtime"), { recursive: true });
+  const db = new DatabaseSync(path.join(dir, "runtime", "agent.db"));
   db.exec(`
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY,
@@ -52,7 +53,8 @@ test("legacy SQLite user_id NOT NULL tables migrate to stable owner keys", () =>
 
 test("legacy schema cleanup backs up the database, drops unused objects and preserves live data", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "webagent-pi-cleanup-"));
-  const db = new DatabaseSync(path.join(dir, "agent.db"));
+  fs.mkdirSync(path.join(dir, "runtime"), { recursive: true });
+  const db = new DatabaseSync(path.join(dir, "runtime", "agent.db"));
   db.exec(`
     CREATE TABLE assistants (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,22 +96,23 @@ test("legacy schema cleanup backs up the database, drops unused objects and pres
   const store = new Store(dir);
   try {
     assert.equal(store.one("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_approvals'"), undefined);
-    for (const column of ["icon", "greeting", "mode", "prefetch_tools"]) assert.ok(!store.columns("assistants").includes(column));
     for (const column of ["retry_count", "error_count"]) assert.ok(!store.columns("sessions").includes(column));
-    assert.equal(store.one("SELECT name FROM assistants WHERE id=1")!.name, "保留的助手");
+    // 配置表已导出为 JSON 并从 SQLite 移除；助手正文仍可读。
+    assert.equal(store.one("SELECT name FROM sqlite_master WHERE type='table' AND name='assistants'"), undefined);
+    assert.equal(store.assistants()[0]?.name, "保留的助手");
+    assert.equal(fs.existsSync(path.join(dir, "config", "assistants.json")), true);
+    assert.equal(fs.existsSync(path.join(dir, "config", "imported-from-sqlite.json")), true);
     assert.equal(store.one("SELECT username FROM sessions WHERE id='legacy-session'")!.username, "legacy");
-    assert.equal(store.one("SELECT value FROM settings WHERE key='demo_mode'")!.value, "0");
-    assert.equal(store.one("SELECT value FROM settings WHERE key='keep_me'")!.value, "yes");
-    for (const key of ["llm_api_key", "llm_base_url", "llm_temperature", "display_mode"]) assert.equal(store.one("SELECT value FROM settings WHERE key=?", [key]), undefined);
-    assert.ok(store.one("SELECT value FROM settings WHERE key='legacy_schema_cleanup_v1'"));
+    assert.equal(store.one("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'"), undefined);
+    assert.ok(fs.existsSync(path.join(dir, "runtime", ".legacy-schema-cleanup-v1")));
 
-    const backups = fs.readdirSync(path.join(dir, "backups")).filter((name) => name.startsWith("agent-pre-cleanup-") && name.endsWith(".db"));
-    assert.equal(backups.length, 1);
-    const backup = new DatabaseSync(path.join(dir, "backups", backups[0]));
+    const backups = fs.readdirSync(path.join(dir, "runtime", "backups"));
+    const configBackup = backups.find((name) => name.startsWith("config-before-json-") && name.endsWith(".db"));
+    assert.ok(configBackup, "配置迁移前必须留一份完整备份");
+    const backup = new DatabaseSync(path.join(dir, "runtime", "backups", configBackup));
     try {
       assert.ok(backup.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_approvals'").get());
       assert.ok((backup.prepare("PRAGMA table_info(assistants)").all() as Array<{ name: string }>).some((column) => column.name === "icon"));
-      assert.ok((backup.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).some((column) => column.name === "retry_count"));
       assert.equal((backup.prepare("SELECT value FROM settings WHERE key='llm_api_key'").get() as { value: string }).value, "old-secret");
     } finally {
       backup.close();

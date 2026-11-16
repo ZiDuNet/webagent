@@ -19,12 +19,12 @@ export class ToolRegistry {
   }
   register(tool: ToolSpec) { if (!/^[A-Za-z0-9_-]{1,64}$/.test(tool.name) || this.native.has(tool.name) || runtimeToolNames.includes(tool.name)) throw new Error(`无效、保留或重复的工具名：${tool.name}`); this.native.set(tool.name, tool); }
   setting(tool: ToolSpec) {
-    const policy = { enabled: true, visible: true, selectable: true, default_selected: true, tags: [], ...this.store.one("SELECT * FROM tool_settings WHERE name=?", [tool.name]) };
+    const policy = this.store.toolPolicy(tool.name);
     return tool.name === "ask_user" ? { ...policy, visible: false, selectable: false, default_selected: true } : policy;
   }
   localDeploymentEnabled() { return config.localTools === "admin"; }
   localToolEnabled(name: string) {
-    return this.localDeploymentEnabled() && this.store.one("SELECT enabled FROM tool_settings WHERE name=?", [name])?.enabled === true;
+    return this.localDeploymentEnabled() && this.store.rawToolPolicy(name)?.enabled === true;
   }
   localToolDefinitions(cwd: string) {
     return createPiLocalDefinitions(cwd, new Set(piLocalTools.map(({ definition }) => definition.name).filter((name) => this.localToolEnabled(name))));
@@ -34,8 +34,7 @@ export class ToolRegistry {
     const tool = (await this.catalog()).find((item) => item.name === name);
     if (!tool) throw new AppError("工具不存在", 404);
     const clean = [...new Set(tags.map((tag) => tag.trim()).filter((tag) => tag && tag.length <= 24))].slice(0, 12);
-    if (!this.store.one("SELECT name FROM tool_settings WHERE name=?", [name])) this.store.insert("tool_settings", { name, tags: clean, source: tool.source });
-    else this.store.update("tool_settings", name, { tags: clean });
+    this.store.setToolPolicy(name, { tags: clean });
     return (await this.catalog()).find((item) => item.name === name)!;
   }
   async catalog(): Promise<Row[]> {
@@ -50,16 +49,16 @@ export class ToolRegistry {
     const localOpen = this.localDeploymentEnabled();
     const localReason = localOpen ? "部署已开放本机工具；仍需在此逐项启用。没有沙箱，仅适合受信任单租户部署。" : "部署环境未开放本机工具（WEBAGENT_LOCAL_TOOLS=off）。后台可见但锁定，部署者设为 admin 后才能逐项启用。";
     const local = piLocalTools.map(({ definition, title, capability, risk }) => {
-      const saved = this.store.one("SELECT * FROM tool_settings WHERE name=?", [definition.name]);
+      const saved = this.store.rawToolPolicy(definition.name);
       const enabled = localOpen && saved?.enabled === true;
       return { name: definition.name, title, description: definition.description, input_schema: definition.parameters, source: "pi", category: "PI 官方内置", capability, risk, permission: "", tags: ["原生", "本机执行"], enabled, visible: false, selectable: false, default_selected: false, configured: localOpen, locked: !localOpen, blocked_reason: localReason, policy_editable: false };
     });
-    const codemodeSaved = this.store.one("SELECT * FROM tool_settings WHERE name='codemode'");
+    const codemodeSaved = this.store.rawToolPolicy("codemode");
     const codemode = { name: "codemode", title: "CodeMode 脚本编排", description: "PI 官方代码编排扩展。启用后模型可编写并执行受限 VM 脚本，仍属于本机执行能力。", source: "pi", category: "PI 官方扩展", capability: "code", risk: "write", permission: "", tags: ["原生", "本机执行", "脚本"], enabled: localOpen && codemodeSaved?.enabled === true, visible: false, selectable: false, default_selected: false, configured: localOpen, locked: !localOpen, blocked_reason: localReason, policy_editable: false };
     return [...local, codemode, ...entries, ...[
       { name: "tool_search", title: "BM25 工具发现", source: "pi", category: "PI 官方扩展", enabled: Boolean(this.store.settings().bm25_enabled), description: "复用 PI 官方 tool-search，仅检索本轮已授权工具；在运行设置切换 BM25，允许与决策都关闭。" },
     ].map((tool) => {
-      const saved = this.store.one("SELECT * FROM tool_settings WHERE name=?", [tool.name]);
+      const saved = this.store.rawToolPolicy(tool.name);
       return { ...tool, tags: ["内置"], enabled: tool.name === "tool_search" ? tool.enabled : saved?.enabled !== false, visible: false, selectable: false, default_selected: true, risk: "read", permission: "", input_schema: {}, configured: true, locked: false, policy_editable: false, blocked_reason: tool.name === "tool_search" ? "由运行设置中的 BM25 开关控制。" : "内部知识加载工具；可全局停用，不出现在用户工具选择器。" };
     })];
   }
@@ -80,15 +79,14 @@ export class ToolRegistry {
       values = { enabled: values.enabled };
     }
     const policy = tool.locked ? { enabled: false, visible: false, selectable: false, default_selected: false } : values;
-    if (!this.store.one("SELECT name FROM tool_settings WHERE name=?", [name])) this.store.insert("tool_settings", { name, ...policy });
-    else this.store.update("tool_settings", name, policy);
+    this.store.setToolPolicy(name, policy);
     return (await this.catalog()).find((item) => item.name === name)!;
   }
-  internalEnabled(name: "ask_user") { return this.store.one("SELECT enabled FROM tool_settings WHERE name=?", [name])?.enabled !== false; }
+  internalEnabled(name: "ask_user") { return this.store.toolPolicy(name).enabled !== false; }
   private dynamic(includeUnavailable = false): ToolSpec[] {
-    return this.store.all(`SELECT * FROM dynamic_tools${includeUnavailable ? "" : " WHERE enabled=1"}`).map((row) => ({ name: row.name, title: row.display_name || row.name, description: row.description, permission: row.permission, risk: row.risk, category: row.category, source: "http", parameters: row.input_schema, available: () => Boolean(this.store.one("SELECT enabled FROM dynamic_tools WHERE id=?", [row.id])?.enabled), execute: async (args, context) => {
-      const fresh = this.store.one("SELECT * FROM dynamic_tools WHERE id=? AND enabled=1", [row.id]);
-      if (!fresh) throw new AppError("HTTP 工具已停用", 403);
+    return this.store.httpTools().filter((row) => includeUnavailable || row.enabled !== false).map((row) => ({ name: row.name, title: row.display_name || row.name, description: row.description, permission: row.permission, risk: row.risk, category: row.category, source: "http", parameters: row.input_schema, available: () => this.store.httpTool(Number(row.id))?.enabled !== false, execute: async (args, context) => {
+      const fresh = this.store.httpTool(Number(row.id));
+      if (!fresh || fresh.enabled === false) throw new AppError("HTTP 工具已停用", 403);
       const consumed = new Set<string>();
       const rawUrl = fresh.url_template.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, key: string) => { if (!(key in args)) throw new AppError(`缺少路径参数 ${key}`, 422); consumed.add(key); return encodeURIComponent(String(args[key])); });
       const target = safeUrl(rawUrl);
@@ -135,7 +133,7 @@ export class ToolRegistry {
   async all(context?: ExecutionContext, includeUnavailable = false): Promise<ToolSpec[]> {
     const tools = [...this.native.values()].filter((tool) => includeUnavailable || !tool.available || tool.available());
     tools.push(...this.dynamic(includeUnavailable));
-    for (const server of this.store.all("SELECT * FROM mcp_servers WHERE enabled=1")) {
+    for (const server of this.store.mcpServers().filter((item) => item.enabled !== false)) {
       let entries = server.config.cached_tools || [];
       if (!entries.length) continue;
       for (const entry of entries) {
@@ -147,7 +145,8 @@ export class ToolRegistry {
         const prefix = `mcp_${server.id}_${entry.name}`.replace(/[^A-Za-z0-9_-]/g, "_");
         const name = prefix.length <= 64 ? prefix : `${prefix.slice(0, 53)}_${createHash("sha256").update(prefix).digest("hex").slice(0, 10)}`;
         tools.push({ name, title: entry.title || entry.name, description, permission: permission || "", risk: mapped.risk || metadata.risk || "write", category: server.name, source: "mcp", parameters: entry.inputSchema || { type: "object", properties: {} }, execute: async (args, execution) => {
-          const fresh = this.store.one("SELECT * FROM mcp_servers WHERE id=? AND enabled=1", [server.id]); if (!fresh) throw new AppError("MCP 连接器已停用", 403);
+          const fresh = this.store.mcpServer(Number(server.id));
+          if (!fresh || fresh.enabled === false) throw new AppError("MCP 连接器已停用", 403);
           const client = await this.connect(fresh, execution);
           try { const result = await client.callTool({ name: entry.name, arguments: args }, undefined, { signal: execution.signal, timeout: 30000 }); if (result.isError) throw new AppError(JSON.stringify(result.content).slice(0, 500), 502); return result.structuredContent || result.content; } finally { await client.close(); }
         } });
@@ -175,8 +174,10 @@ export class ToolRegistry {
     const session = this.store.one("SELECT * FROM sessions WHERE id=?", [context.sessionId]);
     if (session) {
       if (session.owner_key !== freshIdentity.owner_key) throw new AppError("会话不属于当前用户", 403);
-      const assistant = this.store.one("SELECT * FROM assistants WHERE id=? AND enabled=1", [session.assistant_id]);
-      if (!assistant || !assistant.allowed_roles.some((role: string) => role === "*" || role === freshIdentity.role) || assistant.tool_names.length && !assistant.tool_names.includes(name)) throw new AppError("助手当前已不允许使用该工具", 403);
+      const assistant = this.store.assistant(Number(session.assistant_id));
+      const roles = Array.isArray(assistant?.allowed_roles) ? assistant!.allowed_roles : ["*"];
+      const toolNames = Array.isArray(assistant?.tool_names) ? assistant!.tool_names : [];
+      if (!assistant || assistant.enabled === false || !roles.some((role: string) => role === "*" || role === freshIdentity.role) || (toolNames.length && !toolNames.includes(name))) throw new AppError("助手当前已不允许使用该工具", 403);
     }
     context.signal.throwIfAborted();
     return { tool, identity: freshIdentity };

@@ -73,21 +73,29 @@ MCP 工具必须显式映射 `permission` 或 `public: true`，未映射默认�
 
 ## 6. 存储
 
-默认根目录 `data/pi/`：
+一个数据根目录 `WEBAGENT_DATA_DIR`（默认 `data/`），按用途分子目录，不再把所有东西塞进 `data/pi/`：
 
-| 数据 | 用途 |
-| --- | --- |
-| `agent.db` | 模型、助手及其 Skill slug 范围、工具、会话归属与标题、运行、事件、记忆、用量与发布元数据；不保存聊天正文、附件或 PI entries |
-| `conversations/` | 每条会话一个 JSON：展示消息、附件 Base64、用量快照与 PI canonical entries；旧库 `messages` / `pi_state` 迁移后备份为 `.legacy-conversations.json` |
-| `skill-library/` | Skill 的唯一事实来源，每个 Skill 一个目录，包含 `SKILL.md`、文本参考文件和启停元数据 |
-| `skill-runtime/` | 按助手和 Skill 集合物化的只读运行目录，由 PI 原生渐进加载机制读取 |
-| `business.db` | 可替换的 Demo 账号 / 设备数据；嵌入模式不初始化 Demo 记录 |
-| `workspaces/` | 每会话隔离的空工作目录，不开放模型读写 |
-| `models-dev.json` | 模型元信息缓存，不含供应商 Key |
+| 路径 | 内容 | 备份 |
+| --- | --- | --- |
+| `config/` | `providers.json`、`models.json`、`assistants.json`、`settings.json`，纯 JSON，可直接编辑 | 必须 |
+| `tools/policies.json` | 工具四态策略与标签，按工具名索引 | 必须 |
+| `tools/http/<name>.json` | 管理员新增的 HTTP 连接器定义，一个工具一个文件 | 必须 |
+| `tools/mcp/<name>.json` | MCP 连接器定义；密钥字段仍是 `enc:v2:` 密文 | 必须 |
+| `tools/cache/` | MCP 发现结果缓存，可重建 | 可选 |
+| `skills/<slug>/` | Skill 唯一事实来源：`SKILL.md`、文本参考文件与启停元数据，不写入数据库 | 必须 |
+| `sessions/<id>.json` | 聊天正文、附件 Base64、用量快照与 PI canonical entries；每个会话一个文件 | 必须 |
+| `runtime/agent.db` | 运行库：会话归属 / 标题 / 统计、运行、事件、审批、问答、记忆、用量、审计、发布、管理账号与 Token | 必须 |
+| `runtime/backups/` | 配置导出前、旧结构清理前的 `VACUUM INTO` 备份 | 建议 |
+| `runtime/skill-runtime/` | 按助手与 Skill 集合物化的只读目录，派生数据 | 可重建 |
+| `workspaces/<sessionId>/` | 每会话隔离的空工作目录，不开放模型任意读写 | 否 |
+| `cache/models-dev.json` | models.dev 元数据缓存，不含 Key | 可重建 |
+| `legacy-backup/` | 旧版 `agent.db`、`business.db`、`models_dev_cache.json` 与 `pi/` 归档 | 迁移后按需保留 |
 
-PI canonical entries 与展示消息一起保存在会话 JSON 中，不在 SQLite。展示消息与 PI 状态在同一个文件内分层保存：编辑、删除会失效 PI 上下文，分叉根据选定消息重建，不复制待执行审批。删除会话或保留期清理会同时删除对应 JSON；SQLite 只级联删除运行、审批和事件等元数据。
+配置类数据（供应商、模型、助手、全局设置、工具、MCP）以 JSON 为唯一事实来源，SQLite 只保存运行态。启动时若发现旧版配置表，会先 `VACUUM INTO` 备份到 `runtime/backups/config-before-json-*.db`，导出 JSON 后再删除表；`data/pi/*` 会被逐文件合并到新目录，旧 Python 数据移动到 `legacy-backup/`，不覆盖任何同名文件。
 
-SQLite WAL 是单节点的简化实现。长会话的文本、图片 Base64、PI 条目会写入会话 JSON，事件仍写入 SQLite；两者都会增加磁盘占用。默认会话保留 30 天，SSE 事件 1 天，完成任务的短期内存约 1 小时。生产需同时监控数据库与会话目录，备份整个 `data/pi/`，未来可替换对象存储、PostgreSQL 与消息队列。
+PI canonical entries 与展示消息一起保存在会话 JSON 中，不在 SQLite。编辑、删除会失效 PI 上下文，分叉根据选定消息重建，不复制待执行审批。删除会话或保留期清理会同时删除对应 JSON；SQLite 只级联删除运行、审批和事件等元数据。
+
+SQLite WAL 是单节点的简化实现。长会话的文本、图片 Base64、PI 条目会写入会话 JSON，事件仍写入 SQLite；两者都会增加磁盘占用。默认会话保留 30 天，SSE 事件 1 天。生产需同时监控数据库与会话目录，并整体备份 `data/`。
 
 ## 7. 安全边界
 

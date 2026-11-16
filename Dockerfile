@@ -22,7 +22,7 @@ ENV NODE_ENV=production \
     HOME=/tmp \
     WEBAGENT_BIND_HOST=0.0.0.0 \
     WEBAGENT_PORT=8000 \
-    WEBAGENT_PI_DATA_DIR=/app/data
+    WEBAGENT_DATA_DIR=/app/data
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*

@@ -52,7 +52,7 @@ test("PI shell, files and CodeMode stay disabled despite API requests or stale s
     for (const name of [...piLocalToolNames, "codemode"]) {
       const response = await service.app.inject({ method: "PUT", url: `/api/control/admin/tools/${name}`, headers, payload: { enabled: true } });
       assert.equal(response.statusCode, 403, name);
-      service.store.insert("tool_settings", { name, enabled: true, visible: true, default_selected: true });
+      service.store.setToolPolicy(name, { enabled: true, visible: true, default_selected: true });
     }
     const catalog = await service.registry.catalog();
     for (const name of [...piLocalToolNames, "codemode"]) assert.equal(catalog.find((tool) => tool.name === name)?.enabled, false);
@@ -109,11 +109,10 @@ test("native Skill read stays inside the materialized directory and reference-fi
   });
   const service = await fixture(upstream.baseUrl);
   try {
-    const skill = service.skills.get("device-inspection")!;
-    service.skills.save({ ...skill, content: "secret-knowledge-must-not-be-read", files: { "references/status.md": "reference-content-marker" } });
+    service.skills.save({ slug: "record-inspection", name: "记录巡检规范", description: "业务记录状态判断规范", content: "secret-knowledge-must-not-be-read", files: { "references/status.md": "reference-content-marker" } });
     assert.equal(service.store.one("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='skills'")!.n, 0);
     const latestRoot = () => {
-      const root = path.join(service.dir, "skill-runtime");
+      const root = path.join(service.dir, "runtime", "skill-runtime");
       const names = fs.readdirSync(root).filter((name) => name.startsWith("assistant-"));
       assert.ok(names.length);
       return path.join(root, names.sort((a, b) => fs.statSync(path.join(root, b)).mtimeMs - fs.statSync(path.join(root, a)).mtimeMs)[0]);
@@ -122,13 +121,13 @@ test("native Skill read stays inside the materialized directory and reference-fi
     const credential = service.credential();
     await (await service.runs.start(credential, { session_id: session.id, message: "准备技能目录" })).task;
     const root = latestRoot();
-    requestedPath = path.join(root, "device-inspection", "SKILL.md");
+    requestedPath = path.join(root, "record-inspection", "SKILL.md");
     const read = await (await service.runs.start(credential, { session_id: session.id, message: "读取技能正文" })).task;
     assert.equal(read.status, "ok");
     const readRun = read.tool_runs.find((tool: Row) => tool.tool === "read");
     assert.equal(readRun?.status, "ok");
     assert.ok(upstream.requests.some((request) => JSON.stringify(request.messages).includes("secret-knowledge-must-not-be-read")), "the read tool result should reach the model");
-    requestedPath = path.join(root, "device-inspection", "references", "status.md");
+    requestedPath = path.join(root, "record-inspection", "references", "status.md");
     const reference = await (await service.runs.start(credential, { session_id: session.id, message: "读取技能参考" })).task;
     assert.equal(reference.tool_runs.find((tool: Row) => tool.tool === "read")?.status, "ok");
     assert.ok(upstream.requests.some((request) => JSON.stringify(request.messages).includes("reference-content-marker")), "the reference file content should reach the model");
@@ -154,7 +153,7 @@ test("Skills live on disk, can be scoped per assistant, and respect the global s
         name: "只读巡检",
         slug: "readonly-inspection",
         description: "只允许读取巡检规范",
-        content: "巡检时必须先读取真实设备数据。",
+        content: "巡检时必须先读取真实业务数据。",
         files: { "references/checklist.md": "只读检查项" },
         enabled: true,
       },
@@ -163,12 +162,12 @@ test("Skills live on disk, can be scoped per assistant, and respect the global s
     assert.ok(fs.existsSync(path.join(service.skills.root, "readonly-inspection", "SKILL.md")));
     assert.equal(service.store.one("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='skills'")!.n, 0);
 
-    const assistant = service.store.one("SELECT * FROM assistants ORDER BY is_default DESC,id LIMIT 1")!;
+    const assistant = service.store.assistants()[0]!;
     const scoped = await service.app.inject({
       method: "PUT",
       url: `/api/control/admin/assistants/${assistant.id}`,
       headers,
-      payload: { skill_slugs: ["device-inspection"] },
+      payload: { skill_slugs: ["readonly-inspection"] },
     });
     assert.equal(scoped.statusCode, 200, scoped.body);
 
@@ -177,7 +176,7 @@ test("Skills live on disk, can be scoped per assistant, and respect the global s
       headers: { authorization: `Bearer ${service.credential()}` },
     });
     assert.equal(list.statusCode, 200, list.body);
-    assert.deepEqual(list.json().items.map((skill: Row) => skill.slug), ["device-inspection"]);
+    assert.deepEqual(list.json().items.map((skill: Row) => skill.slug), ["readonly-inspection"]);
     assert.equal(JSON.stringify(list.json()).includes("只读检查项"), false);
 
     const disabled = await service.app.inject({

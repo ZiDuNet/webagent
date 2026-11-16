@@ -17,11 +17,11 @@ Node 系统可同进程嵌入，其他语言可保留现有业务后端，通过
 
 `server/src/sdk.ts` 导出 `createWebAgent`、`ToolSpec`、`IdentityAdapter` 等。workspace 构建后从 `@webagent/server` 导入；当前服务包为内部包，跨仓库使用应先按组织要求打包或引用，不声称已发布到公共 npm。
 
-以下 `businessSessions` 与 `deviceService` 是宿主项目自己的现有服务：
+以下 `businessSessions` 与 `recordService` 是宿主项目自己的现有服务：
 
 ```ts
 import { createWebAgent, type IdentityAdapter, type ToolSpec } from "@webagent/server";
-import { businessSessions, deviceService } from "./business-services.js";
+import { businessSessions, recordService } from "./business-services.js";
 
 const identityAdapter: IdentityAdapter = {
   resolve: async (credential) => {
@@ -39,20 +39,20 @@ const identityAdapter: IdentityAdapter = {
   },
 };
 
-const listDevices: ToolSpec = {
-  name: "business_list_devices",
-  title: "查询设备",
-  description: "查询当前业务用户数据范围内的设备，可按关键词筛选。",
-  category: "设备业务",
+const listRecords: ToolSpec = {
+  name: "business_list_records",
+  title: "查询业务记录",
+  description: "查询当前业务用户数据范围内的业务记录，可按关键词筛选。",
+  category: "业务记录",
   source: "native",
-  permission: "device:read",
+  permission: "record:read",
   risk: "read",
   parameters: {
     type: "object",
     properties: { keyword: { type: "string" } },
     additionalProperties: false,
   },
-  execute: async (args, context) => deviceService.listForUser({
+  execute: async (args, context) => recordService.listForUser({
     userId: context.identity.subject,
     credential: context.credential,
     keyword: args.keyword,
@@ -62,8 +62,7 @@ const listDevices: ToolSpec = {
 
 const service = await createWebAgent({
   identityAdapter,
-  tools: [listDevices],
-  demoBusiness: false,
+  tools: [listRecords],
   staticUi: false,
 });
 await service.app.listen({ host: "127.0.0.1", port: 8000 });
@@ -154,13 +153,13 @@ import { WebAgentClient } from "@webagent/sdk";
 import { getBusinessAccessToken } from "./auth.js";
 
 const agent = new WebAgentClient({ token: getBusinessAccessToken });
-const { session } = await agent.createSession({ title: "设备检查" });
+const { session } = await agent.createSession({ title: "记录检查" });
 
 let runId = "";
 let cursor = "";
 for await (const event of agent.stream({
   session_id: session.id,
-  message: "查询当前在线设备",
+  message: "查询当前可用的业务记录",
   approval_mode: "confirm",
 })) {
   if (event.id) cursor = event.id;
@@ -197,27 +196,29 @@ React 组件见 `chat/src/index.ts`。Chat 样式依赖主题 CSS；在宿主复
 
 - 唯一英文 `name`、说明、输入 JSON Schema。
 - HTTP 方法、完整可信 URL、权限码、风险。
-- URL 路径变量使用 `{device_id}`，其余参数以 query 或 JSON 传递。
+- URL 路径变量使用 `{record_id}`，其余参数以 query 或 JSON 传递。
 - 后端始终注入当前业务 `Authorization: Bearer ...`，模型不能传入或覆盖。
 - 附加请求头支持 `${user.id}`、`${session.id}`，禁止覆盖 Authorization、Cookie、Host 等身份 / 传输字段。
 
 ```json
 {
-  "name": "business_device_detail",
-  "display_name": "设备详情",
-  "description": "查询当前用户可访问的一台设备",
-  "permission": "device:read",
+  "name": "business_record_detail",
+  "display_name": "记录详情",
+  "description": "查询当前用户可访问的一条业务记录",
+  "permission": "record:read",
   "risk": "read",
   "method": "GET",
-  "url_template": "https://business.example/api/devices/{device_id}",
+  "url_template": "https://business.example/api/records/{record_id}",
   "headers": { "X-Agent-Session": "${session.id}" },
   "input_schema": {
     "type": "object",
-    "properties": { "device_id": { "type": "integer", "minimum": 1 } },
-    "required": ["device_id"]
+    "properties": { "record_id": { "type": "integer", "minimum": 1 } },
+    "required": ["record_id"]
   }
 }
 ```
+
+保存位置：HTTP 连接器为 `data/tools/http/<name>.json`，MCP 为 `data/tools/mcp/<name>.json`，四态策略与标签在 `data/tools/policies.json`。三者都是纯 JSON，可直接用编辑器或部署脚本维护，不需要改数据库；配置文件不是合法 JSON 时服务会明确报错而不是覆盖它。
 
 这是面向受信任业务 API 的轻量连接器，不是万能 OpenAPI 编排器。第三方服务密钥优先放 MCP 加密凭据或开发原生适配器，不能把业务 Token 转发给不可信网站。目标 API 必须最终校验用户数据权限，不能只依据 `X-Agent-*` 请求头信任身份。
 
@@ -241,8 +242,8 @@ React 组件见 `chat/src/index.ts`。Chat 样式依赖主题 CSS；在宿主复
       "url": "https://business.example/mcp",
       "headers": { "Authorization": "Bearer replace-locally" },
       "tool_policies": {
-        "device_search": { "permission": "device:read", "risk": "read" },
-        "device_update": { "permission": "device:update", "risk": "write" }
+        "record_search": { "permission": "record:read", "risk": "read" },
+        "record_update": { "permission": "record:update", "risk": "write" }
       }
     },
     "本地 MCP": {
@@ -276,9 +277,9 @@ React 组件见 `chat/src/index.ts`。Chat 样式依赖主题 CSS；在宿主复
 
 ## 7. Skill 与知识库
 
-Skill 以后端 `data/pi/skill-library/` 为唯一事实来源，每个目录包含 `SKILL.md`、可选文本参考文件和 `.webagent-skill.json` 启停元数据，正文不写入数据库。管理端可全局开关，也可逐项启停；助手通过 `skill_slugs` 选择可用 Skill，留空表示继承全局已启用的 Skill。
+Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL.md`、可选文本参考文件和 `.webagent-skill.json` 启停元数据，正文不写入数据库。管理端可全局开关，也可逐项启停；助手通过 `skill_slugs` 选择可用 Skill，留空表示继承全局已启用的 Skill。
 
-运行时按助手物化到 `data/pi/skill-runtime/`，模型先看到名称与描述，需要时通过 PI 原生 `read` 读取 `SKILL.md` 和文本参考文件。参考文件仅 `.md/.txt/.json/.yaml/.yml/.csv`，读取被限制在物化目录内，不允许路径穿越、符号链接、二进制或脚本执行。仅有目录访问权限不等于获得业务权限，Skill 不能提升工具或数据授权。
+运行时按助手物化到 `data/runtime/skill-runtime/`，模型先看到名称与描述，需要时通过 PI 原生 `read` 读取 `SKILL.md` 和文本参考文件。参考文件仅 `.md/.txt/.json/.yaml/.yml/.csv`，读取被限制在物化目录内，不允许路径穿越、符号链接、二进制或脚本执行。仅有目录访问权限不等于获得业务权限，Skill 不能提升工具或数据授权。
 
 此分支不自动读取业务项目中的 AGENTS.md / SOUL.md，也不执行任意插件。系统角色规则通过助手提示词配置，业务 SOP 适合用 Skill；需脚本时开发有明确权限的原生 Tool 或隔离服务。管理端支持导入 Skill ZIP / 目录，但只提取受支持的文本参考文件，不执行其中的脚本。迁移旧数据库 Skill 时会先写 `.legacy-skills.json` 备份，迁移完成后再移除旧表。
 

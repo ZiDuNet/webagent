@@ -462,7 +462,7 @@ export default function App() {
       <main className="workspace">
         <header className="workspace__header">
           <button type="button" className="header-icon-button mobile-nav-button" aria-label="打开侧边栏" onClick={() => setNavOpen(true)}><Icon name="menu" size={16} /></button>
-          <div className="workspace__identity"><span className="workspace__avatar"><Icon name="sparkles" size={16} /></span><div className="workspace__title"><strong>{activeSession?.title || activeAssistant?.name || "智能助手"}</strong><span><i />{status?.demo_mode ? "后台已开启模拟模式" : authMode === "token" ? "接入 Token · 匿名会话" : "业务账号已连接"}</span></div></div>
+          <div className="workspace__identity"><span className="workspace__avatar"><Icon name="sparkles" size={16} /></span><div className="workspace__title"><strong>{activeSession?.title || activeAssistant?.name || "智能助手"}</strong><span><i />{authMode === "token" ? "接入 Token · 匿名会话" : "业务账号已连接"}</span></div></div>
           <div className="workspace__actions">
             <button type="button" className={`header-button ${ttsAutoRead ? "is-active" : ""}`} aria-label="自动朗读回答" title={status?.tts?.configured ? (ttsAutoRead ? "关闭自动朗读" : "自动朗读最终回答（过滤代码和 HTML）") : status?.tts?.reason || "管理员尚未配置 TTS 模型"} disabled={!status?.tts?.configured} onClick={toggleTts}><Icon name="audio-lines" size={14} /><span>{ttsBusy ? "朗读中" : ttsAutoRead ? "朗读已开" : "朗读"}</span></button>
             <button type="button" className="header-button header-voice-button" aria-label="语音通话" title={voiceCallReason} disabled={!voiceCallAvailable || conversation.streaming} onClick={() => { stopSpeaking(); setVoiceCallOpen(true); }}><Icon name="audio-lines" size={14} /><span>语音通话</span></button>

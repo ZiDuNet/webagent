@@ -13,6 +13,7 @@ import { encrypt, decrypt } from "./security.js";
 import { AppError, type Emit, type Identity, type Row, type ToolSpec } from "./types.js";
 import { piLocalToolNames, piLocalToolReason } from "./pi-tools.js";
 import { effectiveAssistantConfig } from "./assistant-config.js";
+import { storagePaths } from "./storage-paths.js";
 
 export interface ChatInput { message?: string; messages?: Row[]; session_id?: string; assistant_id?: number; model_row_id?: number; enabled_tools?: string[]; reasoning_effort?: string; approval_mode?: string; attachments?: Row[] }
 export const estimate = (value: unknown) => Math.ceil((typeof value === "string" ? value : JSON.stringify(value || "")).replace(/[\u3400-\u9fff]/g, "abcd").length / 4);
@@ -30,8 +31,9 @@ export class PiRuntime {
   }
   async shutdown() { this.backgroundAbort.abort(); await Promise.allSettled([...this.background]); }
   assistants(user: Identity) {
-    return this.store.all("SELECT * FROM assistants WHERE enabled=1 ORDER BY is_default DESC,sort_order,id")
-      .filter((assistant) => (!user.assistant_id || assistant.id === user.assistant_id) && (assistant.allowed_roles.includes("*") || assistant.allowed_roles.includes(user.role)));
+    return this.store.assistants()
+      .filter((assistant) => assistant.enabled !== false)
+      .filter((assistant) => (!user.assistant_id || Number(assistant.id) === Number(user.assistant_id)) && ((Array.isArray(assistant.allowed_roles) ? assistant.allowed_roles : ["*"]).includes("*") || (Array.isArray(assistant.allowed_roles) ? assistant.allowed_roles : ["*"]).includes(user.role)));
   }
   assistant(user: Identity, id?: number) {
     if (user.assistant_id && id && id !== user.assistant_id) throw new AppError("当前接入 Token 已绑定助手，不能切换", 403);
@@ -80,7 +82,7 @@ export class PiRuntime {
   }
   private manager(sessionId: string) {
     const stored = this.store.conversations.piEntries(sessionId);
-    const cwd = path.join(this.store.dataDir, "workspaces", sessionId);
+    const cwd = path.join(storagePaths(this.store.dataDir).workspaces, sessionId);
     fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
     if (stored.length) return SessionManager.inMemory(cwd, undefined, stored as any);
     const manager = SessionManager.inMemory(cwd);
@@ -215,7 +217,7 @@ export class PiRuntime {
     if (this.registry.codemodeEnabled()) extensionFactories.push(createCodemodeExtension() as ExtensionFactory);
     const loader = new DefaultResourceLoader({
       cwd: manager.getCwd(),
-      agentDir: path.join(this.store.dataDir, "isolated-pi"),
+      agentDir: path.join(storagePaths(this.store.dataDir).runtime, "isolated-pi"),
       settingsManager,
       noExtensions: true,
       disabledBuiltinExtensions: ["mcp", "codemode", "tool-search"],
@@ -235,7 +237,7 @@ export class PiRuntime {
     if (leakedSkills.length) throw new AppError(`Skill 加载越界：${leakedSkills[0].filePath}`, 500);
     const activeNames = [...definitions.filter((tool) => tool.exposure !== "deferred").map((tool) => tool.name), ...(bm25 ? ["tool_search"] : []), ...(this.registry.codemodeEnabled() ? ["codemode"] : [])];
     const effort = input.reasoning_effort || assistantConfig.default_reasoning_effort || model.default_reasoning_effort || "off";
-    const { session, extensionsResult } = await createAgentSession({ cwd: manager.getCwd(), agentDir: path.join(this.store.dataDir, "isolated-pi"), modelRuntime: runtime, model: piModel, thinkingLevel: (effort === "none" ? "off" : effort) as any, sessionManager: manager, settingsManager, resourceLoader: loader, noTools: "builtin", tools: bm25 ? [...activeNames, ...tools.map((tool) => tool.name)] : activeNames, customTools: definitions });
+    const { session, extensionsResult } = await createAgentSession({ cwd: manager.getCwd(), agentDir: path.join(storagePaths(this.store.dataDir).runtime, "isolated-pi"), modelRuntime: runtime, model: piModel, thinkingLevel: (effort === "none" ? "off" : effort) as any, sessionManager: manager, settingsManager, resourceLoader: loader, noTools: "builtin", tools: bm25 ? [...activeNames, ...tools.map((tool) => tool.name)] : activeNames, customTools: definitions });
     if (extensionsResult.errors.length) { session.dispose(); throw new AppError("PI 扩展加载失败：" + extensionsResult.errors.map((error) => error.error).join("；"), 500); }
     session.setActiveToolsByName(activeNames);
     const finishTurn = session.agent.finishTurn;

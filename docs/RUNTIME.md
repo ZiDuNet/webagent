@@ -50,20 +50,20 @@
 
 ## 4. 会话持久化
 
-聊天正文不写入 SQLite。每条会话对应一个 `data/pi/conversations/<sessionId>.json`，保存：
+聊天正文不写入 SQLite。每条会话对应一个 `data/sessions/<sessionId>.json`，保存：
 
 - `messages`：前端展示消息、工具记录、附件 Base64、用量与可选思考。
 - `pi_entries`：PI canonical session header 与 entries，用于恢复完整 PI 上下文。
 
-SQLite 只保存会话归属、标题、增量统计、运行、审批、事件、记忆与发布元数据。旧版数据库中的 `messages` / `pi_state` 会在启动时迁移到文件，原始数据先备份为 `data/pi/conversations/.legacy-conversations.json`，迁移成功后移除旧表。
+SQLite 只保存会话归属、标题、增量统计、运行、审批、事件、记忆与发布元数据。旧版数据库中的 `messages` / `pi_state` 会在启动时迁移到文件，原始数据先备份为 `data/sessions/.legacy-conversations.json`，迁移成功后移除旧表。
 
-启动时还会安全清理旧版 `pending_approvals` 表、`assistants` 的 `icon` / `greeting` / `mode` / `prefetch_tools`、`sessions` 的 `retry_count` / `error_count` 以及已废弃的旧 settings 键。清理前使用 `VACUUM INTO` 备份到 `data/pi/backups/agent-pre-cleanup-<timestamp>.db`，成功后写入 `legacy_schema_cleanup_v1` 标记；不会删除会话 JSON、`business.db` 或仍需用于 Skill 迁移的 `skill_ids`。
+启动时还会安全清理旧版 `pending_approvals` 表、`assistants` 的 `icon` / `greeting` / `mode` / `prefetch_tools`、`sessions` 的 `retry_count` / `error_count` 以及已废弃的旧 settings 键。清理前使用 `VACUUM INTO` 备份到 `data/runtime/backups/agent-pre-cleanup-<timestamp>.db`，成功后写入标记文件 `data/runtime/.legacy-schema-cleanup-v1`；不会删除会话 JSON 或仍需用于 Skill 迁移的 `skill_ids`。
 
 编辑消息会删除后续消息、失效上下文和待审批记录；删除一条消息也删除其后续依赖消息。分叉复制选定范围内展示消息，清理审批，重新构建上下文，不执行历史工具。
 
 默认会话保留 30 天，0 不自动清理。过期删除不会删除 PagePilot 发布档案。图片当前 Base64 存在消息和会话中，大量多模态使用应接对象存储；不存在「存文件就天然不会变大」的保证。
 
-管理端「会话与诊断」支持服务端分页、搜索、查看和删除全部用户会话；清理前先预览截止时间和影响数量。删除会移除会话 JSON，并级联删除运行、审批与问答元数据；发布记录保留但解除 `session_id` 关联。`VACUUM` 只在没有运行任务时执行，用于回收 SQLite 已删除页；它不会压缩会话文件，也不是自动保留策略，更不能替代对整个 `data/pi/` 的备份。
+管理端「会话与诊断」支持服务端分页、搜索、查看和删除全部用户会话；清理前先预览截止时间和影响数量。删除会移除会话 JSON，并级联删除运行、审批与问答元数据；发布记录保留但解除 `session_id` 关联。`VACUUM` 只在没有运行任务时执行，用于回收 SQLite 已删除页；它不会压缩会话文件，也不是自动保留策略，更不能替代对整个 `data/` 的备份。
 
 ### 交互问答
 

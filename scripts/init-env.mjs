@@ -14,9 +14,7 @@ export function initializeEnv(destination, extend = false) {
     WEBAGENT_ADMIN_PORT: "8081",
     WEBAGENT_SECRET_KEY: randomBytes(32).toString("base64url"),
     WEBAGENT_CONTROL_PASSWORD: randomBytes(18).toString("base64url"),
-    WEBAGENT_ADMIN_PASSWORD: randomBytes(18).toString("base64url"),
-    WEBAGENT_PI_DATA_DIR: "./data/pi",
-    WEBAGENT_SEED_DEMO_USERS: "1",
+    WEBAGENT_DATA_DIR: "./data",
     WEBAGENT_COOKIE_SECURE: "0",
     WEBAGENT_ALLOW_STDIO: "0",
     WEBAGENT_LOCAL_TOOLS: "off",
@@ -32,5 +30,5 @@ export function initializeEnv(destination, extend = false) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (process.argv.slice(2).some((argument) => argument !== "--extend")) throw new Error("用法：npm run init:env -- [--extend]");
   const added = initializeEnv(fileURLToPath(new URL("../.env", import.meta.url)), process.argv.includes("--extend"));
-  console.log(added.length ? `已补充 ${added.length} 项配置到 .env（0600），未覆盖原有值。管理与业务管理员初始密码分别保存在 CONTROL_PASSWORD、ADMIN_PASSWORD，两端登录独立。` : ".env 配置已齐全，未修改现有值。");
+  console.log(added.length ? `已补充 ${added.length} 项配置到 .env（0600），未覆盖原有值。管理端初始密码保存在 WEBAGENT_CONTROL_PASSWORD，业务身份由接入系统提供。` : ".env 配置已齐全，未修改现有值。");
 }

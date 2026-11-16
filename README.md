@@ -43,9 +43,9 @@ npm start
 | Chat 端 | `http://127.0.0.1:8000/chat/` | 业务系统用户 |
 | 后端健康检查 | `http://127.0.0.1:8000/health` | 无敏感信息 |
 
-`/` 跳转 Chat；旧 `/react/` 仅跳转 `/chat/`，并没有第三套前端。
+`/` 跳转 Chat；旧 `/react/` 仅跳转 `/chat/`，并没有第三套前端。Chat 在没有 `IdentityAdapter` 时必须用 `?token=` 接入 Token 打开。
 
-管理账号 `admin` 的初始密码来自 `.env` 的 `WEBAGENT_CONTROL_PASSWORD`。同名业务管理员的初始密码来自 `WEBAGENT_ADMIN_PASSWORD`，不是同一账号。管理密码可在「PI 核心」页修改；环境变量只用于首次建号，不覆盖已保存密码。
+管理账号 `admin` 的初始密码来自 `.env` 的 `WEBAGENT_CONTROL_PASSWORD`。管理端与业务端鉴权完全分离：管理端只认 `control_users` 与「管理 Token」，业务端只认 `IdentityAdapter` 或接入 Token。管理密码可在「PI 核心」页修改；环境变量只用于首次建号，不覆盖已保存密码。
 
 首次启动后，进入管理端配置供应商与真实对话模型，再设置默认助手。**没有模型配置就明确报错，不返回模拟答案。**
 
@@ -87,7 +87,7 @@ docker compose up -d --build
 | 交互 | `ask_user` 让模型在缺少信息时暂停，Chat 渲染单选 / 多选 / 补充文本问答卡；与危险操作审批卡严格分离 |
 | 提示词 | 基础、压缩、标题、决策、记忆提取和附加系统提示词均可在管理端编辑并恢复默认 |
 | Skill | 文件系统为唯一事实来源，支持全局 / 单项启停、助手级选择、ZIP / 目录导入；PI 原生渐进读取，正文不落数据库，不执行 Skill 脚本 |
-| 会话 | 正文、附件与 PI canonical entries 保存为 `data/pi/conversations/<sessionId>.json`；SQLite 只保存归属、标题、用量与运行元数据。支持刷新恢复、分叉、编辑、删除、主动 / 手动压缩、分页检索与保留期清理 |
+| 会话 | 正文、附件与 PI canonical entries 保存为 `data/sessions/<sessionId>.json`；SQLite 只保存归属、标题、用量与运行元数据。支持刷新恢复、分叉、编辑、删除、主动 / 手动压缩、分页检索与保留期清理 |
 | 任务 | 后台运行独立于 SSE 连接，断开页面继续执行，重连回放，显式停止，重启不重放副作用 |
 | 记忆 | 用户独立 CRUD、模型自动提取、默认待确认、管理员配置提取模型与规则 |
 | Chat | Markdown、表格、KaTeX、Mermaid 与基础图表，单行实时过程、完成折叠、移动端弹窗 |
@@ -97,18 +97,18 @@ docker compose up -d --build
 
 STT / TTS 的供应商原生协议不因「OpenAI 兼容」而自动相同，需选择正确模型类型与协议。自动推测仅为建议，以供应商实际权限和文档为准。
 
-### Demo 权限
+### 身份与账号
 
-设备表与账号只用于验证集成方式，可通过 `demoBusiness: false` 或 `IdentityAdapter` 移除，不是框架必需业务。
+框架不再内置演示业务账号，也不创建演示业务库。业务身份只有两条来源：
 
-| 业务账号 | 初始密码 | 设备权限 |
+1. 宿主系统通过 `IdentityAdapter.resolve()` 注入（推荐，可直接复用现有登录态与权限码）；
+2. 管理端签发「接入 Token」，用 `/chat/?token=…` 打开匿名会话，Token 绑定助手、来源白名单、速率与保留期。
+
+| 账号 | 来源 | 说明 |
 | --- | --- | --- |
-| `admin` | `.env` 中 `WEBAGENT_ADMIN_PASSWORD` | 全部，可删除非管理员业务账号 |
-| `user1` | `user1pass` | 查询 |
-| `user2` | `user2pass` | 查询、修改 |
-| `user3` | `user3pass` | 查询、修改、删除 |
-
-`WEBAGENT_SEED_DEMO_USERS=0` 禁止新建三个演示用户；不会删除已经创建的账号。设备 CRUD 由 Demo API 和原生工具共用业务服务，聊天权限与接口权限一致。
+| `admin` | `.env` 的 `WEBAGENT_CONTROL_PASSWORD` | 仅用于管理端；业务账号永远不能进入管理端 |
+| 业务用户 | 业务系统 | 由适配器返回 `subject` / `role` / `permissions`，框架不落库 |
+| 匿名访客 | 接入 Token | 浏览器 Cookie 区分访客；同一浏览器刷新保持同一身份 |
 
 ## 接入业务系统
 
@@ -149,7 +149,7 @@ git diff --check
 
 PI 官方 Bash / PowerShell、文件读写与 CodeMode 在管理端列出，默认 `WEBAGENT_LOCAL_TOOLS=off` 时锁定关闭。部署者显式设为 `WEBAGENT_LOCAL_TOOLS=admin` 后，管理员仍须在工具页逐项启用；这不是沙箱，只适合受信任的单租户部署。框架默认不提供服务器端任意代码执行或截图服务。stdio MCP 同样可能在后端启动本机进程，默认关闭，仅在部署者明确信任服务并设置 `WEBAGENT_ALLOW_STDIO=1` 后可用；网络服务优先使用 Streamable HTTP 或 SSE。
 
-当前默认是单进程 SQLite 元数据 + 本地会话文件方案，不宣称可直接多副本横向扩展。多节点需要共享数据库、分布式任务队列 / 锁、事件总线及专门的对象 / 文件存储适配。备份时必须同时备份 `agent.db`、`business.db` 与 `data/pi/conversations/`，不能只复制数据库。
+当前默认是单进程 SQLite 运行库 + 本地会话文件方案，不宣称可直接多副本横向扩展。多节点需要共享数据库、分布式任务队列 / 锁、事件总线及专门的对象 / 文件存储适配。备份必须覆盖整个 `data/`（至少 `runtime/agent.db`、`config/`、`tools/`、`skills/` 与 `sessions/`），不能只复制数据库。
 
 ### 实际界面
 

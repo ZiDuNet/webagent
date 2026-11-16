@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { safeUrl, mask } from "./security.js";
 import { AppError, type Emit, type Row } from "./types.js";
 import { Store, now } from "./store.js";
+import { storagePaths } from "./storage-paths.js";
 
 export const kinds = ["chat", "vision", "asr", "asr_realtime", "tts", "tts_realtime", "image_generation", "decision", "embedding", "rerank"] as const;
 export const classifyModel = (id: string) => /decision|systemone|typesafe\/jev|laya/i.test(id) ? "decision" : /tts|text-to-speech/i.test(id) ? (/real.?time/i.test(id) ? "tts_realtime" : "tts") : /asr|whisper|transcrib|speech-to-text|\bstt\b/i.test(id) ? (/real.?time/i.test(id) ? "asr_realtime" : "asr") : /rerank/i.test(id) ? "rerank" : /embed|bge-|gte-/i.test(id) ? "embedding" : /dall-e|gpt-image|image-generation|imagen|flux|seedream/i.test(id) ? "image_generation" : /vision|[-/]vl|gpt-4o|gpt-4\.1|gpt-5|gemini|claude/i.test(id) ? "vision" : "chat";
@@ -82,10 +83,13 @@ export class Providers {
   private catalogueInflight: Promise<Row | undefined> | undefined;
   private catalogueError = "";
   private catalogueSource = "";
+  private readonly abort = new AbortController();
   constructor(private store: Store) {}
+  /** 关闭时中断后台 models.dev 拉取，避免进程退出被网络请求拖住。 */
+  close() { this.abort.abort(); }
   connection(id: number) { const provider = this.store.provider(id); if (!provider) throw new AppError("供应商不存在", 404); if (!provider.enabled) throw new AppError("供应商已停用", 422); if (requiresKey(provider) && !provider.api_key) throw new AppError("供应商未配置 API Key", 422); return provider; }
-  private get cataloguePath() { return path.join(this.store.dataDir, "models-dev.json"); }
-  private get legacyCataloguePath() { return path.join(config.legacyDir, "models_dev_cache.json"); }
+  private get cataloguePath() { return path.join(storagePaths(this.store.dataDir).cache, "models-dev.json"); }
+  private get legacyCataloguePath() { return path.join(storagePaths(this.store.dataDir).legacy, "models_dev_cache.json"); }
   private get catalogueTtlMs() { return Math.max(1, Number(this.store.settings().modelsdev_cache_hours || 168)) * 3600000; }
   private normalizeModelId(value: string) {
     return value.trim().toLowerCase()
@@ -154,7 +158,8 @@ export class Providers {
     this.catalogueInflight = (async () => {
       try {
         const url = process.env.WEBAGENT_MODELSDEV_URL || "https://models.dev/api.json";
-        const payload = await requestJson(url, { signal: AbortSignal.timeout(Number(process.env.WEBAGENT_MODELSDEV_TIMEOUT_SECONDS || 120) * 1000) }, 30000000);
+        const timeout = AbortSignal.timeout(Number(process.env.WEBAGENT_MODELSDEV_TIMEOUT_SECONDS || 120) * 1000);
+        const payload = await requestJson(url, { signal: AbortSignal.any([this.abort.signal, timeout]) }, 30000000);
         this.catalogue = payload;
         this.catalogueFetchedAt = Date.now();
         this.catalogueSource = "models-dev.json";

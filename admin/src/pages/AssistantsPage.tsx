@@ -165,7 +165,7 @@ export default function AssistantsPage() {
           <div className="control-grid">
             <Form.Item name="name" label="助手名称" rules={[{ required: true }]}><Input maxLength={100} /></Form.Item>
             <Form.Item name="allowed_roles" label="可用业务角色" extra="* 表示所有当前业务账号；仍受用户自身权限约束。">
-              <Select mode="tags" options={["*", "admin", "viewer", "operator", "device_admin"].map((value) => ({ value }))} />
+              <Select mode="tags" options={["*", "admin", "viewer", "operator", "auditor"].map((value) => ({ value }))} />
             </Form.Item>
           </div>
           <Form.Item name="description" label="说明"><Input maxLength={500} /></Form.Item>

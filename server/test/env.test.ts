@@ -9,7 +9,7 @@ test("environment initialization only extends missing keys and never rotates sav
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "webagent-env-test-"));
   const destination = path.join(directory, ".env");
   try {
-    const original = "WEBAGENT_SECRET_KEY=existing-encryption-key\nexport WEBAGENT_ADMIN_PASSWORD=existing-business-password\nCUSTOM_SETTING=keep-me";
+    const original = "WEBAGENT_SECRET_KEY=existing-encryption-key\nexport WEBAGENT_ADMIN_PASSWORD=legacy-business-password\nCUSTOM_SETTING=keep-me";
     fs.writeFileSync(destination, original);
     assert.throws(() => initializeEnv(destination), /已存在/);
     const added = initializeEnv(destination, true);
@@ -17,7 +17,7 @@ test("environment initialization only extends missing keys and never rotates sav
     assert.ok(extended.startsWith(`${original}\n`));
     assert.ok(added.includes("WEBAGENT_CONTROL_PASSWORD"));
     assert.equal(added.includes("WEBAGENT_SECRET_KEY"), false);
-    assert.equal(added.includes("WEBAGENT_ADMIN_PASSWORD"), false);
+    assert.ok(added.includes("WEBAGENT_DATA_DIR"));
     assert.equal((extended.match(/WEBAGENT_SECRET_KEY=/g) || []).length, 1);
     assert.equal(fs.statSync(destination).mode & 0o777, 0o600);
     assert.deepEqual(initializeEnv(destination, true), []);

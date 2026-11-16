@@ -27,11 +27,6 @@ export function parseCookies(header = "") {
   return result;
 }
 
-export const publicUser = (row: Row): Identity => {
-  const subject = String(row.subject || `user-${row.id}`);
-  const namespace = row.namespace ? String(row.namespace) : undefined;
-  return { id: row.id, subject, namespace, owner_key: identityOwnerKey(subject, namespace), username: row.username, display_name: row.display_name || row.username, role: row.role || "control_admin", permissions: row.permissions || [], is_admin: Boolean(row.is_admin), auth_mode: "business" };
-};
 export class Auth {
   private failures = new Map<string, { count: number; until: number }>();
   private accessRate = new Map<string, { count: number; reset: number }>();
@@ -63,13 +58,15 @@ export class Auth {
     reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     reply.header("Vary", "Origin");
   }
-  private accessRowByToken(raw: string) {
+  private accessRowByToken(raw: string): Row | undefined {
     if (!raw) return undefined;
-    return this.store.one("SELECT t.*,a.name AS assistant_name FROM access_tokens t LEFT JOIN assistants a ON a.id=t.assistant_id WHERE t.token_hash=?", [digest(raw)]);
+    const row = this.store.one("SELECT * FROM access_tokens WHERE token_hash=?", [digest(raw)]);
+    return row ? { ...row, assistant_name: String(this.store.assistant(Number(row.assistant_id))?.name || "") } : undefined;
   }
-  private accessRowBySession(raw: string) {
+  private accessRowBySession(raw: string): Row | undefined {
     if (!raw) return undefined;
-    return this.store.one("SELECT t.*,a.name AS assistant_name,s.visitor_id,s.expires_at AS session_expires_at FROM access_sessions s JOIN access_tokens t ON t.id=s.access_token_id LEFT JOIN assistants a ON a.id=t.assistant_id WHERE s.session_hash=? AND s.expires_at>?", [digest(raw), now()]);
+    const row = this.store.one("SELECT t.*,s.visitor_id,s.expires_at AS session_expires_at FROM access_sessions s JOIN access_tokens t ON t.id=s.access_token_id WHERE s.session_hash=? AND s.expires_at>?", [digest(raw), now()]);
+    return row ? { ...row, assistant_name: String(this.store.assistant(Number(row.assistant_id))?.name || "") } : undefined;
   }
   private assertAccess(row: Row, origin: string) {
     if (!row.enabled) throw new AppError("接入 Token 已停用", 401);
@@ -181,17 +178,13 @@ export class Auth {
   }
   fixedAssistant(user: Identity) { return user.assistant_id ?? null; }
   async identity(credential: string): Promise<Identity> {
-    if (!credential) throw new AppError("请登录业务系统", 401);
-    if (this.adapter) {
-      const identity = await this.adapter.resolve(credential);
-      if (!identity) throw new AppError("业务登录已失效", 401);
-      const subject = String(identity.subject || (identity.id !== undefined ? `user-${identity.id}` : `login-${digest(credential).slice(0, 32)}`));
-      const namespace = identity.namespace ? String(identity.namespace) : undefined;
-      return { ...identity, id: identity.id === undefined ? undefined : Number(identity.id), subject, namespace, owner_key: identityOwnerKey(subject, namespace), username: identity.username || subject, permissions: identity.permissions || [], role: identity.role || "user", is_admin: Boolean(identity.is_admin), auth_mode: "business" };
-    }
-    const row = this.store.one("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?", [digest(credential), now()], true);
-    if (!row) throw new AppError("业务登录已失效，请重新登录", 401);
-    return publicUser(row);
+    if (!credential) throw new AppError("请先通过业务系统登录，或使用接入 Token 打开 Chat", 401);
+    if (!this.adapter) throw new AppError("尚未配置业务身份适配器。请在嵌入时注册 identityAdapter，或使用 /chat/?token=… 接入 Token。", 401);
+    const identity = await this.adapter.resolve(credential);
+    if (!identity) throw new AppError("业务登录已失效", 401);
+    const subject = String(identity.subject || (identity.id !== undefined ? `user-${identity.id}` : `login-${digest(credential).slice(0, 32)}`));
+    const namespace = identity.namespace ? String(identity.namespace) : undefined;
+    return { ...identity, id: identity.id === undefined ? undefined : Number(identity.id), subject, namespace, owner_key: identityOwnerKey(subject, namespace), username: identity.username || subject, permissions: identity.permissions || [], role: identity.role || "user", is_admin: Boolean(identity.is_admin), auth_mode: "business" };
   }
   user(request: FastifyRequest) { return this.identity(this.credential(request)); }
   admin(request: FastifyRequest) {
@@ -229,14 +222,15 @@ export class Auth {
       access: { mode: "token", fixed_assistant_id: access.assistant_id, token_name: access.name, expires_at: expires.toISOString() },
     };
   }
-  async login(request: FastifyRequest, reply: FastifyReply, control: boolean) {
+  /** 管理端独立登录：只查询 control_users，与业务账号完全分离。 */
+  async login(request: FastifyRequest, reply: FastifyReply) {
     const body = request.body as Row;
     if (typeof body?.username !== "string" || typeof body?.password !== "string" || body.username.length > 100 || body.password.length > 500) throw new AppError("请输入有效的账号密码", 422);
-    const key = `${control ? "control" : "business"}:${request.ip}`;
+    const key = `control:${request.ip}`;
     const failure = this.failures.get(key);
     if (failure && failure.until > Date.now() && failure.count >= 10) throw new AppError("登录尝试过多，请稍后再试", 429);
     if (this.failures.size > 10000) for (const [storedKey, item] of this.failures) if (item.until < Date.now()) this.failures.delete(storedKey);
-    const row = this.store.one(`SELECT * FROM ${control ? "control_users" : "users"} WHERE username=?`, [body.username.trim()], !control);
+    const row = this.store.one("SELECT * FROM control_users WHERE username=?", [body.username.trim()]);
     const valid = await verifyPassword(body.password, row?.password_hash || "pbkdf2_sha256$240000$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000");
     if (!row || !valid) {
       this.failures.set(key, { count: failure && failure.until > Date.now() ? failure.count + 1 : 1, until: Date.now() + 60000 });
@@ -245,11 +239,10 @@ export class Auth {
     this.failures.delete(key);
     const credential = token();
     const expires = new Date(Date.now() + config.sessionHours * 3600000);
-    if (control) this.store.run("INSERT INTO control_sessions(token_hash,user_id,expires_at) VALUES (?,?,?)", [digest(credential), row.id, expires.toISOString()]);
-    else this.store.run("INSERT INTO sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)", [digest(credential), row.id, now(), expires.toISOString()], true);
-    reply.setCookie(control ? "wa_control" : "wa_session", credential, { httpOnly: true, sameSite: "strict", secure: config.cookieSecure, path: control ? "/api/control" : "/", expires });
-    this.store.audit(row.username, control ? "control.login" : "business.login", "auth");
-    return { user: control ? { id: row.id, username: row.username, role: "control_admin" } : publicUser(row) };
+    this.store.run("INSERT INTO control_sessions(token_hash,user_id,expires_at) VALUES (?,?,?)", [digest(credential), row.id, expires.toISOString()]);
+    reply.setCookie("wa_control", credential, { httpOnly: true, sameSite: "strict", secure: config.cookieSecure, path: "/api/control", expires });
+    this.store.audit(row.username, "control.login", "auth");
+    return { user: { id: row.id, username: row.username, role: "control_admin" } };
   }
   routes(app: FastifyInstance) {
     app.post("/api/agent/auth/exchange", (request, reply) => this.exchangeAccessToken(request, reply));
@@ -272,7 +265,7 @@ export class Auth {
         } : { mode: "business", fixed_assistant_id: null },
       };
     });
-    app.post("/api/control/auth/login", (request, reply) => this.login(request, reply, true));
+    app.post("/api/control/auth/login", (request, reply) => this.login(request, reply));
     app.options("/api/control/*", async (request, reply) => {
       const origin = this.origin(request);
       if (origin) {

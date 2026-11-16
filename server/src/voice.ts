@@ -35,7 +35,7 @@ class Dictation {
     this.started = true;
     this.store.ownedSession(this.sessionId, this.user);
     const settings = this.store.settings();
-    const assistant = this.store.one("SELECT * FROM assistants WHERE id=?", [this.assistantId]);
+    const assistant = this.store.assistant(this.assistantId);
     const effective = effectiveAssistantConfig(assistant, settings);
     const model = this.store.model(effective.asr_realtime_model_id || 0);
     if (!model?.enabled || !model.provider_enabled || model.model_kind !== "asr_realtime") throw new AppError("管理员尚未配置可用的实时 STT 模型", 422);

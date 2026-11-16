@@ -23,10 +23,8 @@ test("management identity is separate from business auth; CRUD and sessions hono
     assert.equal(core.statusCode, 200);
     assert.deepEqual(core.json().packages.map((item: Row) => item.name), piPackages);
     assert.ok(core.json().packages.every((item: Row) => item.installed === item.pinned));
-    assert.equal((await service.app.inject({ method: "PATCH", url: "/api/devices/1", headers: { authorization: `Bearer ${service.credential()}` }, payload: { name: "denied" } })).statusCode, 403);
-    const updated = await service.app.inject({ method: "PATCH", url: "/api/devices/1", headers: { authorization: `Bearer ${service.credential("user2")}` }, payload: { name: "有权限更新" } });
-    assert.equal(updated.statusCode, 200); assert.equal(updated.json().device.name, "有权限更新");
-    assert.equal((await service.app.inject({ method: "DELETE", url: "/api/devices/1", headers: { authorization: `Bearer ${service.credential("user2")}` } })).statusCode, 403);
+    assert.equal((await service.app.inject({ url: "/api/me", headers: { authorization: `Bearer ${service.credential()}` } })).statusCode, 200);
+    assert.equal((await service.app.inject({ url: "/api/me", headers: { authorization: "Bearer unknown-token" } })).statusCode, 401);
     const session = await service.session();
     assert.equal((await service.app.inject({ url: `/api/agent/sessions/${session.id}/messages`, headers: { authorization: `Bearer ${service.credential("user3")}` } })).statusCode, 404);
     const noModel = await service.app.inject({ method: "POST", url: "/api/agent/chat", headers: { authorization: `Bearer ${service.credential()}` }, payload: { session_id: session.id, message: "你好" } });
@@ -39,7 +37,7 @@ test("access tokens exchange into browser sessions, bind to one assistant, and e
   const service = await fixture();
   try {
     const cookie = await managementCookie(service);
-    const assistant = service.store.one("SELECT * FROM assistants WHERE is_default=1")!;
+    const assistant = service.store.assistants().find((item) => item.is_default)!;
     const created = await service.app.inject({
       method: "POST",
       url: "/api/control/admin/access-tokens",
@@ -73,7 +71,7 @@ test("access tokens exchange into browser sessions, bind to one assistant, and e
     const browserHeaders = { cookie: `wa_access_session=${accessCookie.value}; wa_visitor=${visitorCookie.value}` };
     assert.equal((await service.app.inject({ url: "/api/agent/sessions", headers: browserHeaders })).statusCode, 200);
 
-    const secondAssistant = service.store.insert("assistants", { name: "另一个助手", enabled: true, allowed_roles: ["*"] });
+    const secondAssistant = service.store.config.insertAssistant({ name: "另一个助手", enabled: true, allowed_roles: ["*"] });
     const switched = await service.app.inject({ method: "POST", url: "/api/agent/sessions", headers: browserHeaders, payload: { assistant_id: secondAssistant.id } });
     assert.equal(switched.statusCode, 403);
     assert.match(switched.body, /绑定助手/);
@@ -191,8 +189,8 @@ test("embedding and rerank models have real protocol tests instead of placeholde
   const service = await fixture(upstream.baseUrl);
   try {
     const cookie = await managementCookie(service);
-    const embedding = service.store.insert("models", { provider_id: service.model!.provider_id, name: "向量模型", model_id: "text-embedding-test", model_kind: "embedding" });
-    const rerank = service.store.insert("models", { provider_id: service.model!.provider_id, name: "重排模型", model_id: "rerank-test", model_kind: "rerank" });
+    const embedding = service.store.config.insertModel({ provider_id: service.model!.provider_id, name: "向量模型", model_id: "text-embedding-test", model_kind: "embedding" });
+    const rerank = service.store.config.insertModel({ provider_id: service.model!.provider_id, name: "重排模型", model_id: "rerank-test", model_kind: "rerank" });
     const embeddingResult = await service.app.inject({ method: "POST", url: `/api/control/admin/models/${embedding.id}/test`, headers: { cookie }, payload: {} });
     assert.equal(embeddingResult.statusCode, 200); assert.equal(embeddingResult.json().ok, true); assert.equal(embeddingResult.json().dimensions, 3);
     const rerankResult = await service.app.inject({ method: "POST", url: `/api/control/admin/models/${rerank.id}/test`, headers: { cookie }, payload: {} });
@@ -226,36 +224,37 @@ test("native and HTTP tools share a permission boundary, four tool states, and i
   });
   const service = await fixture();
   try {
+    service.identities.user1.permissions = ["profile:read", "business:read"];
     const user = await service.auth.identity(service.credential()); const assistant = service.runtime.assistant(user);
-    service.store.insert("tool_settings", { name: "get_device_stats", visible: false, selectable: false, default_selected: true });
-    service.store.insert("tool_settings", { name: "list_devices", visible: false, selectable: false, default_selected: false });
-    service.store.insert("dynamic_tools", { name: "business_http", display_name: "业务 HTTP", description: "查询自己的设备", permission: "device:read", url_template: `${upstream.baseUrl}/devices/{device_id}`, headers: { "X-Owner": "${user.id}" }, input_schema: { type: "object", properties: { device_id: { type: "integer" } }, required: ["device_id"] } });
+    service.store.setToolPolicy("business_search", { visible: false, selectable: false, default_selected: true });
+    service.store.setToolPolicy("business_update", { visible: false, selectable: false, default_selected: false });
+    service.store.saveHttpTool(undefined, { name: "business_http", display_name: "业务 HTTP", description: "查询自己的业务记录", permission: "business:read", url_template: `${upstream.baseUrl}/records/{record_id}`, headers: { "X-Owner": "${user.id}" }, input_schema: { type: "object", properties: { record_id: { type: "integer" } }, required: ["record_id"] } });
     const selected = await service.registry.permitted(user, assistant, ["business_http"]);
-    assert.ok(selected.some((tool) => tool.name === "get_device_stats"));
-    assert.equal(selected.some((tool) => tool.name === "list_devices"), false);
+    assert.ok(selected.some((tool) => tool.name === "business_search"));
+    assert.equal(selected.some((tool) => tool.name === "business_update"), false);
     const tool = selected.find((tool) => tool.name === "business_http")!;
-    const result = await service.registry.execute(tool, { device_id: 17 }, { identity: user, credential: service.credential(), sessionId: "test-session", signal: AbortSignal.timeout(2000) }) as Row;
-    assert.equal(result.credential, "Bearer fixture-user1"); assert.equal(result.id, String(user.id)); assert.equal(result.path, "/devices/17");
-    service.store.run("UPDATE users SET permissions='[]' WHERE username='user1'", [], true);
+    const result = await service.registry.execute(tool, { record_id: 17 }, { identity: user, credential: service.credential(), sessionId: "test-session", signal: AbortSignal.timeout(2000) }) as Row;
+    assert.equal(result.credential, "Bearer fixture-user1"); assert.equal(result.id, String(user.id)); assert.equal(result.path, "/records/17");
+    service.identities.user1.permissions = [];
     await assert.rejects(service.registry.execute(tool, {}, { identity: user, credential: service.credential(), sessionId: "test", signal: AbortSignal.timeout(1000) }), /缺少权限/);
   } finally { await service.close(); await upstream.close(); }
 });
 test("decision scoring changes the primary model's authorized tool loadout and exposes transient diagnostics", async () => {
   const upstream = await mockServer((body, request, response) => {
-    if (request.url?.endsWith("/systemone")) { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify({ answers: Object.fromEntries(Object.keys(body.questions).map((key) => [key, { answer: { noul: key === "tool:get_device_stats" ? 0.95 : 0.05 } }])), usage: { input_tokens: 20, output_tokens: 2 } })); return true; }
+    if (request.url?.endsWith("/systemone")) { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify({ answers: Object.fromEntries(Object.keys(body.questions).map((key) => [key, { answer: { noul: key === "tool:business_search" ? 0.95 : 0.05 } }])), usage: { input_tokens: 20, output_tokens: 2 } })); return true; }
     if (body.stream) { sse(response, [{ content: "已根据筛选结果准备查询。" }]); return true; }
     return false;
   });
   const service = await fixture(upstream.baseUrl);
   try {
-    const model = service.store.insert("models", { name: "决策测试", model_id: "decision-custom", provider_id: service.model!.provider_id, model_kind: "decision", extra_params: { _decision: { protocol: "decisions", endpoint: `${upstream.baseUrl}/systemone` } } });
+    const model = service.store.config.insertModel({ name: "决策测试", model_id: "decision-custom", provider_id: service.model!.provider_id, model_kind: "decision", extra_params: { _decision: { protocol: "decisions", endpoint: `${upstream.baseUrl}/systemone` } } });
     service.store.setSettings({ decision_enabled: true, tool_selection_mode: "decision", decision_model_id: model.id, decision_min_count: 1 });
-    const session = await service.session(); const run = await service.runs.start(service.credential(), { session_id: session.id, message: "统计设备" }); const result = await run.task;
-    assert.equal(result.status, "ok"); assert.deepEqual(result.enabled_tools, ["ask_user", "get_device_stats"]);
+    const session = await service.session(); const run = await service.runs.start(service.credential(), { session_id: session.id, message: "查业务记录" }); const result = await run.task;
+    assert.equal(result.status, "ok"); assert.deepEqual(result.enabled_tools, ["ask_user", "business_search"]);
     const tools = upstream.requests.find((request) => request.stream)!.tools.map((tool: Row) => tool.function.name);
-    assert.ok(tools.includes("get_device_stats")); assert.ok(tools.includes("ask_user")); assert.equal(tools.includes("list_devices"), false); assert.equal(tools.includes("tool_search"), false);
+    assert.ok(tools.includes("business_search")); assert.ok(tools.includes("ask_user")); assert.equal(tools.includes("business_update"), false); assert.equal(tools.includes("tool_search"), false);
     const diagnostics = service.runs.diagnostics(run.id); assert.ok(diagnostics.events.some((event) => event.name === "decision.diagnostics"));
-    assert.equal(JSON.stringify(service.store.all("SELECT payload FROM run_events WHERE name='decision.diagnostics'")).includes("统计设备"), false);
+    assert.equal(JSON.stringify(service.store.all("SELECT payload FROM run_events WHERE name='decision.diagnostics'")).includes("查业务记录"), false);
     service.store.setSettings({ admin_session_content: false }); assert.equal(service.runs.diagnostics(run.id).events.some((event) => event.name === "decision.diagnostics"), false);
     assert.throws(() => parseScores({ scores: { one: 1.2 } }, ["one"]), /0–1/);
     assert.equal(decisionConnection({ model_id: "decision-model-preview" }, { base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" }).endpoint, "https://dashscope.aliyuncs.com/compatible-mode/v1/systemone");
@@ -266,14 +265,14 @@ test("tool execution rechecks current tool policy, assistant scope, and risk aft
   try {
     const user = await service.auth.identity(service.credential()); const session = await service.session();
     const assistant = service.runtime.assistant(user);
-    const tool = (await service.registry.permitted(user, assistant)).find((item) => item.name === "get_device_stats")!;
+    const tool = (await service.registry.permitted(user, assistant)).find((item) => item.name === "business_search")!;
     const context = { identity: user, credential: service.credential(), sessionId: session.id, signal: AbortSignal.timeout(2000) };
-    service.store.insert("tool_settings", { name: tool.name, enabled: false });
+    service.store.setToolPolicy(tool.name, { enabled: false });
     await assert.rejects(service.registry.execute(tool, {}, context), /停用/);
-    service.store.update("tool_settings", tool.name, { enabled: true });
-    service.store.update("assistants", assistant.id, { tool_names: ["list_devices"] });
+    service.store.setToolPolicy(tool.name, { enabled: true });
+    service.store.config.updateAssistant(Number(assistant.id), { tool_names: ["business_update"] });
     await assert.rejects(service.registry.execute(tool, {}, context), /助手当前/);
-    service.store.update("assistants", assistant.id, { tool_names: [] });
+    service.store.config.updateAssistant(Number(assistant.id), { tool_names: [] });
     service.registry.register({ ...tool, name: "runtime_risk_change", execute: async () => "not executed" });
     const initial = (await service.registry.all()).find((item) => item.name === "runtime_risk_change")!;
     initial.risk = "write";
@@ -298,14 +297,12 @@ test("session edits invalidate PI context and approvals; memories are user-owned
   } finally { await service.close(); }
 });
 test("embedded mode delegates business identity without seeding demo users or exposing their login", async () => {
-  const identity = { id: 123, username: "external-user", role: "operator", permissions: ["device:read"], is_admin: false };
-  const service = await fixture(undefined, { identityAdapter: { resolve: async (credential) => credential === "business-token" ? identity : null }, demoBusiness: false });
+  const identity = { id: 123, username: "external-user", role: "operator", permissions: ["profile:read"], is_admin: false };
+  const service = await fixture(undefined, { identityAdapter: { resolve: async (credential) => credential === "business-token" ? identity : null } });
   try {
-    assert.equal(service.store.one("SELECT count(*) AS n FROM users", [], true)!.n, 0);
-    assert.equal(service.store.one("SELECT count(*) AS n FROM devices", [], true)!.n, 0);
-    assert.equal((await service.app.inject({ method: "POST", url: "/api/login", payload: { username: "admin", password: "unused" } })).statusCode, 404);
     const response = await service.app.inject({ url: "/api/me", headers: { authorization: "Bearer business-token" } });
     assert.equal(response.json().user.id, 123);
+    assert.equal((await service.app.inject({ url: "/api/me", headers: { authorization: "Bearer fixture-user1" } })).statusCode, 401);
     assert.equal((await service.app.inject({ url: "/api/control/config", headers: { authorization: "Bearer business-token" } })).statusCode, 401);
     assert.ok(await managementCookie(service));
   } finally { await service.close(); }
@@ -317,16 +314,16 @@ test("MCP JSON import is atomic, keeps secrets encrypted, and does not connect o
     const imported = await service.app.inject({ method: "POST", url: "/api/control/admin/mcp-servers/import", headers: { cookie }, payload: { mcpServers: { "测试 HTTP": { type: "streamable-http", url: "https://mcp.example/mcp", headers: { Authorization: "Bearer private-mcp-token" } }, "测试 stdio": { command: "node", args: ["mcp-server.js"], env: { PRIVATE_KEY: "private-env-token" } } } } });
     assert.equal(imported.statusCode, 200); assert.equal(imported.json().items.length, 2);
     assert.equal(imported.body.includes("private-mcp-token"), false);
-    assert.equal(JSON.stringify(service.store.all("SELECT * FROM mcp_servers")).includes("private-env-token"), false);
+    assert.equal(JSON.stringify(service.store.mcpServers()).includes("private-env-token"), false);
     assert.equal((await service.registry.all()).some((tool) => tool.source === "mcp"), false);
     const rejected = await service.app.inject({ method: "POST", url: "/api/control/admin/mcp-servers/import", headers: { cookie }, payload: { mcpServers: { "不应部分写入": { url: "https://mcp.example/mcp" }, "无效条目": { type: "invalid" } } } });
     assert.equal(rejected.statusCode, 422);
-    assert.equal(service.store.one("SELECT count(*) AS n FROM mcp_servers")!.n, 2);
+    assert.equal(service.store.mcpServers().length, 2);
   } finally { await service.close(); }
 });
 test("the same stable business identity shares sessions across web and mini-program credentials", async () => {
-  const identity = { id: 501, username: "zhangsan", display_name: "张三", role: "operator", permissions: ["device:read"], is_admin: false };
-  const service = await fixture(undefined, { demoBusiness: false, identityAdapter: { resolve: async (credential) => ["web-token", "mini-token"].includes(credential) ? identity : null } });
+  const identity = { id: 501, username: "zhangsan", display_name: "张三", role: "operator", permissions: ["profile:read"], is_admin: false };
+  const service = await fixture(undefined, { identityAdapter: { resolve: async (credential) => ["web-token", "mini-token"].includes(credential) ? identity : null } });
   try {
     const created = await service.app.inject({ method: "POST", url: "/api/agent/sessions", headers: { authorization: "Bearer web-token" }, payload: { title: "跨端会话" } });
     assert.equal(created.statusCode, 201);
@@ -334,7 +331,7 @@ test("the same stable business identity shares sessions across web and mini-prog
     assert.equal(listed.statusCode, 200);
     assert.deepEqual(listed.json().items.map((item: Row) => item.id), [created.json().session.id]);
     assert.equal((await service.app.inject({ url: `/api/agent/sessions/${created.json().session.id}/messages`, headers: { authorization: "Bearer mini-token" } })).statusCode, 200);
-    const other = await fixture(undefined, { demoBusiness: false, identityAdapter: { resolve: async (credential) => credential === "other-token" ? { ...identity, id: 502, username: "lisi" } : null } });
+    const other = await fixture(undefined, { identityAdapter: { resolve: async (credential) => credential === "other-token" ? { ...identity, id: 502, username: "lisi" } : null } });
     try {
       assert.equal((await other.app.inject({ url: "/api/agent/sessions" , headers: { authorization: "Bearer other-token" } })).json().items.length, 0);
     } finally { await other.close(); }
@@ -345,7 +342,7 @@ test("ask_user creates a user-owned interactive question, pauses the run, and re
     if (!body.stream) return false;
     const prompt = JSON.stringify(body.messages || []);
     if (prompt.includes("用户已回答上一轮问题")) { sse(response, [{ content: "已根据你的选择继续。" }]); return true; }
-    toolCall(response, "ask_user", { question: "请选择设备范围", description: "不同范围会影响查询结果", options: [{ label: "全部设备", value: "all" }, { label: "仅离线设备", value: "offline" }], selection: "single", allow_free_text: true });
+    toolCall(response, "ask_user", { question: "请选择查询范围", description: "不同范围会影响查询结果", options: [{ label: "全部记录", value: "all" }, { label: "仅异常记录", value: "abnormal" }], selection: "single", allow_free_text: true });
     return true;
   });
   const service = await fixture(upstream.baseUrl);
@@ -360,7 +357,7 @@ test("ask_user creates a user-owned interactive question, pauses the run, and re
     assert.equal(service.store.conversations.latestAssistant(session.id)!.metadata.question.id, first.question.id);
     await assert.rejects(service.runs.answer(service.credential("user2"), first.question.id, { values: ["all"] }), /不存在/);
     await assert.rejects(service.runs.answer(credential, first.question.id, { values: ["invalid"] }), /无效选项/);
-    const answered = await (await service.runs.answer(credential, first.question.id, { values: ["offline"], free_text: "只看离线" })).task;
+    const answered = await (await service.runs.answer(credential, first.question.id, { values: ["abnormal"], free_text: "只看异常" })).task;
     assert.equal(answered.status, "ok");
     assert.match(answered.answer, /继续/);
     assert.equal(service.store.one("SELECT status FROM questions WHERE id=?", [first.question.id])!.status, "answered");
@@ -410,7 +407,7 @@ test("a failed new message does not cancel a pending question before the model i
     const session = await service.session(); const credential = service.credential();
     const first = await (await service.runs.start(credential, { session_id: session.id, message: "需要补充信息" })).task;
     assert.equal(first.status, "question_required");
-    service.store.update("models", service.model!.id, { enabled: false });
+    service.store.config.updateModel(Number(service.model!.id), { enabled: false });
     const failed = await (await service.runs.start(credential, { session_id: session.id, message: "模型不可用时的新消息" })).task;
     assert.equal(failed.status, "error");
     assert.match(failed.message, /没有可用对话模型/);

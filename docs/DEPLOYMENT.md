@@ -25,11 +25,10 @@ npm start
 | `WEBAGENT_BIND_HOST` | `127.0.0.1`，容器内部设 `0.0.0.0` |
 | `WEBAGENT_PORT` | 后端 `8000` |
 | `WEBAGENT_CONTROL_PASSWORD` | 首次创建独立管理账号 `admin` 的密码 |
-| `WEBAGENT_ADMIN_PASSWORD` | 首次创建 Demo 业务管理员的密码；不是管理控制台密码 |
 | `WEBAGENT_SECRET_KEY` | 凭据加密根密钥；丢失则无法解密已保存 Key，必须备份 |
-| `WEBAGENT_PI_DATA_DIR` | `./data/pi`，相对路径基于项目根目录，不基于 workspace 当前目录 |
-| `WEBAGENT_DATA_DIR` | 可选导入旧数据的源目录，默认 `data` |
-| `WEBAGENT_SEED_DEMO_USERS` | 本地默认开启；`0` 不新建 user1–3，不删除既有用户 |
+| `WEBAGENT_DATA_DIR` | 数据根目录，默认 `./data`；相对路径基于项目根目录，不基于 workspace 当前目录。旧 `WEBAGENT_PI_DATA_DIR` 仅作为兼容读取 |
+| `WEBAGENT_LEGACY_DIR` | `npm run migrate` 的旧库源目录，默认 `legacy/` |
+| `WEBAGENT_MODELSDEV_WARMUP` | 默认开启；设为 `0` 时启动不后台拉取 models.dev |
 | `WEBAGENT_COOKIE_SECURE` | HTTPS 部署设置 `1`；本机 HTTP 为 `0` |
 | `WEBAGENT_SESSION_HOURS` | 登录过期时长，默认 24 小时 |
 | `WEBAGENT_ALLOW_STDIO` | 默认 `0`，是否允许服务端启动 stdio MCP |
@@ -66,7 +65,6 @@ Compose 默认 localhost 端口，远程部署时设置实际域名，例如：
 WEBAGENT_CHAT_URL=https://chat.example.com/chat/
 WEBAGENT_ADMIN_URL=https://control.example.com/admin/
 WEBAGENT_COOKIE_SECURE=1
-WEBAGENT_SEED_DEMO_USERS=0
 ```
 
 Vite 的 `VITE_*` 是公开的构建时变量，不能存任何密钥。变更公开 URL 后需要重新 build 前端。非 Compose 可分别在 `admin/.env.local`、`chat/.env.local` 设置 `VITE_CHAT_URL`、`VITE_ADMIN_URL`、`VITE_BUSINESS_URL`；跨域管理端可设置公开地址 `VITE_CONTROL_API_BASE`，但管理 Token 必须在登录页输入，不能放进构建变量。
@@ -117,7 +115,6 @@ import { createWebAgent } from "@webagent/server";
 const service = await createWebAgent({
   identityAdapter,
   tools: businessTools,
-  demoBusiness: false,
   staticUi: false,
 });
 
@@ -146,13 +143,14 @@ npm start
 
 行为：
 
-1. 从 `WEBAGENT_DATA_DIR` 找 `agent.db`、`business.db`。
-2. 先做一致性备份到 `backups/before-pi-*`。
-3. 导入新的 `WEBAGENT_PI_DATA_DIR`；目标已有库则拒绝覆盖。
+1. 从 `WEBAGENT_LEGACY_DIR`（默认 `legacy/`）找旧 `agent.db`。
+2. 先做一致性备份到 `data/runtime/backups/before-import-*`。
+3. 导入 `data/runtime/agent.db`；目标已存在则拒绝覆盖。
 4. 新后端初始化自己的表与 PI 状态；旧数据库原样保留。
-5. 供应商 / Token 解密需要原来的 `WEBAGENT_SECRET_KEY`；恢复后重封装为 AES-GCM。
+5. 首次启动会把旧配置表导出为 `data/config/*.json`，再写入 `VACUUM INTO` 备份并删除表。
+6. 供应商 / Token 解密需要原来的 `WEBAGENT_SECRET_KEY`；恢复后重封装为 AES-GCM。
 
-旧业务账号密码哈希可继续验证，但新的框架管理账号独立创建。启动时会自动把旧会话表的历史 `user_id` 迁移为 `owner_key`，并移除历史 `NOT NULL` 约束，以支持没有数字主键的嵌入身份；迁移保留原值，不伪造业务用户 ID。旧连接器名称 / 权限和模型专用协议必须重新检查，不把旧 MCP 配置自动开放。旧审批不自动执行，旧 `demo_mode` 不产生模拟回复。
+旧业务账号表不再读取，业务身份统一由 `IdentityAdapter` 或接入 Token 提供。启动时会自动把旧会话表的历史 `user_id` 迁移为 `owner_key`，并移除历史 `NOT NULL` 约束，以支持没有数字主键的嵌入身份；迁移保留原值，不伪造业务用户 ID。旧连接器名称 / 权限和模型专用协议必须重新检查，不把旧 MCP 配置自动开放。旧审批不自动执行。
 
 迁移前确认源数据库实际使用的加密根密钥，而不是仅检查当前 `.env`。如果旧环境曾更换过密钥，须从原部署备份恢复正确密钥后处理；导入器不会猜测密钥，也不会把无法解密的值当作可用凭据。不要删除原库与备份来绕过错误。
 
@@ -164,7 +162,7 @@ npm start
 
 恢复时同时恢复加密根密钥与数据目录，再启动相同版本或已验证兼容的新版本。进程重启后，未完成任务显示 `interrupted`；待执行审批、发布结果不明的操作须核对，不自动重放。
 
-默认清理：会话 30 天、事件 1 天；发布内容版本不随会话保留策略删除，需业务自行确定档案保留和清理策略。聊天正文、附件 Base64 与 PI entries 保存在 `data/pi/conversations/*.json`，不在 SQLite；备份必须覆盖整个 `data/pi/`，生产大量多模态历史宜适配对象存储。
+默认清理：会话 30 天、事件 1 天；发布内容版本不随会话保留策略删除，需业务自行确定档案保留和清理策略。聊天正文、附件 Base64 与 PI entries 保存在 `data/sessions/*.json`，不在 SQLite；备份必须覆盖整个 `data/`，生产大量多模态历史宜适配对象存储。
 
 ## 7. PI 升级
 

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { AppError, type Row } from "./types.js";
+import { storagePaths } from "./storage-paths.js";
 
 interface ConversationFile {
   version: 1;
@@ -20,7 +21,7 @@ export class ConversationStore {
   readonly root: string;
 
   constructor(readonly dataDir: string) {
-    this.root = path.join(dataDir, "conversations");
+    this.root = storagePaths(dataDir).sessions;
   }
 
   initialize(store: LegacyStore) {

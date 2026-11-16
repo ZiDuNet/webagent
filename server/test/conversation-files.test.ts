@@ -12,7 +12,7 @@ test("conversation bodies and PI entries are stored as per-session JSON files, n
     service.store.conversations.insert(session.id, { role: "assistant", content: "正文只写 JSON 文件" });
     service.store.conversations.savePiEntries(session.id, [{ type: "session" }, { type: "message" }]);
 
-    const file = path.join(service.dir, "conversations", `${session.id}.json`);
+    const file = path.join(service.dir, "sessions", `${session.id}.json`);
     assert.equal(fs.existsSync(file), true, "conversation JSON must exist");
     const data = JSON.parse(fs.readFileSync(file, "utf8"));
     assert.equal(data.messages.length, 2);
@@ -36,7 +36,7 @@ test("conversation bodies and PI entries are stored as per-session JSON files, n
       payload: { until_message_id: userMessage.id },
     });
     assert.equal(fork.statusCode, 201, fork.body);
-    const forkFile = path.join(service.dir, "conversations", `${fork.json().session.id}.json`);
+    const forkFile = path.join(service.dir, "sessions", `${fork.json().session.id}.json`);
     assert.equal(fs.existsSync(forkFile), true);
     assert.equal(JSON.parse(fs.readFileSync(forkFile, "utf8")).messages.length, 1);
 
@@ -69,7 +69,7 @@ test("legacy SQLite messages migrate into JSON files with a backup and are dropp
     await service.app.close();
     service.store.close();
     const { DatabaseSync } = await import("node:sqlite");
-    const db = new DatabaseSync(path.join(dir, "agent.db"));
+    const db = new DatabaseSync(path.join(dir, "runtime", "agent.db"));
     db.exec(`
       CREATE TABLE messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,10 +92,10 @@ test("legacy SQLite messages migrate into JSON files with a backup and are dropp
     const { Store } = await import("../src/store.js");
     const migrated = new Store(dir);
     try {
-      const file = path.join(dir, "conversations", `${sessionId}.json`);
+      const file = path.join(dir, "sessions", `${sessionId}.json`);
       assert.equal(fs.existsSync(file), true);
       assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).messages[0].content, "旧消息");
-      assert.equal(fs.existsSync(path.join(dir, "conversations", ".legacy-conversations.json")), true);
+      assert.equal(fs.existsSync(path.join(dir, "sessions", ".legacy-conversations.json")), true);
       assert.equal(migrated.one("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"), undefined);
       assert.equal(migrated.one("SELECT name FROM sqlite_master WHERE type='table' AND name='pi_state'"), undefined);
     } finally {

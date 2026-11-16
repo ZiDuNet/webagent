@@ -18,4 +18,4 @@
 
 新架构的真实入口是独立 React `/admin/` 与 `/chat/`，实现和验收以当前源码、README、测试及新版本截图为准。新截图应使用不含供应商 Key、Token 和真实用户会话的隔离数据。
 
-历史文件：`admin-models.jpg`、`admin-decision.jpg`、`admin-runtime.jpg`、`admin-tools.jpg`、`admin-voice.jpg`、`business-devices.jpg`、`chat-desktop.jpg`、`chat-mermaid.jpg`、`chat-mobile.jpg`、`chat-process.jpg`。
+历史文件：`admin-models.jpg`、`admin-decision.jpg`、`admin-runtime.jpg`、`admin-tools.jpg`、`admin-voice.jpg`、`chat-desktop.jpg`、`chat-mermaid.jpg`、`chat-mobile.jpg`、`chat-process.jpg`。

@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { AppError, type Row } from "./types.js";
 import type { ImportedSkill } from "./skills.js";
+import { storagePaths } from "./storage-paths.js";
+import type { Store } from "./store.js";
 
 const META_FILE = ".webagent-skill.json";
 const TEXT_FILE = /\.(md|txt|json|ya?ml|csv)$/i;
@@ -65,22 +67,28 @@ export class SkillLibrary {
   private readonly runtimeRoot: string;
 
   constructor(readonly dataDir: string) {
-    this.root = path.join(dataDir, "skill-library");
-    this.runtimeRoot = path.join(dataDir, "skill-runtime");
+    const paths = storagePaths(dataDir);
+    this.root = paths.skills;
+    this.runtimeRoot = paths.skillRuntime;
   }
 
-  initialize(store: { all: (sql: string) => Row[]; update: (table: string, id: number, values: Row) => Row | undefined; run: (sql: string, values?: unknown[]) => unknown }, options: { demoBusiness?: boolean } = {}) {
+  initialize(store: Store) {
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
     this.migrateLegacy(store);
-    if (options.demoBusiness && !this.has("device-inspection")) {
-      this.saveImported({
-        slug: "device-inspection",
-        name: "设备巡检规范",
-        description: "设备状态判断与运维报告规范",
-        content: "先查询真实设备状态。在线正常监控，维护中确认维护窗口，离线排查供电和网络。输出结论、数据来源和建议。",
-        files: {},
-        metadata: { builtin: true },
-      }, { enabled: true, builtin: true });
+    this.removeLegacyDemoSkill();
+  }
+
+  /** 旧演示版本会内置「设备巡检」Skill；只删除仍带 builtin 标记的同名种子，不碰用户自建内容。 */
+  private removeLegacyDemoSkill() {
+    const dir = this.skillPath("device-inspection");
+    if (fs.existsSync(dir)) {
+      if (this.readMeta(dir).builtin !== true) return;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    // 运行副本是派生数据；删掉含旧 Skill 的物化目录，下次运行会按当前列表重新生成。
+    if (!fs.existsSync(this.runtimeRoot)) return;
+    for (const item of fs.readdirSync(this.runtimeRoot, { withFileTypes: true })) {
+      if (item.isDirectory() && fs.existsSync(path.join(this.runtimeRoot, item.name, "device-inspection"))) fs.rmSync(path.join(this.runtimeRoot, item.name), { recursive: true, force: true });
     }
   }
 
@@ -283,7 +291,7 @@ export class SkillLibrary {
     return root;
   }
 
-  private migrateLegacy(store: { all: (sql: string) => Row[]; update: (table: string, id: number, values: Row) => Row | undefined; run: (sql: string, values?: unknown[]) => unknown }) {
+  private migrateLegacy(store: Store) {
     let rows: Row[] = [];
     try { rows = store.all("SELECT * FROM skills"); } catch { return; }
     if (!rows.length) {
@@ -322,11 +330,11 @@ export class SkillLibrary {
       console.warn(`[skills] ${failed.length} 条旧数据库技能未能迁移，已保留 skills 表以免数据丢失；备份：${path.join(this.root, ".legacy-skills.json")}`, failed);
       return;
     }
-    for (const assistant of store.all("SELECT * FROM assistants")) {
+    for (const assistant of store.assistants()) {
       const current = Array.isArray(assistant.skill_slugs) ? assistant.skill_slugs : [];
       if (current.length || !Array.isArray(assistant.skill_ids) || !assistant.skill_ids.length) continue;
       const slugs = assistant.skill_ids.map((id: unknown) => mapped.get(Number(id))).filter((slug: string | undefined): slug is string => Boolean(slug));
-      store.update("assistants", Number(assistant.id), { skill_slugs: slugs });
+      store.config.updateAssistant(Number(assistant.id), { skill_slugs: slugs });
     }
     store.run("DELETE FROM skills");
     try { store.run("DROP TABLE skills"); } catch { /* Keep the empty table if the database is read-only. */ }

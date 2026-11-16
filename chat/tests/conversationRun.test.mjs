@@ -37,7 +37,7 @@ test("decision phase exposes administrator input, output, summary and usage deta
     title: "已准备 1 个工具 · 0 个技能",
     description: "决策测试已对 2 个候选评分，阈值 0.60。",
     meta: "240ms · 输入 120 / 输出 8 tokens",
-    arguments: { input: { state: "查设备", candidates: ["tool:read"] } },
+    arguments: { input: { state: "查记录", candidates: ["tool:read"] } },
     result: { parsed_scores: { "tool:read": 0.9 } },
     input_label: "决策模型输入",
     output_label: "决策模型输出",
@@ -54,16 +54,16 @@ test("decision phase exposes administrator input, output, summary and usage deta
 
 test("thinking never hides the tool action or the answer", () => {
   const run = new ConversationRun();
-  run.accept("thinking.delta", { delta: "先查询设备。" });
-  run.accept("tool.args.delta", { tool: "get_device_stats", call_id: "stats", delta: "{" });
-  assert.equal(run.title, "准备调用 get_device_stats");
+  run.accept("thinking.delta", { delta: "先查询业务记录。" });
+  run.accept("tool.args.delta", { tool: "business_search", call_id: "stats", delta: "{" });
+  assert.equal(run.title, "准备调用 business_search");
   assert.equal(run.steps[0].status, "done");
-  run.accept("tool.started", { tool: "get_device_stats", call_id: "stats", arguments: {} });
-  assert.equal(run.title, "正在调用 get_device_stats");
-  run.accept("tool.finished", { tool: "get_device_stats", call_id: "stats", status: "ok", result: { total: 10 } });
+  run.accept("tool.started", { tool: "business_search", call_id: "stats", arguments: {} });
+  assert.equal(run.title, "正在调用 business_search");
+  run.accept("tool.finished", { tool: "business_search", call_id: "stats", status: "ok", result: { total: 10 } });
   run.accept("step.started", { step: 2 });
   assert.equal(run.title, "等待模型继续");
-  run.accept("text.delta", { delta: "共有 10 台设备。" });
+  run.accept("text.delta", { delta: "共有 10 条记录。" });
   assert.equal(run.title, "正在回答");
   assert.deepEqual(run.steps.filter((step) => step.status === "running").map((step) => step.kind), ["answer"]);
   assert.equal(run.steps.filter((step) => step.kind === "tool").length, 1);
@@ -122,8 +122,8 @@ test("a completed error response is never shown as successful", () => {
 
 test("approval uses the existing tool row and remains an approval after completion", () => {
   const run = new ConversationRun();
-  run.accept("tool.args.delta", { tool: "delete_device", call_id: "delete", delta: "{}" });
-  run.accept("tool.approval_required", { tool: "delete_device", id: "approval", arguments: { device_id: 5 } });
+  run.accept("tool.args.delta", { tool: "delete_record", call_id: "delete", delta: "{}" });
+  run.accept("tool.approval_required", { tool: "delete_record", id: "approval", arguments: { record_id: 5 } });
   run.accept("run.completed", { status: "approval_required" });
   assert.equal(run.snapshot().status, "approval");
   assert.equal(run.steps.length, 1);
@@ -165,9 +165,9 @@ test("multiple tool requests stay pending until each is actually executed", () =
 });
 
 test("streaming HTML is hidden from Markdown while its progress remains available", () => {
-  const result = extractHtmlArtifacts("说明\n```html\n<!doctype html><html><head><title>设备总览</title></head><body>", "message", true);
+  const result = extractHtmlArtifacts("说明\n```html\n<!doctype html><html><head><title>业务总览</title></head><body>", "message", true);
   assert.deepEqual(result.parts, [{ kind: "markdown", content: "说明\n" }]);
-  assert.equal(result.pendingHtml.title, "设备总览");
+  assert.equal(result.pendingHtml.title, "业务总览");
   assert.ok(result.pendingHtml.characters > 30);
   assert.equal(result.artifacts.length, 0);
 });
@@ -222,21 +222,21 @@ test("single-line playback contains phases, reasoning, safe tool inputs, results
   const run = new ConversationRun();
   run.accept("run.phase", { phase: "context", title: "检查上下文" });
   run.accept("step.started", { step: 1 });
-  run.accept("thinking.delta", { delta: "先读取设备统计，再分析离线设备。" });
-  run.accept("tool.started", { tool: "设备统计", call_id: "stats", arguments: { status: "offline" } });
-  run.accept("tool.finished", { tool: "设备统计", call_id: "stats", status: "ok", summary: "共 12 台", result: { total: 12 } });
+  run.accept("thinking.delta", { delta: "先读取业务统计，再分析异常记录。" });
+  run.accept("tool.started", { tool: "业务统计", call_id: "stats", arguments: { status: "abnormal" } });
+  run.accept("tool.finished", { tool: "业务统计", call_id: "stats", status: "ok", summary: "共 12 条", result: { total: 12 } });
   run.accept("step.started", { step: 2 });
   run.accept("thinking.delta", { delta: "已有结果，整理可操作的建议。" });
-  run.accept("text.delta", { delta: "共查询到 **12 台设备**。" });
+  run.accept("text.delta", { delta: "共查询到 **12 条记录**。" });
   const activities = processActivities(run.snapshot());
   assert.deepEqual(activities.map((activity) => activity.title), [
-    "检查上下文", "模型请求已发送", "模型思考", "正在调用 设备统计", "设备统计 · 参数",
-    "工具已返回 · 设备统计", "设备统计 · 结果", "模型请求已发送", "模型思考", "回答内容",
+    "检查上下文", "模型请求已发送", "模型思考", "正在调用 业务统计", "业务统计 · 参数",
+    "工具已返回 · 业务统计", "业务统计 · 结果", "模型请求已发送", "模型思考", "回答内容",
   ]);
-  assert.equal(activities[2].preview, "先读取设备统计，再分析离线设备。");
-  assert.equal(activities[4].preview, '{"status":"offline"}');
+  assert.equal(activities[2].preview, "先读取业务统计，再分析异常记录。");
+  assert.equal(activities[4].preview, '{"status":"abnormal"}');
   assert.equal(activities[6].preview, '{"total":12}');
-  assert.equal(activities.at(-1).preview, "共查询到 **12 台设备**。");
+  assert.equal(activities.at(-1).preview, "共查询到 **12 条记录**。");
   assert.ok(activities.every((activity) => !/第 \d+ 轮|已完成 ·/.test(activity.title)));
   run.accept("run.completed", { status: "ok", answer: "完成" });
   assert.deepEqual(processActivities(run.snapshot()).map((activity) => activity.title), ["已完成"]);
@@ -244,7 +244,7 @@ test("single-line playback contains phases, reasoning, safe tool inputs, results
 
 test("long output is split into readable sequential fragments without losing content", () => {
   const run = new ConversationRun();
-  const reasoning = "逐项核对设备。🙂".repeat(30);
+  const reasoning = "逐项核对记录。🙂".repeat(30);
   for (const delta of [reasoning.slice(0, 57), reasoning.slice(57)]) run.accept("thinking.delta", { delta });
   const activities = processActivities(run.snapshot());
   assert.ok(activities.length > 3);

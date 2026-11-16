@@ -26,19 +26,19 @@ test("speech text drains complete sentences and caps long unpunctuated fragments
 });
 
 test("speech text excludes markdown tables, code, HTML and URLs", () => {
-  const readable = speakableText("# 标题\n| 设备 | 状态 |\n|---|---|\n| 交换机 | 在线 |\n```js\nconst secret = 1;\n```\n<html><body>不应朗读</body></html>\n正文 [链接](https://example.com) 结束");
+  const readable = speakableText("# 标题\n| 项目 | 状态 |\n|---|---|\n| 示例 | 正常 |\n```js\nconst secret = 1;\n```\n<html><body>不应朗读</body></html>\n正文 [链接](https://example.com) 结束");
   assert.match(readable, /标题/);
   assert.match(readable, /正文/);
   assert.match(readable, /链接/);
-  assert.doesNotMatch(readable, /设备|交换机|secret|不应朗读|example\.com/);
+  assert.doesNotMatch(readable, /项目|示例|secret|不应朗读|example\.com/);
 });
 
 test("echo guard ignores TTS loopback without dropping unrelated user speech", () => {
-  const spoken = "当前系统共有五台设备，分别是交换机、路由器和防火墙。";
-  assert.equal(isLikelyEcho("当前系统共有五台设备", spoken), true);
-  assert.equal(isLikelyEcho("交换机、路由器和防火墙", spoken), true);
-  assert.equal(isLikelyEcho("当前系统共有五台设备分别是交换机和路由器", spoken), true);
-  assert.equal(isLikelyEcho("帮我查一下设备列表", spoken), false);
+  const spoken = "当前系统共有五条记录，分别是正常、异常和待处理。";
+  assert.equal(isLikelyEcho("当前系统共有五条记录", spoken), true);
+  assert.equal(isLikelyEcho("正常、异常和待处理", spoken), true);
+  assert.equal(isLikelyEcho("当前系统共有五条记录分别是正常和异常", spoken), true);
+  assert.equal(isLikelyEcho("帮我查一下记录列表", spoken), false);
   assert.equal(isLikelyEcho("好的", spoken), false);
 });
 
@@ -63,7 +63,7 @@ test("Chat Audio ASR forwards validated client WAV and refuses compressed input 
   });
   const service = await fixture(upstream.baseUrl);
   try {
-    const model = service.store.insert("models", { name: "Qwen ASR", provider_id: service.model!.provider_id, model_id: "qwen3-asr-flash", model_kind: "asr" });
+    const model = service.store.config.insertModel({ name: "Qwen ASR", provider_id: service.model!.provider_id, model_id: "qwen3-asr-flash", model_kind: "asr" });
     const wav = Buffer.from(encodePcmWav(new Float32Array(160)));
     assert.equal((await service.speech.transcribe(model, `data:audio/wav;base64,${wav.toString("base64")}`)).text, "客户端转码成功");
     await assert.rejects(service.speech.transcribe(model, "data:audio/webm;base64,aGVsbG8="), /客户端转换/);
@@ -88,7 +88,7 @@ test("realtime ASR sends client PCM over WebSocket without local ffmpeg", async 
   http.listen(0, "127.0.0.1"); await once(http, "listening");
   const service = await fixture(`http://127.0.0.1:${(http.address() as { port: number }).port}`);
   try {
-    const model = service.store.insert("models", { name: "Realtime ASR", provider_id: service.model!.provider_id, model_id: "qwen3-asr-flash-realtime", model_kind: "asr_realtime" });
+    const model = service.store.config.insertModel({ name: "Realtime ASR", provider_id: service.model!.provider_id, model_id: "qwen3-asr-flash-realtime", model_kind: "asr_realtime" });
     const result = await service.speech.transcribe(model, `data:audio/wav;base64,${wav.toString("base64")}`);
     assert.equal(result.text, "实时协议成功"); assert.equal(result.protocol, "realtime");
     assert.deepEqual(Buffer.concat(chunks), pcmFromWav(wav));
@@ -105,7 +105,7 @@ test("realtime TTS cancellation before finish stays a handled rejection", async 
   http.listen(0, "127.0.0.1"); await once(http, "listening");
   const service = await fixture(`http://127.0.0.1:${(http.address() as { port: number }).port}`);
   try {
-    const model = service.store.insert("models", { name: "Realtime TTS", provider_id: service.model!.provider_id, model_id: "qwen3-tts-flash-realtime", model_kind: "tts_realtime" });
+    const model = service.store.config.insertModel({ name: "Realtime TTS", provider_id: service.model!.provider_id, model_id: "qwen3-tts-flash-realtime", model_kind: "tts_realtime" });
     const controller = new AbortController();
     const session = await service.speech.openTtsRealtime(model, () => {}, controller.signal);
     session.append("第一句。");

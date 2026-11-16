@@ -25,19 +25,19 @@ test("PI SDK streams text and thinking, persists a resumable canonical session w
     assert.equal(lastRequest.temperature, 0.3);
     const toolNames = lastRequest.tools.map((tool: Row) => tool.function.name);
     assert.ok(toolNames.includes("read"), "PI native Skill read tool should be available");
-    for (const forbidden of ["bash", "write", "edit", "delete_device", "create_device", "update_device"]) assert.equal(toolNames.includes(forbidden), false, forbidden);
+    for (const forbidden of ["bash", "write", "edit", "business_update"]) assert.equal(toolNames.includes(forbidden), false, forbidden);
   } finally { await service.close(); await upstream.close(); }
 });
 test("PI executes authorized native tools and returns their actual results", async () => {
   const upstream = await mockServer((body, _request, response) => {
     if (!body.stream) return false;
-    if (body.messages.at(-1).role === "tool") sse(response, [{ content: "已获取设备统计。" }]);
-    else toolCall(response, "get_device_stats", {});
+    if (body.messages.at(-1).role === "tool") sse(response, [{ content: "已获取业务记录。" }]);
+    else toolCall(response, "business_search", {});
     return true;
   });
   const service = await fixture(upstream.baseUrl);
   try {
-    const session = await service.session(); const run = await service.runs.start(service.credential(), { session_id: session.id, message: "统计设备" });
+    const session = await service.session(); const run = await service.runs.start(service.credential(), { session_id: session.id, message: "查询业务记录" });
     const result = await run.task;
     assert.equal(result.status, "ok"); assert.equal(result.run.steps, 2); assert.equal(result.run.tool_calls, 1);
     assert.equal(result.tool_runs[0].result.total, 5);
@@ -48,24 +48,26 @@ test("write tools wait for approval, revalidate permissions, and cannot be repla
   const upstream = await mockServer((body, _request, response) => {
     if (!body.stream) return false;
     const last = body.messages.at(-1);
-    if (last.role === "user" && JSON.stringify(last.content).includes("服务器实际执行完成")) sse(response, [{ content: "设备名称已更新。" }]);
-    else toolCall(response, "update_device", { device_id: 1, name: "审批更新" });
+    if (last.role === "user" && JSON.stringify(last.content).includes("服务器实际执行完成")) sse(response, [{ content: "业务记录已更新。" }]);
+    else toolCall(response, "business_update", { id: 1, name: "审批更新" });
     return true;
   });
   const service = await fixture(upstream.baseUrl);
   try {
+    service.identities.user2.permissions = ["profile:read", "business:update"];
     const session = await service.session("user2"); const credential = service.credential("user2");
-    const first = await (await service.runs.start(credential, { session_id: session.id, message: "修改设备1名称", approval_mode: "confirm" })).task;
+    const first = await (await service.runs.start(credential, { session_id: session.id, message: "修改记录1名称", approval_mode: "confirm" })).task;
     assert.equal(first.status, "approval_required");
-    assert.notEqual(service.store.one("SELECT name FROM devices WHERE id=1", [], true)!.name, "审批更新");
+    assert.equal(service.toolCalls.length, 0);
     const result = await (await service.runs.approval(credential, first.approval.id, true)).task;
     assert.equal(result.status, "ok");
-    assert.equal(service.store.one("SELECT name FROM devices WHERE id=1", [], true)!.name, "审批更新");
+    assert.deepEqual(service.toolCalls, [{ name: "business_update", args: { id: 1, name: "审批更新" } }]);
     await assert.rejects(service.runs.approval(credential, first.approval.id, true), /已处理/);
-    const second = await (await service.runs.start(credential, { session_id: session.id, message: "再修改设备" })).task;
-    service.store.run("UPDATE users SET permissions=? WHERE username='user2'", [["device:read"]], true);
+    const second = await (await service.runs.start(credential, { session_id: session.id, message: "再修改记录" })).task;
+    service.identities.user2.permissions = ["profile:read"];
     const revoked = await (await service.runs.approval(credential, second.approval.id, true)).task;
     assert.equal(revoked.status, "error");
+    assert.equal(service.toolCalls.length, 1);
   } finally { await service.close(); await upstream.close(); }
 });
 test("PI's BM25 deferred discovery and disabled routing are distinct, never simultaneous", async () => {
@@ -76,10 +78,10 @@ test("PI's BM25 deferred discovery and disabled routing are distinct, never simu
     const result = await (await service.runs.start(service.credential(), { session_id: session.id, message: "你好" })).task;
     assert.equal(result.status, "ok");
     const names = upstream.requests.find((request) => request.stream)!.tools.map((tool: Row) => tool.function.name);
-    assert.ok(names.includes("tool_search")); assert.equal(names.includes("get_device_stats"), false);
+    assert.ok(names.includes("tool_search")); assert.equal(names.includes("business_search"), false);
     service.store.setSettings({ bm25_enabled: false, tool_selection_mode: "none" });
     await (await service.runs.start(service.credential(), { session_id: session.id, message: "再问" })).task;
-    assert.ok(upstream.requests.filter((request) => request.stream).at(-1)!.tools.some((tool: Row) => tool.function.name === "get_device_stats"));
+    assert.ok(upstream.requests.filter((request) => request.stream).at(-1)!.tools.some((tool: Row) => tool.function.name === "business_search"));
   } finally { await service.close(); await upstream.close(); }
 });
 test("manual context compaction uses the configured summarizer, not a separate handwritten loop", async () => {
@@ -107,7 +109,7 @@ test("PI treats administrator credentials and headers literally and never expand
   });
   const service = await fixture(upstream.baseUrl);
   try {
-    service.store.update("providers", service.model!.provider_id, { api_key: "!printf never-execute-$HOME", extra_headers: { "X-Literal": "!printf literal-${HOME}-$PATH" } });
+    service.store.config.updateProvider(Number(service.model!.provider_id), { api_key: "!printf never-execute-$HOME", extra_headers: { "X-Literal": "!printf literal-${HOME}-$PATH" } });
     const session = await service.session();
     const result = await (await service.runs.start(service.credential(), { session_id: session.id, message: "!printf this-is-only-user-text" })).task;
     assert.equal(result.status, "ok");
@@ -116,12 +118,12 @@ test("PI treats administrator credentials and headers literally and never expand
   } finally { await service.close(); await upstream.close(); }
 });
 test("PI honors a one-turn budget and cannot loop indefinitely on repeated tool requests", async () => {
-  const upstream = await mockServer((body, _request, response) => { if (!body.stream) return false; toolCall(response, "get_device_stats", {}); return true; });
+  const upstream = await mockServer((body, _request, response) => { if (!body.stream) return false; toolCall(response, "business_search", {}); return true; });
   const service = await fixture(upstream.baseUrl);
   try {
     service.store.setSettings({ max_iterations: 1 });
     const session = await service.session();
-    const result = await (await service.runs.start(service.credential(), { session_id: session.id, message: "统计设备" })).task;
+    const result = await (await service.runs.start(service.credential(), { session_id: session.id, message: "查询业务记录" })).task;
     assert.equal(result.run.steps, 1); assert.equal(result.run.tool_calls, 1);
     assert.equal(result.status, "limited"); assert.match(result.answer, /推理轮次上限/);
     assert.equal(upstream.requests.filter((request) => request.stream).length, 1);
@@ -136,7 +138,7 @@ test("fallback models update their context budget and saved model selection", as
   });
   const service = await fixture(upstream.baseUrl);
   try {
-    const fallback = service.store.insert("models", { provider_id: service.model!.provider_id, name: "Fallback", model_id: "test-fallback", context_window: 8192, max_output_tokens: 1024 });
+    const fallback = service.store.config.insertModel({ provider_id: service.model!.provider_id, name: "Fallback", model_id: "test-fallback", context_window: 8192, max_output_tokens: 1024 });
     service.store.setSettings({ fallback_model_id: fallback.id });
     const session = await service.session();
     const result = await (await service.runs.start(service.credential(), { session_id: session.id, message: "主模型不可用时回答" })).task;
@@ -209,7 +211,7 @@ test("automatic compaction releases the completed answer before the run settles"
   });
   const service = await fixture(upstream.baseUrl);
   try {
-    service.store.update("models", service.model!.id, { context_window: 2500, max_output_tokens: 256 });
+    service.store.config.updateModel(Number(service.model!.id), { context_window: 2500, max_output_tokens: 256 });
     service.store.setSettings({ context_compression: true, context_reserve_tokens: 1600, compaction_keep_ratio: 0.2 });
     const session = await service.session();
     for (let index = 0; index < 3; index++) {
@@ -217,7 +219,7 @@ test("automatic compaction releases the completed answer before the run settles"
       service.store.conversations.insert(session.id, { role: "assistant", content: `历史回答 ${index}。` + "已查询业务结果".repeat(40) });
     }
     const events: string[] = [];
-    const run = await service.runs.startWithListener(service.credential(), { session_id: session.id, message: "总结目前设备情况" }, (name) => events.push(name));
+    const run = await service.runs.startWithListener(service.credential(), { session_id: session.id, message: "总结目前业务情况" }, (name) => events.push(name));
     const result = await run.task;
     assert.equal(result.status, "ok");
     assert.match(result.answer, /压缩不应阻塞展示/);

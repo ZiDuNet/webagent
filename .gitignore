@@ -25,6 +25,7 @@ Thumbs.db
 
 # Runtime data
 data/
+data.bak-*/
 logs/
 uploads/
 backups/

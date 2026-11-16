@@ -2,7 +2,7 @@
 
 ## 版本边界
 
-此分支完全替换原服务与原生 HTML 应用，保留的业务 Demo 用于验证权限与接口，不是框架与设备系统的强绑定。文档以 Node / TypeScript、PI 官方 SDK、React Admin / Chat 三端为准。
+此分支完全替换原服务与原生 HTML 应用，保留的业务 Demo 只验证登录态与权限边界，不是框架与某个业务系统的强绑定。文档以 Node / TypeScript、PI 官方 SDK、React Admin / Chat 三端为准。
 
 不会因为本地测试通过就宣称所有外部模型或部署环境已经实测。测试供应商均为隔离的本机 Mock，不使用真实账号 Key、不发送用户会话到第三方。
 
@@ -34,7 +34,7 @@ git diff --check
 
 1. 管理 Cookie 不能当业务登录；业务管理员 Token 不能当框架管理员。
 2. 没有模型时返回明确错误，不输出模型模拟内容。
-3. user1 不可写，user2 不可删；审批后重新读取权限。
+3. 只读身份不可写、不可删；审批通过后仍重新读取权限。
 4. 关闭浏览器订阅后任务继续，显式 cancel 能终止 PI 上游请求。
 5. 相同会话运行互斥，审批不可重放，重启不自动重放未知副作用。
 6. PI 官方 Bash / PowerShell / 文件工具与 CodeMode 默认锁定且 PI runtime 不加载；只有部署者设 `WEBAGENT_LOCAL_TOOLS=admin` 且管理员逐项启用后才加载；Key 或 header 中 `!`、`$` 只作字面值。
@@ -82,7 +82,7 @@ npm run build
 npm run test:ui
 ```
 
-打开 `http://127.0.0.1:18900/admin/` 或 `/chat/`。独立管理测试账号为 `admin / webagent-ui-test`，业务测试账号为 `user1 / user1pass`；这些不是正式服务的管理密码。
+打开 `http://127.0.0.1:18900/admin/`（`admin / webagent-ui-test`）。Chat 端不再有演示业务账号：启动时脚本会签发一个临时接入 Token，并打印 `http://127.0.0.1:18900/chat/?token=…` 的完整地址，直接打开即可；该 Token 只存在于临时库中。
 
 该入口只监听回环地址，在系统临时目录建库，使用正式前后端与本机 Mock 模型，不是应用中的 Demo 回复开关。退出进程会关闭连接并删除临时库；异常强制退出留下的临时目录可由操作系统清理。可通过 `WEBAGENT_UI_TEST_PORT` 改端口。不要将此测试服务反向代理到公网。
 
@@ -98,7 +98,7 @@ npm run test:ui
 ## 已知限制
 
 - 单进程 SQLite，没有多副本共享任务调度与分布式锁。
-- PI entries、展示消息与附件 Base64 在会话 JSON 文件中，不在 SQLite；大量历史需监控 `data/pi/conversations/` 并适配对象存储。
+- PI entries、展示消息与附件 Base64 在会话 JSON 文件中，不在 SQLite；大量历史需监控 `data/sessions/` 并适配对象存储。
 - 进程重启仅保留记录，不支持暂停的 Agent 执行栈自动续跑。
 - 决策原始 IO 与未保存思考为短期内存，重启无法恢复。
 - Chat 是响应式 Web，不是原生微信小程序。

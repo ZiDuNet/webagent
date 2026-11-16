@@ -37,7 +37,6 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
       ...publicSettings,
       assistant_id: assistant.id,
       assistant_name: assistant.name,
-      demo_mode: false,
       runtime: "pi",
       auth_mode: agent.mode,
       fixed_assistant_id: agent.identity.assistant_id ?? null,
@@ -72,7 +71,7 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
       : [];
     return { items };
   });
-  app.get(`${prefix}/sessions`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); return { items: store.all("SELECT s.*,a.name AS assistant_name FROM sessions s LEFT JOIN assistants a ON a.id=s.assistant_id WHERE owner_key=? ORDER BY s.updated_at DESC LIMIT 200", [user.owner_key]) }; });
+  app.get(`${prefix}/sessions`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); return { items: store.all("SELECT * FROM sessions WHERE owner_key=? ORDER BY updated_at DESC LIMIT 200", [user.owner_key]).map((session) => ({ ...session, assistant_name: String(store.assistant(Number(session.assistant_id))?.name || "") })) }; });
   app.post(`${prefix}/sessions`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const body = z.object({ title: z.string().max(120).optional(), assistant_id: z.number().int().positive().optional() }).parse(request.body || {}); reply.code(201); return { session: runtime.createSession(user, body) }; });
   app.patch(`${prefix}/sessions/:id`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; store.ownedSession(id, user); store.assertIdle(id); const body = z.object({ title: z.string().trim().min(1).max(120).optional(), assistant_id: z.number().int().positive().optional() }).parse(request.body); if (body.assistant_id) { runtime.assistant(user, body.assistant_id); store.invalidateContext(id); } return { session: store.update("sessions", id, body) }; });
   app.delete(`${prefix}/sessions/:id`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; store.ownedSession(id, user); store.assertIdle(id); store.run("DELETE FROM sessions WHERE id=? AND owner_key=?", [id, user.owner_key]); store.conversations.delete(id); return { ok: true }; });

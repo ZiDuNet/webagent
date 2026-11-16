@@ -51,7 +51,6 @@ export interface AgentStatus {
   store_reasoning: boolean;
   context_max_tokens?: number;
   context_reserve_tokens?: number;
-  demo_mode: boolean;
 }
 export interface VoiceModelStatus { configured: boolean; model_id?: number | null; model_name?: string; model_kind?: string; protocol?: string; reason?: string }
 export interface AgentApproval { id: string; tool: string; summary?: string; arguments?: unknown; risk?: string; expires_at?: string }

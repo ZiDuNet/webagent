@@ -5,8 +5,8 @@ import path from "node:path";
 import { once } from "node:events";
 import { createWebAgent } from "../src/app.js";
 import { Store } from "../src/store.js";
-import { digest } from "../src/security.js";
-import type { Row } from "../src/types.js";
+
+import type { IdentityAdapter, IdentityInput, Row, ToolSpec } from "../src/types.js";
 
 export async function mockServer(handler?: (body: Row, request: IncomingMessage, response: ServerResponse) => Promise<boolean> | boolean) {
   const requests: Row[] = [];
@@ -40,19 +40,50 @@ export function toolCall(response: ServerResponse, name: string, args: Row, id =
 export async function fixture(baseUrl?: string, options: Parameters<typeof createWebAgent>[0] = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "webagent-pi-test-"));
   const store = new Store(dir);
-  const services = await createWebAgent({ ...options, store, logger: false, staticUi: false });
+  const toolCalls: Row[] = [];
+  const fixtureTools: ToolSpec[] = [
+    {
+      name: "business_search",
+      title: "业务记录查询",
+      description: "测试用只读业务工具，返回固定的业务记录。",
+      source: "native",
+      category: "测试业务",
+      permission: "",
+      risk: "read",
+      parameters: { type: "object", properties: { keyword: { type: "string" } } },
+      execute: async (args) => { toolCalls.push({ name: "business_search", args }); return { total: 5, items: [1, 2, 3, 4, 5].map((id) => ({ id })) }; },
+    },
+    {
+      name: "business_update",
+      title: "业务记录更新",
+      description: "测试用写入业务工具，需要 business:update 权限。",
+      source: "native",
+      category: "测试业务",
+      permission: "business:update",
+      risk: "write",
+      parameters: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } }, required: ["id"] },
+      execute: async (args) => { toolCalls.push({ name: "business_update", args }); return { ok: true, id: args.id, name: args.name }; },
+    },
+  ];
+  const identities: Record<string, IdentityInput> = {
+    admin: { id: 1, subject: "user-1", username: "admin", display_name: "管理员", role: "admin", permissions: ["*"], is_admin: true },
+    user1: { id: 2, subject: "user-2", username: "user1", display_name: "用户一", role: "operator", permissions: ["profile:read", "business:read"], is_admin: false },
+    user2: { id: 3, subject: "user-3", username: "user2", display_name: "用户二", role: "operator", permissions: ["profile:read"], is_admin: false },
+    user3: { id: 4, subject: "user-4", username: "user3", display_name: "用户三", role: "guest", permissions: [], is_admin: false },
+  };
+  const adapter: IdentityAdapter = { resolve: async (credential) => credential.startsWith("fixture-") ? identities[credential.slice("fixture-".length)] ?? null : null };
+  const services = await createWebAgent({ ...options, store, identityAdapter: options.identityAdapter ?? adapter, logger: false, staticUi: false, warmCatalogue: false, tools: [...(options.tools || []), ...fixtureTools] });
+  services.skills.save({ slug: "fixture-skill", name: "测试技能", description: "隔离测试使用的渐进加载技能", content: "仅用于验证 PI 原生 Skill 读取。" });
   store.setSettings({ retry_enabled: false });
   let model: Row | undefined;
   if (baseUrl) {
-    const provider = store.insert("providers", { name: "Test provider", base_url: `${baseUrl}/v1`, api_key: "unit-test-key", timeout_seconds: 5 });
-    model = store.insert("models", { provider_id: provider.id, name: "Test chat", model_id: "test-chat", is_default: true, context_window: 16384, max_output_tokens: 1024, capabilities: ["text", "image"], supports_reasoning: true, reasoning_efforts: ["off", "low", "high"] });
+    const provider = store.config.insertProvider({ name: "Test provider", base_url: `${baseUrl}/v1`, api_key: "unit-test-key", timeout_seconds: 5 });
+    model = store.config.insertModel({ provider_id: provider.id, name: "Test chat", model_id: "test-chat", is_default: true, context_window: 16384, max_output_tokens: 1024, capabilities: ["text", "image"], supports_reasoning: true, reasoning_efforts: ["off", "low", "high"] });
   }
   const credential = (username = "user1") => {
-    const user = store.one("SELECT * FROM users WHERE username=?", [username], true)!;
-    const token = `fixture-${username}`;
-    store.run("INSERT OR REPLACE INTO sessions(token_hash,user_id,created_at,expires_at) VALUES (?,?,?,?)", [digest(token), user.id, new Date().toISOString(), new Date(Date.now() + 3600000).toISOString()], true);
-    return token;
+    if (!identities[username]) throw new Error(`fixture 未定义身份：${username}`);
+    return `fixture-${username}`;
   };
   const session = async (username = "user1") => services.runtime.createSession(await services.auth.identity(credential(username)), { title: "验证会话" });
-  return { ...services, dir, model, credential, session, close: async () => { await services.app.close(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); } };
+  return { ...services, dir, model, toolCalls, credential, session, identities, close: async () => { await services.app.close(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); } };
 }

@@ -150,14 +150,14 @@ export default function ToolsPage() {
           <Form.Item name="display_name" label="显示名称"><Input /></Form.Item>
           <Form.Item name="description" label="工具描述" rules={[{ required: true }]}><Input.TextArea rows={3} /></Form.Item>
           <div className="control-grid"><Form.Item name="method" label="HTTP 方法"><Select options={["GET", "POST", "PUT", "PATCH", "DELETE"].map((value) => ({ value }))} /></Form.Item><Form.Item name="risk" label="风险等级"><Select options={[{ value: "read", label: "只读" }, { value: "write", label: "写入（需确认）" }, { value: "delete", label: "删除（需确认）" }]} /></Form.Item></div>
-          <Form.Item name="permission" label="业务权限码" extra="权限码由业务身份适配器返回；写入仍由目标 API 最终授权。"><Input placeholder="device:read" /></Form.Item>
-          <Form.Item name="url_template" label="接口 URL 模板" rules={[{ required: true }]} extra="路径变量：{device_id}；当前用户 Bearer Token 由后端注入。"><Input placeholder="https://business.example/api/devices/{device_id}" /></Form.Item>
+          <Form.Item name="permission" label="业务权限码" extra="权限码由业务身份适配器返回；写入仍由目标 API 最终授权。"><Input placeholder="record:read" /></Form.Item>
+          <Form.Item name="url_template" label="接口 URL 模板" rules={[{ required: true }]} extra="路径变量：{record_id}；当前用户 Bearer Token 由后端注入。"><Input placeholder="https://business.example/api/records/{record_id}" /></Form.Item>
           <Form.Item name="schema_json" label="输入 JSON Schema"><Input.TextArea rows={5} spellCheck={false} /></Form.Item>
         </> : <>
           <Form.Item name="transport" label="传输方式"><Select options={[{ value: "http", label: "Streamable HTTP" }, { value: "sse", label: "SSE（兼容旧服务）" }, { value: "stdio", label: "stdio（默认禁止，需部署者允许）" }]} /></Form.Item>
           {transport === "stdio" ? <><Form.Item name="command" label="可执行命令" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="args_json" label="参数数组 JSON"><Input.TextArea rows={2} /></Form.Item><Form.Item name="env_json" label="环境变量 JSON（加密保存）"><Input.TextArea rows={3} /></Form.Item></> : <Form.Item name="url" label="MCP 地址" rules={[{ required: true }]}><Input placeholder="https://example.com/mcp" /></Form.Item>}
           <Form.Item name="forward_user_token" label="转发当前业务 Token" valuePropName="checked" extra="仅向受信任的业务 MCP 开启，第三方 MCP 通常使用自己的服务密钥。"><Switch /></Form.Item>
-          <Form.Item name="policies_json" label="工具权限映射 JSON" extra={'例如 {"search":{"public":true,"risk":"read"},"update":{"permission":"device:update","risk":"write"}}'}><Input.TextArea rows={5} spellCheck={false} /></Form.Item>
+          <Form.Item name="policies_json" label="工具权限映射 JSON" extra={'例如 {"search":{"public":true,"risk":"read"},"update":{"permission":"record:update","risk":"write"}}'}><Input.TextArea rows={5} spellCheck={false} /></Form.Item>
         </>}
           <Form.Item name="headers_json" label={draft?.type === "mcp" ? "请求头 JSON（加密保存，留空保留已存密钥）" : "附加请求头 JSON"} extra={draft?.type === "http" ? "支持 ${user.id}、${session.id}；不允许覆盖 Authorization。" : "填写后会与已存密钥合并覆盖；留空保留已存密钥。例如 Authorization: Bearer …"}><Input.TextArea rows={3} spellCheck={false} /></Form.Item>
         <Form.Item name="enabled" label="启用连接器" valuePropName="checked"><Switch /></Form.Item>

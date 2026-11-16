@@ -23,8 +23,8 @@ const destination = path.join(root, "backups", `pi-upgrade-${Date.now()}`);
 await fs.mkdir(destination, { recursive: true, mode: 0o700 });
 const files = ["server/package.json", "package-lock.json"];
 for (const file of files) await fs.copyFile(path.join(root, file), path.join(destination, path.basename(file)));
-const dataDir = process.env.WEBAGENT_PI_DATA_DIR || path.join(root, "data/pi");
-for (const name of ["agent.db", "business.db"]) {
+const dataDir = path.join(path.resolve(root, process.env.WEBAGENT_DATA_DIR || "data"), "runtime");
+for (const name of ["agent.db"]) {
   try { await fs.access(path.join(dataDir, name)); } catch { continue; }
   const db = new DatabaseSync(path.join(dataDir, name), { readOnly: true });
   try { if (name === "agent.db") { const rows = db.prepare("SELECT count(*) AS n FROM runs WHERE status='running'").get(); if (rows.n) throw new Error("存在未完成任务，请先核对任务状态"); } await backup(db, path.join(destination, name)); await fs.chmod(path.join(destination, name), 0o600); } finally { db.close(); }

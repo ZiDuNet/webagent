@@ -72,7 +72,6 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
       else if (typeof value === "string" && value.length > 20000) throw new AppError(`参数 ${key} 过长`, 422);
       else values[key] = value;
     }
-    if (values.demo_mode) throw new AppError("PI 分支不提供模拟模型回复", 422);
     for (const key of Object.keys(promptDefaults)) {
       if (key in values && !String(values[key]).trim()) throw new AppError(`${key} 不能为空；如需恢复默认请使用默认值`, 422);
     }
@@ -118,14 +117,14 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
   const publicAccessToken = (row: Row) => { const { token_hash, ...safe } = row; return safe; };
   const accessTokenValues = (input: Row, previous?: Row) => {
     const values = accessTokenSchema.parse({ ...previous, ...input });
-    if (!store.one("SELECT id FROM assistants WHERE id=?", [values.assistant_id])) throw new AppError("Token 绑定的助手不存在", 422);
+    if (!store.assistant(values.assistant_id)) throw new AppError("Token 绑定的助手不存在", 422);
     if (values.expires_at && new Date(values.expires_at).getTime() <= Date.now()) throw new AppError("过期时间必须晚于当前时间", 422);
     return values;
   };
-  app.get(`${api}/admin/access-tokens`, async () => ({ items: store.all("SELECT t.*,a.name AS assistant_name FROM access_tokens t LEFT JOIN assistants a ON a.id=t.assistant_id ORDER BY t.id DESC").map((row) => {
+  app.get(`${api}/admin/access-tokens`, async () => ({ items: store.all("SELECT * FROM access_tokens ORDER BY id DESC").map((row) => {
     const sessions = store.one("SELECT count(*) AS n FROM sessions WHERE owner_key LIKE ?", [`token-${row.id}:%`])?.n || 0;
-    return { ...publicAccessToken(row), sessions_count: sessions };
-  }), assistants: store.all("SELECT id,name FROM assistants WHERE enabled=1 ORDER BY sort_order,id") }));
+    return { ...publicAccessToken(row), assistant_name: String(store.assistant(Number(row.assistant_id))?.name || ""), sessions_count: sessions };
+  }), assistants: store.assistants().filter((assistant) => assistant.enabled !== false).map((assistant) => ({ id: assistant.id, name: assistant.name })) }));
   app.post(`${api}/admin/access-tokens`, async (request, reply) => {
     const values = accessTokenValues(request.body as Row);
     const raw = `wa_${generateToken()}`;
@@ -212,18 +211,21 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     store.audit(admin.username, "control_token.delete", String(id), { name: row.name });
     return { ok: true };
   });
-  app.get(`${api}/admin/providers`, async () => ({ items: store.all("SELECT p.*,(SELECT count(*) FROM models m WHERE m.provider_id=p.id) AS model_count FROM providers p ORDER BY p.id").map((row) => publicProvider({ ...row, api_key: row.api_key ? decrypt(row.api_key) : "" })) }));
+  app.get(`${api}/admin/providers`, async () => {
+    const models = store.models();
+    return { items: store.providers().map((row) => publicProvider({ ...row, model_count: models.filter((model) => Number(model.provider_id) === Number(row.id)).length, api_key: row.api_key ? decrypt(row.api_key) : "" })) };
+  });
   for (const method of ["POST", "PUT"] as const) app.route({ method, url: `${api}/admin/providers${method === "PUT" ? "/:id" : ""}`, handler: async (request, reply) => {
     const previous = method === "PUT" ? store.provider(Number((request.params as Row).id)) : undefined; if (method === "PUT" && !previous) throw new AppError("供应商不存在", 404);
     const values = providerSchema.parse({ ...previous, ...request.body as Row }); const url = safeUrl(values.base_url); if (url.search) throw new AppError("Base URL 不应包含查询参数", 422);
     providerHeaders({ ...values, api_key: "" });
     const data = { ...values, base_url: values.base_url.trim().replace(/\/+$/, ""), api_key: encrypt(values.clear_api_key ? "" : values.api_key?.trim() || previous?.api_key || "") };
-    const row = previous ? store.update("providers", previous.id, data)! : store.insert("providers", data); if (!previous) reply.code(201); return { provider: publicProvider({ ...row, api_key: data.api_key ? decrypt(data.api_key) : "" }) };
+    const row = previous ? store.config.updateProvider(Number(previous.id), data) : store.config.insertProvider(data); if (!previous) reply.code(201); return { provider: publicProvider({ ...row, api_key: data.api_key ? decrypt(data.api_key) : "" }) };
   } });
-  app.delete(`${api}/admin/providers/:id`, async (request) => { const id = Number((request.params as Row).id); if (store.one("SELECT id FROM models WHERE provider_id=?", [id])) throw new AppError("请先移除该供应商关联模型", 409); store.run("DELETE FROM providers WHERE id=?", [id]); return { ok: true }; });
+  app.delete(`${api}/admin/providers/:id`, async (request) => { const id = Number((request.params as Row).id); if (store.models().some((model) => Number(model.provider_id) === id)) throw new AppError("请先移除该供应商关联模型", 409); store.config.deleteProvider(id); return { ok: true }; });
   app.get(`${api}/admin/providers/:id/discover-models`, async (request) => { const query = request.query as Row; const items = await providers.discover(Number((request.params as Row).id), query.refresh === "1"); const kind = query.kind || query.model_kind; return { items: kind ? items.filter((item) => item.model_kind === kind || kind === "chat" && ["chat", "vision"].includes(item.model_kind)) : items }; });
   app.post(`${api}/admin/providers/:id/test`, async (request) => { const started = Date.now(); try { const items = await providers.discover(Number((request.params as Row).id), true); return { ok: true, message: `连接正常，发现 ${items.length} 个模型`, sample: items.slice(0, 5).map((item) => item.model_id), latency_ms: Date.now() - started }; } catch (error) { return { ok: false, message: error instanceof Error ? error.message : "连接失败", latency_ms: Date.now() - started }; } });
-  app.post(`${api}/admin/providers/:id/import-models`, async (request) => { const id = Number((request.params as Row).id); const provider = providers.connection(id); const ids = z.array(z.string().max(200)).min(1).max(100).parse((request.body as Row).model_ids); const items: Row[] = []; for (const modelId of ids) { if (store.one("SELECT id FROM models WHERE provider_id=? AND model_id=?", [id, modelId])) continue; const suggested = await providers.suggest(modelId, provider, 15000); items.push(store.insert("models", modelSchema.parse({ ...suggested, name: modelId, model_id: modelId, provider_id: id }))); } return { items }; });
+  app.post(`${api}/admin/providers/:id/import-models`, async (request) => { const id = Number((request.params as Row).id); const provider = providers.connection(id); const ids = z.array(z.string().max(200)).min(1).max(100).parse((request.body as Row).model_ids); const items: Row[] = []; for (const modelId of ids) { if (store.models().some((model) => Number(model.provider_id) === id && model.model_id === modelId)) continue; const suggested = await providers.suggest(modelId, provider, 15000); items.push(store.config.insertModel(modelSchema.parse({ ...suggested, name: modelId, model_id: modelId, provider_id: id }))); } return { items }; });
   app.get(`${api}/admin/model-suggest`, async (request) => { const query = request.query as Row; return { suggested: await providers.suggest(z.string().min(1).max(200).parse(query.model_id), query.provider_id ? store.provider(Number(query.provider_id)) : undefined, 15000) }; });
   app.get(`${api}/admin/models`, async () => ({ items: store.models() }));
   for (const method of ["POST", "PUT"] as const) app.route({ method, url: `${api}/admin/models${method === "PUT" ? "/:id" : ""}`, handler: async (request, reply) => {
@@ -239,7 +241,8 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     if (values.model_kind.startsWith("asr")) { const { asrConfig } = await import("./speech.js"); asrConfig(values, provider); }
     if (["tts", "tts_realtime"].includes(values.model_kind)) { const { ttsConfig } = await import("./speech.js"); ttsConfig(values, provider); }
     if (values.model_kind === "decision") decisionConnection(values, provider);
-    const row = store.transaction(() => { if (values.is_default) store.run("UPDATE models SET is_default=0"); return previous ? store.update("models", previous.id, values)! : store.insert("models", values); });
+    if (values.is_default) for (const item of store.models()) if (Number(item.id) !== Number(previous?.id ?? 0) && item.model_kind === values.model_kind && item.is_default) store.config.updateModel(Number(item.id), { is_default: false });
+    const row = previous ? store.config.updateModel(Number(previous.id), values) : store.config.insertModel(values);
     if (!previous) reply.code(201); return { model: { ...row, provider_name: provider.name, provider_enabled: provider.enabled } };
   } });
   app.post(`${api}/admin/models/:id/sync`, async (request) => {
@@ -260,12 +263,12 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     };
     return { model: { ...model, ...authoritative }, match: suggested.metadata_match || null };
   });
-  app.delete(`${api}/admin/models/:id`, async (request) => { const id = Number((request.params as Row).id); const settings = store.settings(); for (const key of ["asr_model_id", "asr_realtime_model_id", "tts_model_id", "voice_asr_model_id", "voice_tts_model_id", "title_model_id", "fallback_model_id", "compaction_model_id", "decision_model_id", "memory_model_id"]) if (settings[key] === id) throw new AppError(`模型正被 ${key} 使用，请先解除绑定`, 409); for (const column of assistantModelColumns) if (store.one(`SELECT id FROM assistants WHERE ${column}=? LIMIT 1`, [id])) throw new AppError(`模型正被助手配置 ${column} 使用，请先解除绑定`, 409); store.run("UPDATE assistants SET model_row_id=NULL WHERE model_row_id=?", [id]); store.run("DELETE FROM models WHERE id=?", [id]); return { ok: true }; });
+  app.delete(`${api}/admin/models/:id`, async (request) => { const id = Number((request.params as Row).id); const settings = store.settings(); for (const key of ["asr_model_id", "asr_realtime_model_id", "tts_model_id", "voice_asr_model_id", "voice_tts_model_id", "title_model_id", "fallback_model_id", "compaction_model_id", "decision_model_id", "memory_model_id"]) if (settings[key] === id) throw new AppError(`模型正被 ${key} 使用，请先解除绑定`, 409); for (const column of assistantModelColumns) if (store.assistants().some((assistant) => Number(assistant[column]) === id)) throw new AppError(`模型正被助手配置 ${column} 使用，请先解除绑定`, 409); for (const assistant of store.assistants()) if (Number(assistant.model_row_id) === id) store.config.updateAssistant(Number(assistant.id), { model_row_id: null }); store.config.deleteModel(id); return { ok: true }; });
   app.post(`${api}/admin/models/:id/test`, async (request) => {
     const model = store.model(Number((request.params as Row).id)); if (!model) throw new AppError("模型不存在", 404); if (!model.enabled) throw new AppError("模型已停用", 422);
     const started = Date.now(); const body = request.body as Row || {};
     try {
-      if (model.model_kind === "decision") { const result = await decision.score(model, "查询设备在线状态", [{ id: "device_query", description: "查询设备信息和在线状态" }]); return { ok: true, ...result, message: "决策接口返回了有效评分" }; }
+      if (model.model_kind === "decision") { const result = await decision.score(model, "查询今天需要处理的业务记录", [{ id: "record_query", description: "查询业务记录和处理状态" }]); return { ok: true, ...result, message: "决策接口返回了有效评分" }; }
       if (["tts", "tts_realtime"].includes(model.model_kind)) {
         const result = await speech.synthesize(model, body.text || "你好，这是一条 WebAgent 语音合成测试。");
         const wav = result.mime_type === "audio/pcm" ? pcmToWav(result.bytes, Number((result as Row).sample_rate || 24000)) : result.bytes;
@@ -283,8 +286,8 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
       }
       if (model.model_kind === "rerank") {
         const provider = providers.connection(model.provider_id);
-        const documents = Array.isArray(body.documents) && body.documents.length ? body.documents.slice(0, 8) : ["WebAgent device query", "Unrelated weather report"];
-        const response = await requestJson(`${provider.base_url.replace(/\/$/, "")}/rerank`, { method: "POST", headers: { ...providerHeaders(provider), "Content-Type": "application/json" }, body: JSON.stringify({ model: model.model_id, query: body.query || "查设备", documents, top_n: documents.length, return_documents: false }), signal: AbortSignal.timeout(provider.timeout_seconds * 1000) });
+        const documents = Array.isArray(body.documents) && body.documents.length ? body.documents.slice(0, 8) : ["WebAgent business record query", "Unrelated weather report"];
+        const response = await requestJson(`${provider.base_url.replace(/\/$/, "")}/rerank`, { method: "POST", headers: { ...providerHeaders(provider), "Content-Type": "application/json" }, body: JSON.stringify({ model: model.model_id, query: body.query || "查业务记录", documents, top_n: documents.length, return_documents: false }), signal: AbortSignal.timeout(provider.timeout_seconds * 1000) });
         const results = response.results || response.data;
         if (!Array.isArray(results) || !results.length) throw new AppError("Rerank 接口未返回排序结果", 502);
         const malformed = results.some((item: Row) => !Number.isSafeInteger(item.index) || !Number.isFinite(Number(item.relevance_score ?? item.score)));
@@ -295,9 +298,9 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     } catch (error) { return { ok: false, message: error instanceof Error ? error.message : "模型测试失败", latency_ms: Date.now() - started }; }
   });
   app.post(`${api}/admin/models/:id/transcribe`, async (request) => { const model = store.model(Number((request.params as Row).id)); if (!model) throw new AppError("模型不存在", 404); const body = request.body as Row; return { ok: true, ...await speech.transcribe(model, body.audio_data_url, body.language) }; });
-  app.get(`${api}/admin/assistants`, async () => ({ items: store.all("SELECT * FROM assistants ORDER BY is_default DESC,sort_order,id") }));
+  app.get(`${api}/admin/assistants`, async () => ({ items: store.assistants() }));
   for (const method of ["POST", "PUT"] as const) app.route({ method, url: `${api}/admin/assistants${method === "PUT" ? "/:id" : ""}`, handler: async (request) => {
-    const previous = method === "PUT" ? store.one("SELECT * FROM assistants WHERE id=?", [Number((request.params as Row).id)]) : undefined; if (method === "PUT" && !previous) throw new AppError("助手不存在", 404);
+    const previous = method === "PUT" ? store.assistant(Number((request.params as Row).id)) : undefined; if (method === "PUT" && !previous) throw new AppError("助手不存在", 404);
     const values = assistantSchema.parse({ ...previous, ...request.body as Row });
     if (values.is_default && !values.enabled) throw new AppError("默认助手必须启用", 422);
     if (values.model_row_id && !["chat", "vision"].includes(store.model(values.model_row_id)?.model_kind)) throw new AppError("助手只能绑定对话模型", 422);
@@ -309,9 +312,10 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
       if (!model?.enabled || !model.provider_enabled || !kinds.includes(model.model_kind)) throw new AppError(`${key} 对应模型不可用或类型不匹配`, 422);
     }
     if (values.skill_slugs.some((slug) => !skills.has(slug))) throw new AppError("助手选择了不存在的 Skill", 422);
-    const row = store.transaction(() => { if (values.is_default) store.run("UPDATE assistants SET is_default=0"); return previous ? store.update("assistants", previous.id, values) : store.insert("assistants", values); }); return { assistant: row };
+    if (values.is_default) for (const item of store.assistants()) if (Number(item.id) !== Number(previous?.id ?? 0) && item.is_default) store.config.updateAssistant(Number(item.id), { is_default: false });
+    const row = previous ? store.config.updateAssistant(Number(previous.id), values) : store.config.insertAssistant(values); return { assistant: row };
   } });
-  app.delete(`${api}/admin/assistants/:id`, async (request) => { const id = Number((request.params as Row).id); store.run("UPDATE sessions SET assistant_id=NULL WHERE assistant_id=?", [id]); store.run("DELETE FROM assistants WHERE id=?", [id]); return { ok: true }; });
+  app.delete(`${api}/admin/assistants/:id`, async (request) => { const id = Number((request.params as Row).id); store.run("UPDATE sessions SET assistant_id=NULL WHERE assistant_id=?", [id]); if (store.all("SELECT id FROM access_tokens WHERE assistant_id=?", [id]).length) throw new AppError("仍有接入 Token 绑定该助手，请先调整 Token", 409); store.config.deleteAssistant(id); return { ok: true }; });
   app.get(`${api}/admin/tools`, async () => ({ items: await registry.catalog() }));
   app.put(`${api}/admin/tools/:name/tags`, async (request) => {
     const tags = z.object({ tags: z.array(z.string().max(24)).max(12) }).strict().parse(request.body).tags;
@@ -320,11 +324,12 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     return { ok: true, tool };
   });
   app.put(`${api}/admin/tools/:name`, async (request) => { const name = (request.params as Row).name; const values = z.object({ enabled: z.boolean().optional(), visible: z.boolean().optional(), selectable: z.boolean().optional(), default_selected: z.boolean().optional() }).strict().parse(request.body); const tool = await registry.updatePolicy(name, values); store.audit(auth.admin(request).username, "tool.policy", name, values); return { ok: true, tool }; });
-  app.get(`${api}/admin/dynamic-tools`, async () => ({ items: store.all("SELECT * FROM dynamic_tools ORDER BY id") }));
-  for (const method of ["POST", "PUT"] as const) app.route({ method, url: `${api}/admin/dynamic-tools${method === "PUT" ? "/:id" : ""}`, handler: async (request) => { const previous = method === "PUT" ? store.one("SELECT * FROM dynamic_tools WHERE id=?", [Number((request.params as Row).id)]) : undefined; if (method === "PUT" && !previous) throw new AppError("工具不存在", 404); const values = dynamicSchema.parse({ ...previous, ...request.body as Row }); safeUrl(values.url_template); if (values.input_schema.type !== "object") throw new AppError("工具输入 Schema 必须为 object", 422); if (runtimeToolNames.includes(values.name) || (await registry.catalog()).some((tool) => tool.name === values.name && (!previous || previous.name !== values.name))) throw new AppError("工具名称已存在或属于 PI 保留名称", 409); return { tool: previous ? store.update("dynamic_tools", previous.id, values) : store.insert("dynamic_tools", values) }; } });
-  app.delete(`${api}/admin/dynamic-tools/:id`, async (request) => { store.run("DELETE FROM dynamic_tools WHERE id=?", [Number((request.params as Row).id)]); return { ok: true }; });
+  app.get(`${api}/admin/dynamic-tools`, async () => ({ items: store.httpTools() }));
+  for (const method of ["POST", "PUT"] as const) app.route({ method, url: `${api}/admin/dynamic-tools${method === "PUT" ? "/:id" : ""}`, handler: async (request) => { const previous = method === "PUT" ? store.httpTool(Number((request.params as Row).id)) : undefined; if (method === "PUT" && !previous) throw new AppError("工具不存在", 404); const values = dynamicSchema.parse({ ...previous, ...request.body as Row }); safeUrl(values.url_template); if (values.input_schema.type !== "object") throw new AppError("工具输入 Schema 必须为 object", 422); if (runtimeToolNames.includes(values.name) || (await registry.catalog()).some((tool) => tool.name === values.name && (!previous || previous.name !== values.name))) throw new AppError("工具名称已存在或属于 PI 保留名称", 409); return { tool: store.saveHttpTool(previous, values) }; } });
+  app.delete(`${api}/admin/dynamic-tools/:id`, async (request) => { store.deleteHttpTool(Number((request.params as Row).id)); return { ok: true }; });
   const mcpPublic = (row: Row) => { const { secret, ...safe } = row.config; const credentials = secret ? JSON.parse(decrypt(secret)) : {}; return { ...row, config: { ...safe, credential_names: Object.keys(credentials.headers || {}), has_secrets: Boolean(secret) } }; };
-  const saveMcp = (input: unknown, previous?: Row) => {
+  /** 只做校验与密钥合并，不落盘；导入时先全量校验再写入，避免部分写入。 */
+  const mcpValues = (input: unknown, previous?: Row) => {
     const body = z.object({ name, transport: z.enum(["http", "sse", "stdio"]), config: z.record(z.string(), z.unknown()), enabled: z.boolean().default(false) }).parse(input);
     const options = { ...previous?.config, ...body.config };
     if (body.transport !== "stdio") safeUrl(String(options.url || ""));
@@ -337,25 +342,26 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     const secret = { headers: { ...previousSecret.headers, ...headers }, env: { ...previousSecret.env, ...environment } };
     delete options.headers; delete options.env; delete options.credential_names; delete options.has_secrets;
     options.secret = encrypt(JSON.stringify(secret)); if (!previous) delete options.cached_tools;
-    const data = { ...body, config: options };
-    return mcpPublic(previous ? store.update("mcp_servers", previous.id, data)! : store.insert("mcp_servers", data));
+    return { ...body, config: options };
   };
-  app.get(`${api}/admin/mcp-servers`, async () => ({ items: store.all("SELECT * FROM mcp_servers ORDER BY id").map(mcpPublic) }));
+  const saveMcp = (input: unknown, previous?: Row) => mcpPublic(store.saveMcpServer(previous, mcpValues(input, previous)));
+  app.get(`${api}/admin/mcp-servers`, async () => ({ items: store.mcpServers().map(mcpPublic) }));
   app.post(`${api}/admin/mcp-servers/import`, async (request) => {
     const entries = z.record(z.string().min(1).max(100), z.record(z.string(), z.unknown())).parse((request.body as Row)?.mcpServers);
     if (!Object.keys(entries).length || Object.keys(entries).length > 30) throw new AppError("每次导入 1–30 个 MCP 连接器", 422);
-    const items = store.transaction(() => Object.entries(entries).map(([serverName, entry]) => {
+    const payloads = Object.entries(entries).map(([serverName, entry]) => {
       const transport = entry.transport || entry.type || (entry.command ? "stdio" : "http");
-      return saveMcp({ name: serverName, enabled: entry.enabled ?? false, transport: ["streamable-http", "streamable_http"].includes(String(transport)) ? "http" : transport, config: entry });
-    }));
+      return mcpValues({ name: serverName, enabled: entry.enabled ?? false, transport: ["streamable-http", "streamable_http"].includes(String(transport)) ? "http" : transport, config: entry });
+    });
+    const items = payloads.map((payload) => mcpPublic(store.saveMcpServer(undefined, payload)));
     return { items, message: `已导入 ${items.length} 个 MCP 连接器，请测试同步并配置权限映射` };
   });
   for (const method of ["POST", "PUT"] as const) app.route({ method, url: `${api}/admin/mcp-servers${method === "PUT" ? "/:id" : ""}`, handler: async (request) => {
-    const previous = method === "PUT" ? store.one("SELECT * FROM mcp_servers WHERE id=?", [Number((request.params as Row).id)]) : undefined; if (method === "PUT" && !previous) throw new AppError("MCP 不存在", 404);
+    const previous = method === "PUT" ? store.mcpServer(Number((request.params as Row).id)) : undefined; if (method === "PUT" && !previous) throw new AppError("MCP 不存在", 404);
     return { server: saveMcp(request.body, previous) };
   } });
-  app.delete(`${api}/admin/mcp-servers/:id`, async (request) => { store.run("DELETE FROM mcp_servers WHERE id=?", [Number((request.params as Row).id)]); return { ok: true }; });
-  app.post(`${api}/admin/mcp-servers/:id/test`, async (request) => { const server = store.one("SELECT * FROM mcp_servers WHERE id=?", [Number((request.params as Row).id)]); if (!server) throw new AppError("MCP 不存在", 404); const tools = await registry.discoverServer(server); store.update("mcp_servers", server.id, { config: { ...server.config, cached_tools: tools } }); return { ok: true, tools, message: `连接成功，发现 ${tools.length} 个工具；请配置权限映射后开放` }; });
+  app.delete(`${api}/admin/mcp-servers/:id`, async (request) => { store.deleteMcpServer(Number((request.params as Row).id)); return { ok: true }; });
+  app.post(`${api}/admin/mcp-servers/:id/test`, async (request) => { const server = store.mcpServer(Number((request.params as Row).id)); if (!server) throw new AppError("MCP 不存在", 404); const tools = await registry.discoverServer(server); store.cacheMcpTools(Number(server.id), tools); return { ok: true, tools, message: `连接成功，发现 ${tools.length} 个工具；请配置权限映射后开放` }; });
   app.get(`${api}/admin/skills`, async () => ({
     items: skills.list().map((skill) => ({ ...skill, id: skill.slug })),
     global_enabled: Boolean(store.settings().skills_enabled),
@@ -416,25 +422,29 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     if (query.username) { where.push("s.username=?"); values.push(String(query.username)); }
     if (query.q) { where.push("(s.title LIKE ? OR s.username LIKE ?)"); values.push(`%${query.q}%`, `%${query.q}%`); }
     const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const items = store.all(`SELECT s.*,a.name AS assistant_name FROM sessions s LEFT JOIN assistants a ON a.id=s.assistant_id ${clause} ORDER BY s.updated_at DESC LIMIT ? OFFSET ?`, [...values, limit, offset]).map((session) => ({ ...session, message_count: store.conversations.count(String(session.id)) }));
+    const items = store.all(`SELECT s.* FROM sessions s ${clause} ORDER BY s.updated_at DESC LIMIT ? OFFSET ?`, [...values, limit, offset]).map((session) => ({ ...session, assistant_name: String(store.assistant(Number(session.assistant_id))?.name || ""), message_count: store.conversations.count(String(session.id)) }));
     return { items, total: store.one(`SELECT count(*) AS n FROM sessions s ${clause}`, values)!.n, all_total: store.one("SELECT count(*) AS n FROM sessions")!.n, filtered: items.length, limit, offset };
   });
   app.get(`${api}/admin/sessions/:id`, async (request) => { const id = (request.params as Row).id; const session = store.one("SELECT * FROM sessions WHERE id=?", [id]); if (!session) throw new AppError("会话不存在", 404); return { session, messages: store.settings().admin_session_content ? store.conversations.messages(id) : [], llm_calls: store.all("SELECT * FROM llm_calls WHERE session_id=? ORDER BY id", [id]), compactions: store.all("SELECT * FROM compaction_events WHERE session_id=? ORDER BY id", [id]), runs: store.all("SELECT * FROM runs WHERE session_id=? ORDER BY started_at DESC", [id]) }; });
   app.get(`${api}/admin/sessions/:id/export`, async (request, reply) => { const id = (request.params as Row).id; if (!store.settings().admin_session_content) throw new AppError("管理员查看会话内容已关闭", 403); if (!store.one("SELECT id FROM sessions WHERE id=?", [id])) throw new AppError("会话不存在", 404); reply.header("Content-Disposition", `attachment; filename="session-${id.replace(/[^a-zA-Z0-9_-]/g, "")}.json"`); return { session: store.one("SELECT * FROM sessions WHERE id=?", [id]), messages: store.conversations.messages(id) }; });
   app.get(`${api}/admin/audit`, async () => ({ items: store.all("SELECT * FROM audit_log ORDER BY id DESC LIMIT 300") }));
   app.get(`${api}/admin/usage/summary`, async () => ({ totals: store.one("SELECT count(*) AS calls,coalesce(sum(total_tokens),0) AS total_tokens,coalesce(sum(cost_usd),0) AS cost_usd,coalesce(avg(latency_ms),0) AS avg_latency_ms FROM llm_calls"), by_user: store.all("SELECT username,count(*) AS calls,sum(total_tokens) AS total_tokens,sum(cost_usd) AS cost_usd FROM llm_calls GROUP BY username"), calls: store.all("SELECT * FROM llm_calls ORDER BY id DESC LIMIT 200") }));
-  const fileSize = (file: string) => { try { return fs.statSync(path.join(store.dataDir, file)).size; } catch { return 0; } };
+  const fileSize = (target: string) => {
+    const resolved = target.startsWith("/") ? target : path.join(store.dataDir, target);
+    try {
+      const stat = fs.statSync(resolved);
+      if (!stat.isDirectory()) return stat.size;
+      return fs.readdirSync(resolved, { withFileTypes: true }).reduce((total, entry) => total + fileSize(path.join(resolved, entry.name)), 0);
+    } catch { return 0; }
+  };
   const storageInfo = () => {
     const page = store.one("PRAGMA page_count")?.page_count || 0;
     const pageSize = store.one("PRAGMA page_size")?.page_size || 0;
-    const businessPage = store.one("PRAGMA page_count", [], true)?.page_count || 0;
-    const businessPageSize = store.one("PRAGMA page_size", [], true)?.page_size || 0;
     return {
       data_dir: store.dataDir,
-      agent_db_bytes: fileSize("agent.db"), agent_wal_bytes: fileSize("agent.db-wal"), agent_shm_bytes: fileSize("agent.db-shm"),
+      agent_db_bytes: fileSize(store.paths.database), agent_wal_bytes: fileSize(`${store.paths.database}-wal`), agent_shm_bytes: fileSize(`${store.paths.database}-shm`),
       agent_sqlite_bytes: Number(page) * Number(pageSize),
-      business_db_bytes: fileSize("business.db"), business_wal_bytes: fileSize("business.db-wal"), business_shm_bytes: fileSize("business.db-shm"),
-      business_sqlite_bytes: Number(businessPage) * Number(businessPageSize),
+      config_bytes: fileSize(store.paths.config), tools_bytes: fileSize(store.paths.tools), skills_bytes: fileSize(store.paths.skills), cache_bytes: fileSize(store.paths.cache),
       sessions: store.one("SELECT count(*) AS n FROM sessions")!.n,
       messages: store.conversations.totalMessages(),
       conversation_bytes: store.conversations.bytes(),

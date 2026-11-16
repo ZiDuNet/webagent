@@ -23,7 +23,8 @@ async function catalogueFixture() {
     alibaba: { id: "alibaba", api: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", models: { "qwen3.7-plus": model("qwen3.7-plus", "Qwen3.7 Plus", 1000000, 131072) } },
     requesty: { id: "requesty", api: "https://router.requesty.ai/v1", models: { "qwen3.7-plus": model("qwen3.7-plus", "Qwen3.7 Plus", 1048576, 131072), "longcat-2.0:thinking": model("longcat-2.0:thinking", "LongCat Thinking", 1048576, 131072), "qwen3.7-flash": model("qwen3.7-flash", "Qwen3.7 Flash", 1000000, 65536) } },
   };
-  fs.writeFileSync(path.join(dir, "models-dev.json"), JSON.stringify({ fetched_at: new Date().toISOString(), catalogue }), { mode: 0o600 });
+  fs.mkdirSync(path.join(dir, "cache"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "cache", "models-dev.json"), JSON.stringify({ fetched_at: new Date().toISOString(), catalogue }), { mode: 0o600 });
   const providers = new Providers(store);
   return { dir, store, providers, close: () => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); } };
 }

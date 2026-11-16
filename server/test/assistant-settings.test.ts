@@ -19,10 +19,10 @@ test("assistant voice and runtime overrides take precedence over global fallback
   const service = await fixture(upstream.baseUrl);
   try {
     const providerId = service.model!.provider_id;
-    const globalStt = service.store.insert("models", { provider_id: providerId, name: "全局文件 STT", model_id: "whisper-global", model_kind: "asr" });
-    const assistantStt = service.store.insert("models", { provider_id: providerId, name: "助手文件 STT", model_id: "whisper-assistant", model_kind: "asr" });
-    const globalTts = service.store.insert("models", { provider_id: providerId, name: "全局 TTS", model_id: "tts-global", model_kind: "tts" });
-    const assistantTts = service.store.insert("models", { provider_id: providerId, name: "助手 TTS", model_id: "tts-assistant", model_kind: "tts" });
+    const globalStt = service.store.config.insertModel({ provider_id: providerId, name: "全局文件 STT", model_id: "whisper-global", model_kind: "asr" });
+    const assistantStt = service.store.config.insertModel({ provider_id: providerId, name: "助手文件 STT", model_id: "whisper-assistant", model_kind: "asr" });
+    const globalTts = service.store.config.insertModel({ provider_id: providerId, name: "全局 TTS", model_id: "tts-global", model_kind: "tts" });
+    const assistantTts = service.store.config.insertModel({ provider_id: providerId, name: "助手 TTS", model_id: "tts-assistant", model_kind: "tts" });
     service.store.setSettings({
       asr_model_id: globalStt.id,
       tts_model_id: globalTts.id,
@@ -33,7 +33,7 @@ test("assistant voice and runtime overrides take precedence over global fallback
       default_approval_mode: "confirm",
     });
 
-    const assistant = service.store.one("SELECT * FROM assistants WHERE is_default=1")!;
+    const assistant = service.store.assistants().find((item) => item.is_default)!;
     const inherited = await service.app.inject({
       url: `/api/agent/status?assistant_id=${assistant.id}`,
       headers: { authorization: `Bearer ${service.credential()}` },
@@ -102,7 +102,7 @@ test("assistant overrides reject a model of the wrong kind", async () => {
   const upstream = await mockServer();
   const service = await fixture(upstream.baseUrl);
   try {
-    const assistant = service.store.one("SELECT * FROM assistants WHERE is_default=1")!;
+    const assistant = service.store.assistants().find((item) => item.is_default)!;
     const cookie = await managementCookie(service);
     const response = await service.app.inject({
       method: "PUT",
@@ -122,8 +122,8 @@ test("deleting a model only checks model-binding assistant columns", async () =>
   const upstream = await mockServer();
   const service = await fixture(upstream.baseUrl);
   try {
-    const assistant = service.store.one("SELECT * FROM assistants WHERE is_default=1")!;
-    service.store.run("UPDATE assistants SET voice_auto_send=1, tts_auto_read=1, default_approval_mode='full_access' WHERE id=?", [assistant.id]);
+    const assistant = service.store.assistants().find((item) => item.is_default)!;
+    service.store.config.updateAssistant(Number(assistant.id), { voice_auto_send: true, tts_auto_read: true, default_approval_mode: "full_access" });
     const cookie = await managementCookie(service);
     const response = await service.app.inject({
       method: "DELETE",

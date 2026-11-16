@@ -120,7 +120,7 @@ function PublishPageForm({
             </div>
             <label className="wa-field">
               <span>页面标题 <span className="publish-required">必填</span></span>
-              <input value={pageTitle} onChange={(event) => setPageTitle(event.target.value)} maxLength={120} required autoFocus disabled={busy} placeholder="例如：今日设备巡检报告" />
+              <input value={pageTitle} onChange={(event) => setPageTitle(event.target.value)} maxLength={120} required autoFocus disabled={busy} placeholder="例如：今日业务报告" />
               <small>管理员配置了标题后缀时，发布时会自动拼接。</small>
             </label>
             <label className="wa-field">
