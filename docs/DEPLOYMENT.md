@@ -1,110 +1,184 @@
-# Docker Compose 部署与本机运行
+# 部署与运维
 
-## 1. 快速启动
+## 1. 环境
 
-环境要求：Docker Engine、Compose v2、Python 3（仅生成本地配置使用），以及能访问 Docker Hub、Debian、npm 和 PyPI 的构建网络。
+- 推荐 Node.js 24 LTS；最低 22.19.0，使用内置 `node:sqlite`、全局 fetch 与 Web Streams。
+- npm workspaces：从仓库根目录安装、测试、构建。
+- 图片导出与录音重采样运行在用户浏览器中；后端不需要 `ffmpeg`、Chromium 或 Playwright。
+- 不需要 Python、pip、venv 或独立 Python MCP 服务。
 
 ```bash
-python3 scripts/init_env.py
-COMPOSE_BAKE=false docker compose up -d --build --wait --wait-timeout 180
+npm ci --registry=https://registry.npmjs.org
+npm run init:env
+npm run typecheck
+npm test
+npm run build
+npm start
+```
+
+无 `.env` 的直接运行保留 `admin123` 作为本机开发后备值，不可用于公开部署；正式环境必须使用随机独立密码和持久化加密密钥。初始化脚本拒绝覆盖 `.env`；旧环境可运行 `npm run init:env -- --extend`，只追加缺失项，保留原加密密钥及业务密码，并生成独立管理密码。
+
+## 2. 环境变量
+
+| 变量 | 默认 / 说明 |
+| --- | --- |
+| `WEBAGENT_BIND_HOST` | `127.0.0.1`，容器内部设 `0.0.0.0` |
+| `WEBAGENT_PORT` | 后端 `8000` |
+| `WEBAGENT_CONTROL_PASSWORD` | 首次创建独立管理账号 `admin` 的密码 |
+| `WEBAGENT_ADMIN_PASSWORD` | 首次创建 Demo 业务管理员的密码；不是管理控制台密码 |
+| `WEBAGENT_SECRET_KEY` | 凭据加密根密钥；丢失则无法解密已保存 Key，必须备份 |
+| `WEBAGENT_PI_DATA_DIR` | `./data/pi`，相对路径基于项目根目录，不基于 workspace 当前目录 |
+| `WEBAGENT_DATA_DIR` | 可选导入旧数据的源目录，默认 `data` |
+| `WEBAGENT_SEED_DEMO_USERS` | 本地默认开启；`0` 不新建 user1–3，不删除既有用户 |
+| `WEBAGENT_COOKIE_SECURE` | HTTPS 部署设置 `1`；本机 HTTP 为 `0` |
+| `WEBAGENT_SESSION_HOURS` | 登录过期时长，默认 24 小时 |
+| `WEBAGENT_ALLOW_STDIO` | 默认 `0`，是否允许服务端启动 stdio MCP |
+| `WEBAGENT_LOCAL_TOOLS` | 默认 `off`；设为 `admin` 仅解除部署级锁定，管理员仍需在工具页逐项启用 PI 本机执行工具 |
+| `WEBAGENT_UI_ORIGINS` | 精确逗号分隔 Origin 白名单；优先同源代理，不用宽泛 `*` |
+| `WEBAGENT_CHAT_PORT` / `WEBAGENT_ADMIN_PORT` | Compose 前端默认 8080 / 8081 |
+| `WEBAGENT_CHAT_URL` / `WEBAGENT_ADMIN_URL` | Compose 构建时写入跨端跳转的公开地址 |
+| `WEBAGENT_BUSINESS_URL` | Compose Chat 的可选返回业务系统地址 |
+
+密码变量只在对应账号表为空时使用。修改管理密码请在管理端「PI 核心」操作，会撤销所有管理登录。只改 `.env` 不重置数据库内已有密码。
+
+供应商 Key 等运行配置在后台维护；不把真实 Key 写入仓库、截图、镜像 build args 或 README。
+
+## 3. 独立部署三个服务
+
+```bash
+docker compose config --quiet
+docker compose up -d --build
 docker compose ps
+docker compose logs -f backend
 ```
 
-- 默认 React 聊天：`http://127.0.0.1:8080/`（跳转到同端口 `/react/`）
-- 完整配置管理台：`http://127.0.0.1:8080/admin/`
-- 整体健康检查：`http://127.0.0.1:8080/api/health`
-- 管理员：`admin`，初始随机密码在本机 `.env` 的 `WEBAGENT_ADMIN_PASSWORD` 中。
+- `backend`：Node / Fastify / PI，内部 `8000`，不映射宿主端口。
+- `admin`：Nginx，只代理 `/api/control/`，其余业务 API 拒绝。
+- `chat`：Nginx，代理业务和 Agent API，拒绝 `/api/control/`。
+- `pi-data`：命名卷保存数据，容器重建不丢会话与模型配置。
+- 容器非 root、只读根目录，写入限于数据卷和 `/tmp`，日志轮转；无需配置浏览器二进制或本机媒体转码工具。
 
-`init_env.py` 用权限 `0600` 创建配置；文件已存在时不会重写、换密钥或覆盖密码。可使用 `--port 8088 --host 127.0.0.1 --no-demo-users` 初始化不同端口且不带普通演示用户的实例。`.env` 不提交 Git、不复制进镜像，管理员密码也不输出到日志。不要把 `docker compose config` 的完整展开结果贴进工单，其中可能包含秘密。
+PI 官方 Bash / PowerShell、文件读写与 CodeMode 在管理端列出，但默认 `WEBAGENT_LOCAL_TOOLS=off` 时锁定且不会进入模型工具列表。部署者显式设为 `admin` 后，管理员仍需在工具页逐项启用；API 请求和旧数据库配置不能自行越过部署级锁定。本机执行工具没有沙箱，会继承后端进程的文件和网络权限，只适合受信任的单租户部署。后端默认不提供任意命令执行、文件操作或截图接口。stdio MCP 同样会由后端启动管理员指定的本机服务进程，默认关闭；只对信任的 MCP 服务设置 `WEBAGENT_ALLOW_STDIO=1`，并自行承担进程隔离和部署风险。若不需要这些能力，保持默认关闭并使用受控的 Streamable HTTP / SSE MCP。
 
-默认仍是明确标记的演示 Agent，不调用真实大模型。要使用真实模型，在管理台保存模型与 API Key，关闭演示模式。语音模型须按供应商协议配置；实时 WebSocket ASR 可使用上传/录制音频测试，压缩录音需在 Agent 容器安装 FFmpeg，具体限制见接入手册。
+Compose 默认 localhost 端口，远程部署时设置实际域名，例如：
 
-## 2. 服务与数据
+```dotenv
+WEBAGENT_CHAT_URL=https://chat.example.com/chat/
+WEBAGENT_ADMIN_URL=https://control.example.com/admin/
+WEBAGENT_COOKIE_SECURE=1
+WEBAGENT_SEED_DEMO_USERS=0
+```
 
-| 服务 | 内部地址 | 负责内容 | 持久化 |
-|---|---|---|---|
-| business | `business:8000` | 登录、RBAC、设备表、同源 BFF、静态页面 | `business-data`：业务 SQLite |
-| agent | `agent:8010` | 会话、模型、工具、审批、用量、发布记录 | `agent-data`：Agent SQLite |
-| mcp | `mcp:8020` | 工具协议适配，透传用户身份访问业务 API | 无持久数据 |
+Vite 的 `VITE_*` 是公开的构建时变量，不能存任何密钥。变更公开 URL 后需要重新 build 前端。非 Compose 可分别在 `admin/.env.local`、`chat/.env.local` 设置 `VITE_CHAT_URL`、`VITE_ADMIN_URL`、`VITE_BUSINESS_URL`；跨域管理端可设置公开地址 `VITE_CONTROL_API_BASE`，但管理 Token 必须在登录页输入，不能放进构建变量。
 
-仅业务端口映射到宿主机，默认绑定 `127.0.0.1`。Agent 和 MCP 不直接对外暴露；外部网页只通过业务 BFF 使用它们。三个服务使用同一多阶段镜像：Node 22 构建 React 与本地 Markdown 资源，Python 3.13 运行后端，包含 Chromium、FFmpeg 和中文字体。
+两个 Nginx 配置都保留 Host 以通过同源写入检查。Chat 代理关闭缓冲、压缩和缓存并延长 SSE 超时；负载均衡 / CDN 也应关闭流缓冲。不要把 `proxy_buffering off` 误当作后端任务持久化。
 
-服务以非 root UID/GID `10001` 运行，根文件系统只读，临时文件写入有容量限制的 `/tmp`，移除 Linux capabilities，禁止提权；业务与 Agent 数据卷可写。健康检查、依赖就绪、异常重启和日志轮转已配置。服务内部仅运行一个 worker，原因见第 5 节。
+## 4. 三种业务集成形态
 
-**容器数据与仓库内的 `data/` 完全独立**。启动 Compose 不会覆盖原生开发库，也不会自动迁入原有模型、密钥和会话。HTML 与 React 在同一容器实例共享登录态；容器默认 Cookie 名为 `wa_container_session`，与默认原生端口的 `wa_session` 区分。
+框架把「后端 API」「管理端静态资源」「Chat 静态资源」拆开。`WEBAGENT_SERVE_ADMIN` 与 `WEBAGENT_SERVE_CHAT` 只控制 Node 是否托管静态文件，不改变 API 和权限。三种形态可共用同一个后端镜像。
 
-## 3. 配置与日常命令
+### A. Chat 嵌入业务系统；管理端 + 后端同一容器
 
-`.env.example` 仅解释变量，不含可部署的真实密钥。推荐用脚本生成 `.env`，不要直接以示例占位值部署。
+适合已有业务门户、希望用户直接在业务页面打开对话的场景。
 
-| 配置 | 说明 |
-|---|---|
-| `WEBAGENT_HTTP_PORT` | 宿主业务端口，默认 8080 |
-| `WEBAGENT_BIND_HOST` | 默认本机回环；确需局域网访问时再设指定网卡或 `0.0.0.0` |
-| `WEBAGENT_INTERNAL_SECRET` | BFF、Agent、MCP 的内部调用密钥，必须一致 |
-| `WEBAGENT_SECRET_KEY` | 独立、稳定的加密根密钥，丢失后已有供应商与连接器密文不可恢复 |
-| `WEBAGENT_ADMIN_PASSWORD` | 只在首次创建业务数据库时设置 admin；修改环境变量不改变已有账号密码 |
-| `WEBAGENT_SEED_DEMO_USERS` | 新库是否创建 user1/2/3，正式环境设 0；已有用户需管理员手动删除 |
-| `WEBAGENT_COOKIE_SECURE` | HTTPS 设 1；纯 HTTP 本机开发为 0 |
-| `WEBAGENT_SESSION_COOKIE` | 可选；同一主机部署多个实例时配置不同名字 |
+```dotenv
+WEBAGENT_SERVE_CHAT=0
+WEBAGENT_SERVE_ADMIN=1
+```
+
+- 业务前端构建 `chat/`，放到自己的静态目录（例如 `/agent/`）。
+- 业务网关把 `/api/agent/`、`/api/me` 代理到后端；`/api/control/` 仅代理到管理端入口。
+- 后端继续提供 `/admin/`，也可以只暴露 API，由单独的管理域名反向代理。
+- 业务系统只负责身份和静态资源，不需要把 Agent 代码复制进业务工程。
+
+### B. Chat + 管理端都嵌入业务系统；后端独立容器
+
+适合已有统一门户和统一发布流水线，希望两个前端都由业务系统托管。
+
+```dotenv
+WEBAGENT_SERVE_CHAT=0
+WEBAGENT_SERVE_ADMIN=0
+```
+
+- 业务系统分别托管 `chat/dist` 与 `admin/dist`，或只托管 Chat，管理端放在内网。
+- 业务网关必须转发 `/api/agent/` 与 `/api/control/`；两者都保持同源。
+- 管理登录 Cookie 的 Path 是 `/api/control`，不会自动变成业务 Cookie；业务身份仍由 `IdentityAdapter` 或同源代理解析。
+- 后端容器只暴露内部端口，不把管理 API 直接暴露到公网。
+
+如果管理端与后端不同源，推荐在「接入与安全 → 管理端 Token」签发专用 Token，并在管理端登录页填写 API 地址。管理端也可以在构建时设置公开变量 `VITE_CONTROL_API_BASE`（例如 `https://agent.example.com/api/control`），但该变量不是密钥；实际 Token 只保存在操作者浏览器。跨域时把管理端 Origin 加入 Token 白名单，并确保代理转发 `Authorization`。管理 Token 仅用于 `/api/control`，不得写入 Chat 前端或业务页面。
+
+### C. 全部集成进业务系统（Node 宿主或反向代理）
+
+Node 宿主可以直接创建后端服务，不必单独跑 Agent 容器：
+
+```ts
+import { createWebAgent } from "@webagent/server";
+
+const service = await createWebAgent({
+  identityAdapter,
+  tools: businessTools,
+  demoBusiness: false,
+  staticUi: false,
+});
+
+await service.app.listen({ host: "127.0.0.1", port: 8100 });
+```
+
+业务系统负责登录页、静态资源和 `/api/agent`、`/api/control` 的同源代理。非 Node 业务系统使用同样的反向代理方式，把后端作为独立容器运行。`staticUi:false` 不会关闭 API，也不会自动加载示例业务；它只关闭 Node 的静态文件托管。
+
+三种形态共同要求：
+
+- 前端与 API 同源，或通过精确的 `WEBAGENT_UI_ORIGINS` 白名单；不要用宽泛 `*`。
+- SSE 代理关闭缓冲、压缩和缓存，并延长读超时；否则会出现「一次性吐出全文」的假流式。
+- 管理端与业务端身份域独立。业务 Token 不能调用 `/api/control`，管理 Cookie 也不能读取业务数据。
+- 跨端共享会话依赖稳定的业务 `subject + namespace`，见 [业务接入手册](INTEGRATION.md#跨端会话与稳定身份)。
+
+`deploy/business-proxy.conf` 提供了业务网关的最小反向代理片段，可按实际域名、TLS 和路径调整。
+
+## 5. 可选导入既有 SQLite
+
+导入工具完全使用 Node SQLite backup，不需要旧应用或解释器：
 
 ```bash
-docker compose logs --tail 100 business agent mcp
-docker compose restart
-docker compose stop
-docker compose start --wait
-COMPOSE_BAKE=false docker compose up -d --build --wait
-docker compose down
+npm run migrate
+npm start
 ```
 
-`down` 保留命名卷；**`down -v` 会删除全部容器数据**，只能用于确定不要数据的隔离测试。更新镜像后使用 `up --build`，仅 `restart` 不会应用新镜像或新的环境变量。后台任务不因浏览器关闭而取消，但服务重启会中断尚未完成的内存任务，不承诺跨重启继续执行。
+行为：
 
-## 4. 备份与恢复
+1. 从 `WEBAGENT_DATA_DIR` 找 `agent.db`、`business.db`。
+2. 先做一致性备份到 `backups/before-pi-*`。
+3. 导入新的 `WEBAGENT_PI_DATA_DIR`；目标已有库则拒绝覆盖。
+4. 新后端初始化自己的表与 PI 状态；旧数据库原样保留。
+5. 供应商 / Token 解密需要原来的 `WEBAGENT_SECRET_KEY`；恢复后重封装为 AES-GCM。
 
-需要同时备份业务库、Agent 库和原始 `.env` 加密根密钥。默认 30 天会话保留策略不会清理 PagePilot 发布内容与版本，应另外规划容量与保留策略。
+旧业务账号密码哈希可继续验证，但新的框架管理账号独立创建。启动时会自动把旧会话表的历史 `user_id` 迁移为 `owner_key`，并移除历史 `NOT NULL` 约束，以支持没有数字主键的嵌入身份；迁移保留原值，不伪造业务用户 ID。旧连接器名称 / 权限和模型专用协议必须重新检查，不把旧 MCP 配置自动开放。旧审批不自动执行，旧 `demo_mode` 不产生模拟回复。
 
-最简单的一致备份方式是停服务再复制整个数据目录，确保 WAL/SHM 文件一并保留：
+迁移前确认源数据库实际使用的加密根密钥，而不是仅检查当前 `.env`。如果旧环境曾更换过密钥，须从原部署备份恢复正确密钥后处理；导入器不会猜测密钥，也不会把无法解密的值当作可用凭据。不要删除原库与备份来绕过错误。
+
+即使备份 API 支持在线源库，也建议先停止业务写入，确保两个库之间一致。导入目标一经启动，不要反复覆盖。
+
+## 6. 日常备份与恢复
+
+停后端后备份整个数据目录与 `.env`，或使用 SQLite backup API；不要在 WAL 活跃时只复制单独 `.db` 而漏掉日志。备份文件含会话、文档和加密凭据，按敏感数据管理。
+
+恢复时同时恢复加密根密钥与数据目录，再启动相同版本或已验证兼容的新版本。进程重启后，未完成任务显示 `interrupted`；待执行审批、发布结果不明的操作须核对，不自动重放。
+
+默认清理：会话 30 天、事件 1 天；发布内容版本不随会话保留策略删除，需业务自行确定档案保留和清理策略。聊天正文、附件 Base64 与 PI entries 保存在 `data/pi/conversations/*.json`，不在 SQLite；备份必须覆盖整个 `data/pi/`，生产大量多模态历史宜适配对象存储。
+
+## 7. PI 升级
 
 ```bash
-backup_dir="backups/$(date +%Y%m%d-%H%M%S)"
-mkdir -p -m 700 "$backup_dir"
-docker compose stop
-docker compose cp --archive business:/app/data "$backup_dir/business"
-docker compose cp --archive agent:/app/data "$backup_dir/agent"
-cp -p .env "$backup_dir/.env"
-docker compose start --wait
+npm run core:upgrade -- 1.5.2
+npm run core:upgrade -- 1.5.2 --apply
 ```
 
-确认复制成功再恢复服务。备份目录已被 Git 和 Docker 构建忽略；仍应另存到受控、加密的备份介质。不要只复制正在写入的 `.db`：SQLite WAL 中可能有尚未合并的数据。在线备份应改用 SQLite `Connection.backup()`，不要用文件复制代替事务一致快照。
+仅接受 npm 官方源精确稳定版本；先停服，再备份、同步三个包、安装、类型检查、测试、构建。未通过则恢复 manifest / lockfile 并尝试 `npm ci`。不会自动提交、推送或重启。
 
-恢复到已创建的目标服务（保持停止状态）：
+管理 API 只返回升级计划。容器环境应在受控源码环境升级后重新构建和发布镜像。不要向 HTTP 接口开放任意 shell、包名或 npm URL。
 
-```bash
-docker compose stop
-docker compose cp --archive "$backup_dir/business/." business:/app/data/
-docker compose cp --archive "$backup_dir/agent/." agent:/app/data/
-cp -p "$backup_dir/.env" .env
-docker compose up -d --no-build --wait
-```
+## 8. 生产扩展边界
 
-只向空卷或已清空、确认可覆盖的恢复目标操作，避免遗留 WAL 与旧库混合；恢复前先备份目标。`--archive` 保留非 root 数据文件 UID/GID。跨部署迁移时一起恢复 `.env` 中原来的加密根密钥，否则连接器配置无法解密。原生 `data/` 迁入容器也遵循停机、整库复制和保留密钥原则，且需要确保属主 `10001:10001` 可写；不自动完成迁移。
+此版本为单进程 SQLite 方案。多副本会导致本地 Run、短期事件和任务锁不共享，不受支持。横向扩展至少需适配共享关系数据库、任务队列、分布式会话锁、取消信号、事件总线、对象存储与独立连接器进程隔离。
 
-## 5. 生产边界
-
-- 此仓库是单机接入框架 Demo，不是已做分布式任务调度的生产平台。SQLite 适合当前规模，并不应为“性能”直接改成无授权的会话文件。
-- 同一会话只能执行一个任务；单用户最多同时 4 个 SSE 任务，重放缓存在进程内。保持单 worker、单 Agent 副本，横向扩容前应将任务队列、运行锁、SSE 日志和审批执行状态外置。不要直接把 `--workers` 调大。
-- 审批记录持久化，但正在执行的任务不能靠重启恢复；重启后再次提交写操作前核对业务结果，工具接入方应设计业务幂等键。
-- 上游反向代理需关闭 SSE 缓冲与缓存，保留 `Last-Event-ID`，读取超时高于后台最大运行时长，例如 Nginx `proxy_buffering off; proxy_cache off; proxy_read_timeout 600s;`。
-- 对外部署使用 HTTPS、Secure Cookie、私网内部服务与独立密钥，关闭演示模式、移除演示用户。共享的 PagePilot Token 只留在后端，发布归属按本地可信业务用户 ID 隔离，不向用户开放全量远端列表。
-- 不支持上传任意脚本执行。动态 HTTP 工具仅由受信任管理员配置；业务 API 始终校验当前用户权限和对象归属。多租户、配额、SSO 与用户停用清理按接入手册扩展。
-- 非 root 容器与只读根目录不能替代 HTML 渲染隔离。截图关闭 JavaScript、阻止外网请求；仍应对公网入口设置请求体限制与访问频率限制，敏感配置和聊天正文避免输出到日志。
-
-## 6. 构建排错
-
-**中文目录 / Buildx sharedkey 报错**：部分 Compose Bake/Buildx 组合会把非 ASCII 路径带入会话头，使用本文命令的 `COMPOSE_BAKE=false`。本机已验证此方式。基础镜像或包下载失败不是应用启动失败，应先检查仓库网络。
-
-**需要代理**：Docker daemon 拉镜像的代理与 CLI/Buildx、构建容器的代理不是同一层。按本机网络分别配置；`localhost` 在普通构建容器中不是宿主机。不要把代理密码写入 Dockerfile 或提交 Git，也不要照搬某个开发者的本机代理地址。
-
-**端口占用**：修改 `.env` 的业务端口后重新 `docker compose up -d --wait`。**健康失败**：先查看对应服务最近日志与 `/api/health`，确认内部地址使用服务名而不是容器内的 `127.0.0.1`。
-
-**离线页面资源**：镜像已打包 Markdown、KaTeX 和 Mermaid，HTML 与 React 不依赖外部 CDN 才能显示正文、公式与图表。模型 API、第三方工具及 HTML 产物引用的外部资源仍各自需要网络。
+健康检查只说明服务可接收请求，不表示所有外部模型 / MCP / PagePilot 当前可用。请监控模型请求耗时、错误、运行取消、磁盘与队列容量。

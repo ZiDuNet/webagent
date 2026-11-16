@@ -1,375 +1,181 @@
-# WebAgent
+# WebAgent / PI
 
-**把 Agent 嵌入现有业务系统，让用户用对话完成自己有权执行的操作。**
+面向现有业务系统的 Agent 集成框架。用户在自己的业务权限内对话、查询数据、调用工具；框架管理员独立维护模型、助手、连接器、运行策略与诊断。
 
-WebAgent 是面向业务系统二次开发的 Agent 接入框架与可运行 Demo。它提供服务端 Agent 运行时、工具适配、模型与权限治理，以及可复用的 React 聊天组件；设备信息表只是用来验证完整链路的示例业务，不是框架的业务限制。
+**此分支为 `WebAgent-PI`：Node.js / TypeScript 后端 + 官方 PI SDK，独立 React 管理端与 Chat 端。没有 Python 后端，也没有原生 HTML 版应用。**
 
-> 核心原则：Agent 不直接连接业务数据库，也不持有业务超级管理员凭据。它带着**当前登录用户的身份**调用业务 API；用户的权限，就是 Agent 的权限上限。
+运行时使用 [earendil-works/pi](https://github.com/earendil-works/pi)，当前三个核心依赖均精确锁定 `1.5.2`。PI 负责模型循环、流式事件、会话上下文、工具协议与压缩；WebAgent 负责身份、权限、审批、持久化和产品界面，不复制一套手写 Agent 循环。
 
-[界面预览](#界面预览) · [快速启动](#快速启动) · [功能概览](#功能概览) · [架构与权限](#架构与权限) · [业务接入与-sdk](#业务接入与-sdk) · [文档导航](#文档导航) · [当前边界](#当前边界)
+## 三端结构
 
-## 界面预览
+```text
+admin/     React + Ant Design 管理端，独立登录与构建
+chat/      React Chat 端，桌面与移动端响应式界面
+server/    Fastify 后端、PI 适配、业务鉴权、工具、任务、SQLite 元数据
+sdk/       TypeScript 客户端 SDK，支持注入业务 Token 与 fetch
+deploy/    两个前端独立 Nginx 配置
+scripts/   环境初始化与 PI 受控升级
+docs/      架构、部署、模型、运行、业务接入、验收说明
+```
 
-### 桌面对话
+根目录只保留工程入口和说明文档；本地运行数据、日志、备份与参考项目分别在 `data/`、`logs/`、`backups/`、`reference/`，均已被 Git 忽略，不会进入仓库。
 
-真实模型调用只读设备工具，生成 Markdown 巡检报告。执行过程默认只占一行，点击可展开；输入框提供工具、执行方式、模型和推理等级选择，上下文进度放在输入框下方。
-
-![WebAgent 桌面聊天：只读设备巡检、Markdown 表格和折叠过程](docs/images/chat-desktop.jpg)
-
-### 移动端
-
-相同组件在 390px 视口下展示对话、模型选择、用量与工具选择面板。这里是**响应式 Web / 小程序接入的交互参考**，不是已交付的微信原生小程序。
-
-![390px 正式移动界面：左侧巡检结论与 Mermaid，右侧工具选择](docs/images/chat-mobile.jpg)
-
-<details>
-<summary>展开查看工具过程、Mermaid、设备表与管理员后台</summary>
-
-### 工具过程
-
-过程条可展开执行时间线，工具可进一步查看参数与结果；完成后自动收起，不把每次调用一直铺在聊天正文中。
-
-![真实工具调用详情：设备统计参数与 JSON 结果](docs/images/chat-process.jpg)
-
-### Markdown 与 Mermaid
-
-正文增量解析，支持表格、代码、公式、Mermaid 和受控 JSON 数据图表。Mermaid 在流式片段可解析时更新，不等待整轮回答结束。
-
-![正式聊天中的 Mermaid 横向流程图与本次回答用量](docs/images/chat-mermaid.jpg)
-
-### 示例业务系统
-
-设备信息表提供查询、筛选、新增、修改、删除；按钮可见性与服务端授权都跟随业务账号权限。
-
-![设备信息表：状态统计、搜索筛选和增删改操作](docs/images/business-devices.jpg)
-
-### 模型管理
-
-参考 Octop 的模型池与供应商卡片，按对话、语音、生图、决策四类管理。支持同品牌多个连接、自定义供应商、模型 ID 下拉/手填、按需拉取和参数同步。截图来自隔离测试实例，验收网关不代表真实厂商连接。
-
-![管理员模型页：供应商、模型能力、上下文参数与测试入口](docs/images/admin-models.jpg)
-
-### 决策与语音
-
-决策页完整展示模型绑定、工具 / Skill 范围、阈值、触发数量和超时。BM25 与决策是两个互斥开关，可以全部关闭。语音页分别维护 STT 与 TTS，支持上传录音转写测试和语音合成试听。
-
-![决策配置：模型绑定、互斥开关、范围、阈值和超时](docs/images/admin-decision.jpg)
-
-![语音配置：STT 与 TTS 模型、独立默认绑定与测试入口](docs/images/admin-voice.jpg)
-
-### 工具治理
-
-管理员维护四态工具、动态 HTTP 工具、PagePilot 连接器与 BM25 / 决策开关。两种筛选最多启用一个，也可全部关闭。工具来源会标识为 MCP、内置 Tool 或 HTTP 连接器。
-
-![管理员工具页：PagePilot 接入、BM25 开关与工具状态](docs/images/admin-tools.jpg)
-
-### 运行设置
-
-统一维护步数、工具次数、超时、辅助模型、上下文与重试；同页还提供会话保留、思考存储等隐私配置。
-
-![运行设置：模型上下文预算、辅助模型与 LLM 指数退避重试](docs/images/admin-runtime.jpg)
-
-</details>
-
-截图采自正式程序：聊天来自真实模型与只读工具，管理页来自独立验收实例。新版模型页中的“验收”条目使用本机测试网关；其他品牌模板未填 Key，不代表已接入。截图日期与来源见 [截图说明](docs/images/README.md)。
+管理端不是 Chat 端的管理模式。两者有各自入口、依赖、构建产物与 API 权限边界。便于本地体验时可以由同一个 Node 进程托管两个静态产物；Docker Compose 则分别部署三个服务。
 
 ## 快速启动
 
-### 方式一：Docker Compose（推荐）
-
-准备 Docker Engine、Compose v2 和 Python 3；首次构建需要能访问镜像、npm、PyPI 与系统软件源。
+推荐 **Node.js 24 LTS**，最低 `22.19.0`。图片导出与录音重采样都在用户浏览器中完成；后端不依赖 Chromium 或 ffmpeg。
 
 ```bash
-git clone https://github.com/ZiDuNet/webagent.git
-cd webagent
-python3 scripts/init_env.py
-COMPOSE_BAKE=false docker compose up -d --build --wait --wait-timeout 180
-docker compose ps
+npm ci --registry=https://registry.npmjs.org
+npm run init:env
+npm run typecheck
+npm test
+npm run build
+npm start
 ```
 
-| 入口 | 地址 |
-| --- | --- |
-| React 聊天（默认首页） | <http://127.0.0.1:8080/> |
-| 设备表 / 完整配置后台 | <http://127.0.0.1:8080/admin/> |
-| 服务健康检查 | <http://127.0.0.1:8080/api/health> |
+新环境随机生成不同的管理密码、业务管理员密码与加密密钥，写入本地 `.env`，不输出到终端。已有 `.env` 时脚本拒绝覆盖；从旧版迁移可运行 `npm run init:env -- --extend`，只补充缺失配置，不修改既有密钥、密码和其他配置。
 
-管理员账号为 `admin`，**随机初始密码在本机 `.env` 的 `WEBAGENT_ADMIN_PASSWORD` 中查看**。初始化脚本以 `0600` 权限创建文件，已有文件不会覆盖；不要把 `.env`、展开后的 Compose 配置或密钥贴到工单、截图和 Git 中。
-
-新实例默认开启明确标记的**演示模式**：不请求外部 LLM，通过本地规则调用真实业务工具，方便先验证权限与审批。它不是大模型效果展示。要使用真实模型，按下一节完成配置。
-
-```bash
-docker compose logs --tail 100 business agent mcp
-docker compose stop
-docker compose start --wait
-docker compose down
-```
-
-`down` 保留数据卷；**不要随意执行 `down -v`，它会删除数据**。Compose 使用独立数据卷，不自动导入或覆盖仓库内的本地 `data/`。端口、HTTPS、备份恢复和构建排错见 [部署手册](docs/DEPLOYMENT.md)。
-
-### 方式二：Python 本地运行
-
-要求 Python 3.11+、Node.js 22.18+ 和 npm。容器使用 Python 3.13，原生开发也在 Python 3.14 验证过。
-
-```bash
-git clone https://github.com/ZiDuNet/webagent.git
-cd webagent
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-(cd frontend && npm ci && npm run build)
-python run_demo.py --open
-```
-
-上面的命令使用 Bash；`run_demo.py` 的进程启停实现面向 Linux/macOS，Windows 建议在 WSL2 或 Docker 中运行。
-
-| 服务 | 默认地址 | 职责 |
+| 入口 | 默认地址 | 身份 |
 | --- | --- | --- |
-| 业务系统 | `127.0.0.1:8000` | 登录、设备 API、同源代理、页面 |
-| Agent Gateway | `127.0.0.1:8010` | 推理、会话、工具治理、审批、用量 |
-| MCP Server | `127.0.0.1:8020/mcp` | 示例业务 API 的工具适配 |
+| 管理端 | `http://127.0.0.1:8000/admin/` | 独立框架管理员 |
+| Chat 端 | `http://127.0.0.1:8000/chat/` | 业务系统用户 |
+| 后端健康检查 | `http://127.0.0.1:8000/health` | 无敏感信息 |
 
-访问 <http://127.0.0.1:8000/> 默认进入同端口 React；完整后台在 <http://127.0.0.1:8000/admin/>。未构建 React 时，首页回到 HTML 后台。`Ctrl+C` 停止启动脚本管理的三个服务，端口已占用时拒绝重复启动。
+`/` 跳转 Chat；旧 `/react/` 仅跳转 `/chat/`，并没有第三套前端。
 
-本地日志在 `logs/`，数据库在 `data/`。`run_demo.py` **不自动加载 Compose 的 `.env`**，本地自定义环境变量需先导出。Markdown、公式与 Mermaid 资源随构建打包，不依赖 CDN。
+管理账号 `admin` 的初始密码来自 `.env` 的 `WEBAGENT_CONTROL_PASSWORD`。同名业务管理员的初始密码来自 `WEBAGENT_ADMIN_PASSWORD`，不是同一账号。管理密码可在「PI 核心」页修改；环境变量只用于首次建号，不覆盖已保存密码。
 
-可选依赖：HTML 保存图片需要 Chrome/Chromium；没有系统浏览器时运行 `python -m playwright install chromium`。部分语音协议需要 FFmpeg 转换录音格式。容器已包含 Chromium、FFmpeg 和中文字体。
+首次启动后，进入管理端配置供应商与真实对话模型，再设置默认助手。**没有模型配置就明确报错，不返回模拟答案。**
 
-### 配置真实模型
+### 独立前端开发
 
-1. 用管理员登录，打开右上角配置入口，进入 **AI 配置 → 模型**。
-2. 点击供应商模板或自定义供应商，填写 Base URL、Key 和超时；同一连接可复用多个模型，同品牌也可添加多个连接。
-3. 新增模型，选择或输入模型 ID，按需拉取列表、同步模型元信息，再核对能力、上下文窗口、输出上限和价格。语音模型分别配置 STT / TTS 协议。
-4. 执行分类真实测试，启用对话模型并按需设为默认；管理员测试不受演示模式影响，会请求供应商，可能产生费用。
-5. 在 **运行设置**中关闭演示模式并保存，再回到聊天页选择模型。
-
-当前主对话实现 **OpenAI-compatible Chat Completions**，不表示已经兼容供应商的所有专有协议。模型发现和 models.dev 元数据只辅助填参，实际工具、多模态和推理能力仍以目标网关测试为准。真实模式缺少有效配置时返回错误，不伪造回答。
-
-STT / TTS 在语音页独立绑定；决策页提供 Jev、Microsoft、Laya、OpenAI JSON 和自定义服务配置。完整参数与协议边界见 [模型接入手册](docs/MODELS.md)。
-
-## 功能概览
-
-| 模块 | 当前实现 |
-| --- | --- |
-| 聊天交互 | SSE 流式、单行过程与展开详情、结束自动收起、模型与推理等级选择、工具选择、每轮用量 |
-| 内容展示 | 安全 Markdown、表格、可滚动代码框、KaTeX、Mermaid、柱状/折线/面积/饼环图 |
-| 会话 | 用户隔离、重命名、分叉、删除、消息编辑/删除；管理员筛选、查看与导出 |
-| 运行时 | 自研单 Agent loop、可配置默认助手、最大步数/工具次数/时长、重试、可选降级模型 |
-| 上下文与记忆 | 跟随模型的预算、自动/手动压缩、独立摘要模型、用户手动长期记忆、思考存储开关 |
-| 工具与 Skill | 示例 MCP、动态 HTTP 工具、内置 Tool、四态治理、互斥且可全关的 BM25 / 决策筛选、知识型 Skill 渐进加载 |
-| 权限与审计 | 继承登录用户身份、工具授权过滤、写/删审批、业务 API 最终 RBAC、业务与 Agent 双侧审计 |
-| 模型管理 | Octop 风格模型池、12 个供应商模板、多连接与自定义供应商、手填/下拉 ID、按需发现与同步、分类真实测试 |
-| HTML 与发布 | 隔离 HTML 预览、保存 PNG、PagePilot 新建/更新、本地发布归属和版本记录 |
-| 多模态与语音 | 图片输入；STT 录音转文字后发送；独立 TTS 配置、合成试听和服务端 SDK，未配置即关闭 |
-
-**前端现状**：`frontend/` 提供 React + TypeScript 聊天和 Ant Design 模型管理组件；`web/` 保留业务与其他配置后台，模型菜单嵌入同一个 React 管理组件。二者共享后端、登录态与权限。
-
-**助手 ≠ 多 Agent**：助手是提示词、默认模型、工具白名单、Skill 和预算的一组配置。普通助手由模型决定是否及如何调用工具；单步报告助手按配置预采集只读数据，再生成报告。手动预览、发布等 UI 操作也不是“AI 自主工具调用”。
-
-## 架构与权限
-
-```mermaid
-flowchart LR
-    UI[React 聊天 / HTML 后台] -->|业务登录 Cookie| BFF[业务系统 / 同源 BFF]
-    BFF -->|当前用户 Token + 内部凭据| Agent[Agent Gateway]
-    Agent -->|当前用户 Token| Tools[MCP / HTTP 工具适配层]
-    Tools -->|业务 API| Business[业务鉴权与操作]
-    Business --> DB[(业务数据库)]
-```
-
-- **业务系统**持有业务数据，负责登录、角色、对象归属、字段约束和最终授权。
-- **Agent 服务**管理模型、推理、工具过滤、会话和审批，不 import 设备业务代码、不连接业务库。
-- **工具适配层**把业务 API 描述成工具，不使用业务超级管理员身份绕开业务校验。
-- **浏览器**只访问业务系统同源入口，不持有 LLM API Key、内部服务密钥或 PagePilot 共享 Token。
-
-### 演示账号与权限矩阵
-
-| 账号 | 本地初始密码 | 查询 | 新增 | 修改 | 删除设备 | 用户管理 / AI 配置 |
-| --- | --- | :---: | :---: | :---: | :---: | :---: |
-| `admin` | `admin123`；Compose 为 `.env` 中的随机值 | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `user1` | `user1pass` | ✓ | — | — | — | — |
-| `user2` | `user2pass` | ✓ | — | ✓ | — | — |
-| `user3` | `user3pass` | ✓ | — | ✓ | ✓ | — |
-
-密码与演示用户只在**首次创建业务库**时初始化；修改环境变量不会重设已有账号密码。正式部署应关闭演示用户种子并移除已有演示账号。
-
-例如 `user2` 要修改设备时，完整链路是：
-
-```text
-用户消息 → BFF 校验登录 → Agent 再确认身份
-  → 权限 / 助手 / 管理员开关 / 本轮勾选过滤工具
-  → 模型发起 update_device → 展示审批卡
-  → 用户批准 → 再校验当前权限与工具开关
-  → 带同一用户 Token 调业务 API → 业务最终授权 → 执行并审计
-```
-
-「完全访问」仅在管理员允许时跳过操作确认，**不提升账号权限**。用户不能通过修改前端 `user_id`、加载 Skill 或切换模型获得删除权限；具体数据行和字段能否访问，仍需接入方业务 API 校验。
-
-### 工具四态与检索
-
-| 状态 | 用户看到工具 | 用户可切换 | 默认进入候选工具 |
-| --- | :---: | :---: | :---: |
-| 可见可选 | ✓ | ✓ | ✓，允许取消 |
-| 可见固定 | ✓ | — | ✓ |
-| 不可见默认启用 | — | — | ✓ |
-| 不可见不可用 | — | — | — |
-
-四态不替代账号授权与审批。BM25 只对通过授权的候选工具检索 Top 16；固定工具和 Skill 工具可能额外加入。决策模型可按任务对工具与 Skill 评分，支持普通 OpenAI 对话评分或 Octop 风格 Decisions 接口。两个开关可以都关闭，开启一个自动关闭另一个；决策异常保留全量授权候选。详见 [运行配置](docs/RUNTIME.md#决策模型)。
-
-## 业务接入与 SDK
-
-不是“随便拿一个系统零改造即可接入”，而是把开发工作收敛到**身份、工具、同源代理和审计**四个契约。设备表可替换成工单、资产、订单或其他业务，不需要重写 Agent loop。
-
-### 接入路径
-
-| 现有条件 | 推荐方式 |
-| --- | --- |
-| 已有 REST API / 小程序后台接口 | 注册 HTTP Tool，继续调用已有 API，不必额外启动 MCP |
-| 已有业务 service 函数 | 用 `serve_tools()` 或自己的路由包装函数，保留业务鉴权，再注册 Tool |
-| 已有远程 MCP / 需要协议标准化 | 实现工具元数据与用户身份透传，通过 `WEBAGENT_MCP_URL` 接入 Streamable HTTP |
-| 需要完全自定义基础能力 | 在代码中实现原生 Tool，接入统一权限、审批、审计与事件链路；不开放任意上传代码执行 |
-
-### 注册一个已有 HTTP 接口
-
-服务端 SDK 在 [`webagent/sdk.py`](webagent/sdk.py)，当前随仓库源码提供，不是已发布到 PyPI 的独立包。以下示例在**受信任服务端**注册一个接口；示例域名需替换为实际业务地址。
-
-```python
-import os
-
-from webagent.sdk import AgentAdminClient, ToolSpec
-
-client = AgentAdminClient(
-    agent_url=os.environ.get("WEBAGENT_AGENT_URL", "http://127.0.0.1:8010"),
-    internal_secret=os.environ["WEBAGENT_INTERNAL_SECRET"],
-)
-
-client.upsert_tool(
-    token=os.environ["WEBAGENT_ADMIN_TOKEN"],
-    spec=ToolSpec(
-        name="list_orders",
-        description="查询当前登录用户有权查看的订单",
-        input_schema={
-            "type": "object",
-            "properties": {"status": {"type": "string"}},
-        },
-        permission="order:read",
-        risk="read",
-        method="GET",
-        url_template="https://business.example.com/api/orders",
-    ),
-)
-```
-
-`WEBAGENT_ADMIN_TOKEN` 是示例脚本所需的**业务管理员会话 Token**，由接入方在服务端获取，不是模型 API Key，也不是框架自动生成的默认环境变量。它只用于注册工具；普通用户执行工具时，框架透传的是**该普通用户自己的 Token**。
-
-### 最小落地顺序
-
-1. 对接可信的当前用户接口，返回稳定用户 ID、角色和权限 action code；Demo 使用 `/api/me`。
-2. 选择少量高频业务 API，声明工具名称、描述、JSON Schema、所需权限和风险等级。
-3. 在业务系统挂载 `/api/agent/*` 同源代理：校验原有 Session/SSO，再注入用户 Token 与内部服务凭据。
-4. 嵌入 React 组件或参考 HTML 实现，消费 SSE、展示审批与真实工具结果；不把服务端密钥交给前端。
-5. 用只读、可修改、可删除三个账号验收正常操作、越权拒绝、审批后权限变更与重复提交。
-
-已有 Cookie、JWT、OAuth 或企业 SSO 时，替换的是身份适配/BFF，不是要求业务系统改用 Demo 登录。当前存储使用稳定整数用户 ID；字符串 ID、多个业务系统共享实例或租户隔离需要先扩展身份命名空间，不能直接混用重号的用户 ID。
-
-完整 SDK、FastAPI 回调、动态变量、MCP 元数据、鉴权融合、SSE 与验收清单见 [业务系统对接手册](docs/INTEGRATION.md)。组件导出位于 [`frontend/src/index.ts`](frontend/src/index.ts)，用法见 [React 接入说明](frontend/README.md)。
-
-## 运行与扩展说明
-
-### 上下文、思考和慢请求
-
-- 上下文按所选模型窗口、输出预留与安全余量计算；全局上限为 `0` 时跟随模型。当前是 token 预算与摘要策略，不是固定“只携带最近 N 轮”。
-- 历史估算超过预算时自动摘要，也提供手动压缩接口与 HTML 后台按钮；模型溢出时还有应急裁剪。React 对话入口当前未提供完整后台的所有操作按钮。
-- 思考仅在上游返回时展示，不伪造推理文字。`store_reasoning` 默认关闭，本轮页面可展开查看，刷新不恢复；开启后才持久化保存。
-- 管理员可查看会话逐次 LLM 调用、工具执行、重试、压缩和用量，区分模型等待、工具慢与上下文开销；前端动效不会缩短上游首 token 延迟。
-- 关闭浏览器不会主动取消已启动的服务端任务；断线重放需通过运行 ID 与事件游标恢复。服务重启会中断未完成任务，当前没有持久化任务队列。
-
-模型协议、参数默认值、压缩触发、语音适配、重试与数据保留见 [运行配置说明](docs/RUNTIME.md)。
-
-### PagePilot 与 HTML
-
-在 **AI 配置 → 工具 → PagePilot 发布连接器**配置服务地址、Token 并测试启用。当前通过 PagePilot 官方 REST 适配，而不是在 Agent 进程里启动本地 stdio MCP。
-
-- 模型 HTML 使用产物卡片和隔离 iframe，不作为业务页面 DOM 直接执行；保存图片由后端渲染，关闭 JavaScript 并阻断外部请求。
-- 用户可以新建、更新、预览页面，查看自己的发布 URL、内容和历史版本；共享 Token 仅保留在后端。
-- 归属来自可信业务用户 ID，`session_id` 只记录来源。发布列表读取本地记录，**不从全局 Token 拉取其他用户的站点**。
-- 每次发布/更新由用户决定标题、可选说明、密码与可见范围，密码可留空且不自动生成；Agent 调用前需获取用户选择。
-- 发布部分成功时保留 URL 与警告，不把内容发布成功等同于密码、可见性设置全部成功。目标 PagePilot 版本仍需实际授权验收。
-
-详细协议、SDK 和更新规则见 [PagePilot 接入](docs/INTEGRATION.md#35-pagepilot-发布连接器)。
-
-### Skill、知识库与基础工具
-
-Skill 是知识型渐进加载：先提供名称/描述，再按需调用 `load_skill` 读取 `SKILL.md` 正文，需要时读取登记的参考文件。**Skill 不执行脚本，也不授予业务权限**；可执行动作做成受控 Tool。
-
-当前内置的是示例设备/身份工具、Skill 加载能力和本地发布记录查询等。天气、网络搜索、生图、Word、第三方知识库不是默认已开通服务，可按目标业务开发原生 Tool、HTTP 或 MCP 连接器；例如 RAGFlow / IMA 是否可接，取决于对方可用接口及授权，不承诺仅填 URL 即可使用。
-
-## 开发与验证
-
-前后端分开开发时，先启动本地三服务，再在另一个终端运行：
+分别打开终端：
 
 ```bash
-cd frontend
-npm ci
 npm run dev
+npm run dev:admin
+npm run dev:chat
 ```
 
-开发页为 <http://127.0.0.1:5173/>，`/api` 代理到本地 `8000`。生产构建仍由业务系统同源提供，不必单独部署 Vite 服务。
+- 后端：`8000`；管理端：`http://127.0.0.1:5174/admin/`；Chat：`http://127.0.0.1:5173/chat/`。
+- 两个 Vite 服务代理同源 `/api`，不需要浏览器持有供应商 Key。
+- 跨端跳转地址可在各前端目录的 `.env.local` 设置 `VITE_CHAT_URL`、`VITE_ADMIN_URL`；业务入口可用 `VITE_BUSINESS_URL`。
+
+### Docker Compose
 
 ```bash
-python scripts/test_asr_protocol.py
-python scripts/test_publications.py
-python scripts/test_publications_api.py
-python scripts/test_review_regressions.py
-python scripts/test_assistants.py
-python scripts/test_decision.py
-python scripts/test_speech.py
-python scripts/test_model_settings.py
-(cd frontend && npm run test:conversation && npm run build)
+npm run init:env
+docker compose config --quiet
+docker compose up -d --build
+```
+
+管理端默认 `http://localhost:8081/admin/`，Chat 默认 `http://localhost:8080/chat/`，Node 后端只在内部网络暴露。三个服务分别构建，数据保存在命名卷。远程部署须配置公开前端 URL、HTTPS、独立密码并关闭 Demo 用户，详见 [部署说明](docs/DEPLOYMENT.md)。
+
+## 主要能力
+
+| 领域 | 当前实现 |
+| --- | --- |
+| 模型 | 对话 / 视觉 / STT / TTS / 生图 / 决策 / Embedding / Rerank 统一接入；多供应商、多连接、模型列表与元信息同步、分类真实测试 |
+| 语音 | OpenAI STT / TTS、Chat Audio、DashScope ASR / TTS、实时 ASR WebSocket 适配；TTS 按句 / 长度增量送入，长段落不等待整段完成；普通识别默认只回填输入框，右上角提供 TTS 朗读与实时通话；未配置时禁用对应按钮 |
+| 助手 | 默认助手、角色范围、绑定模型、允许切换、工具白名单、`skill_slugs` Skill 范围与预算；语音、TTS、推理强度、执行模式和运行预算均可助手级覆盖，留空继承全局 |
+| 工具 | 开发注册原生函数、后台 HTTP API、MCP Streamable HTTP / SSE / stdio、表单与 JSON 导入；PI 本机执行工具默认关闭，可由部署者解锁后逐项管理 |
+| 权限 | 继承当前业务身份；工具选择不等于授权；写入审批后重新鉴权；四态可见 / 可选策略 |
+| 管理接入 | 独立管理端 Token，可把管理页面部署在业务系统或跨域调用 `/api/control`；支持过期、来源白名单、轮换与停用，不能访问 Chat 的 `/api/agent` |
+| 筛选 | PI 原生 BM25 延迟工具发现、独立决策模型相关性评分；互斥且允许都关闭 |
+| 交互 | `ask_user` 让模型在缺少信息时暂停，Chat 渲染单选 / 多选 / 补充文本问答卡；与危险操作审批卡严格分离 |
+| 提示词 | 基础、压缩、标题、决策、记忆提取和附加系统提示词均可在管理端编辑并恢复默认 |
+| Skill | 文件系统为唯一事实来源，支持全局 / 单项启停、助手级选择、ZIP / 目录导入；PI 原生渐进读取，正文不落数据库，不执行 Skill 脚本 |
+| 会话 | 正文、附件与 PI canonical entries 保存为 `data/pi/conversations/<sessionId>.json`；SQLite 只保存归属、标题、用量与运行元数据。支持刷新恢复、分叉、编辑、删除、主动 / 手动压缩、分页检索与保留期清理 |
+| 任务 | 后台运行独立于 SSE 连接，断开页面继续执行，重连回放，显式停止，重启不重放副作用 |
+| 记忆 | 用户独立 CRUD、模型自动提取、默认待确认、管理员配置提取模型与规则 |
+| Chat | Markdown、表格、KaTeX、Mermaid 与基础图表，单行实时过程、完成折叠、移动端弹窗 |
+| HTML | 紧凑产物卡、滚动代码框、隔离预览、下载与浏览器端静态 PNG 导出，不把完整 HTML 铺在消息区 |
+| PagePilot | 发布 / 更新、本地用户归属、内容版本与 URL 记录、手动可见范围和可空密码 |
+| 运维 | 模型用途 / 耗时 / Token / 错误、决策短期输入输出诊断、会话审计、会话与发布记录检索、受控 PI 升级计划；启动时清理旧表 / 字段前自动备份 SQLite |
+
+STT / TTS 的供应商原生协议不因「OpenAI 兼容」而自动相同，需选择正确模型类型与协议。自动推测仅为建议，以供应商实际权限和文档为准。
+
+### Demo 权限
+
+设备表与账号只用于验证集成方式，可通过 `demoBusiness: false` 或 `IdentityAdapter` 移除，不是框架必需业务。
+
+| 业务账号 | 初始密码 | 设备权限 |
+| --- | --- | --- |
+| `admin` | `.env` 中 `WEBAGENT_ADMIN_PASSWORD` | 全部，可删除非管理员业务账号 |
+| `user1` | `user1pass` | 查询 |
+| `user2` | `user2pass` | 查询、修改 |
+| `user3` | `user3pass` | 查询、修改、删除 |
+
+`WEBAGENT_SEED_DEMO_USERS=0` 禁止新建三个演示用户；不会删除已经创建的账号。设备 CRUD 由 Demo API 和原生工具共用业务服务，聊天权限与接口权限一致。
+
+## 接入业务系统
+
+不强制 SSO，不强制 MCP，更不要求把整个业务系统改写为 Agent。建议优先复用现有业务服务：
+
+1. Node 宿主直接嵌入 `createWebAgent()`，实现 `IdentityAdapter.resolve()`。
+2. 用 `tools` 注册业务原生函数，函数内复用原业务授权与数据范围校验。
+3. 非 Node 业务通过同源反向代理 + HTTP 工具或 MCP 接入。
+4. 前端复用 `@webagent/sdk`，每次请求从宿主取得当前 Token；也可借鉴 Chat 组件自建界面。
+
+如果管理端静态资源也部署在业务系统，可在「接入与安全 → 管理端 Token」签发独立 Token，再在管理端登录页选择「使用管理 Token 连接」。同源部署直接反代 `/api/control`；跨域部署填写完整 API 地址，并把管理端 Origin 加入 Token 白名单。管理 Token 只调用 `/api/control`，与 Chat 接入 Token、业务身份完全分离。
+
+**框架管理员不自动获得业务权限，业务管理员也不自动获得框架配置权限。** 租户及行级权限应由业务适配器和业务服务最终实施，不能只依赖提示词、前端隐藏按钮或决策评分。
+
+可运行的接口形态与完整示例见 [业务接入手册](docs/INTEGRATION.md)。当前没有内置租户知识库、任意脚本 Skill、PDF 解析沙箱；知识库可作为外部 Tool / MCP 接入。
+
+## PI 升级
+
+管理端「PI 核心」提供安装版本、官方版本检查与升级计划，不会在 HTTP 请求中执行 npm 或热替换核心。
+
+```bash
+npm run core:upgrade -- 1.5.2
+npm run core:upgrade -- 1.5.2 --apply
+```
+
+`--apply` 需要先停后端；脚本备份数据库与依赖文件，同步三个 PI 包的精确版本，再执行类型检查、测试、构建。失败恢复依赖文件并尝试恢复安装。容器部署应在源码中升级、验证、重新构建镜像，而不是进入容器热升级。
+
+## 验证与边界
+
+```bash
+npm run typecheck
+npm test
+npm run build
 git diff --check
 ```
 
-Python 回归使用临时数据库和 Mock 上游；Mock 验证协议与异常处理，**不等于供应商或第三方远端已验收**。`scripts/smoke_test.py` 会临时改变运行配置并操作测试会话，只在隔离实例运行，不要对正在使用的业务库执行。具体检查记录见 [审查与验收](docs/REVIEW.md)。
+测试连接真实 PI SDK 和本地 Mock 上游，覆盖权限、审批、问答卡、断线续跑、上下文、工具筛选、语音、助手级配置覆盖、文件会话迁移、管理端 Token 与发布适配。当前自动回归为后端 57、SDK 4、Chat 28，共 89 项。**Mock 协议测试通过不代表所有真实供应商账号、地域、音色与模型权限都已验收。**
 
-### 目录结构
+PI 官方 Bash / PowerShell、文件读写与 CodeMode 在管理端列出，默认 `WEBAGENT_LOCAL_TOOLS=off` 时锁定关闭。部署者显式设为 `WEBAGENT_LOCAL_TOOLS=admin` 后，管理员仍须在工具页逐项启用；这不是沙箱，只适合受信任的单租户部署。框架默认不提供服务器端任意代码执行或截图服务。stdio MCP 同样可能在后端启动本机进程，默认关闭，仅在部署者明确信任服务并设置 `WEBAGENT_ALLOW_STDIO=1` 后可用；网络服务优先使用 Streamable HTTP 或 SSE。
 
-```text
-webagent/
-  business/          示例业务系统：登录、RBAC、设备 API、同源 BFF
-  agent/             运行时、模型协议、会话、工具、审批、审计与发布
-  mcp_server/        示例 MCP：携带用户身份调用业务 API
-  common/            安全与存储辅助
-  sdk.py             服务端 SDK：ToolSpec、工具注册、FastAPI、PagePilot
-frontend/            React + TypeScript + Vite，Radix Dialog 与可复用组件
-web/                 HTML/JS 业务与配置后台
-scripts/             初始化、健康检查、隔离回归与冒烟测试
-docs/                架构、接入、运行、部署、验收与真实截图
-run_demo.py          本地三服务启动入口
-compose.yaml         单机容器部署
-Dockerfile           React 构建 + Python 运行时镜像
-```
+当前默认是单进程 SQLite 元数据 + 本地会话文件方案，不宣称可直接多副本横向扩展。多节点需要共享数据库、分布式任务队列 / 锁、事件总线及专门的对象 / 文件存储适配。备份时必须同时备份 `agent.db`、`business.db` 与 `data/pi/conversations/`，不能只复制数据库。
 
-## 文档导航
+### 实际界面
 
-| 文档 | 内容 |
-| --- | --- |
-| [架构设计](docs/ARCHITECTURE.md) | 服务职责、权限传播、Agent loop、存储与演进方向 |
-| [业务系统对接手册](docs/INTEGRATION.md) | 身份、MCP / HTTP / 直连 Tool、SDK、BFF、SSE、验收清单 |
-| [运行配置说明](docs/RUNTIME.md) | 模型、推理、ASR、上下文压缩、重试、隐私与容量 |
-| [模型接入手册](docs/MODELS.md) | 多供应商、STT / TTS、生图、决策、分类测试与管理组件 |
-| [部署手册](docs/DEPLOYMENT.md) | Compose、环境变量、独立数据卷、备份恢复与生产边界 |
-| [React 接入说明](frontend/README.md) | 聊天组件、过程交互、发布记录、移动端与协议接入 |
-| [审查与验收](docs/REVIEW.md) | 已执行检查、隔离测试方法与已知限制 |
-| [截图说明](docs/images/README.md) | 正式界面截图来源、视口和更新规范 |
+以下截图来自本分支的正式 React 组件、Node 后端与真实 PI SDK；为避免使用真实密钥和用户记录，页面数据由临时数据库和本机 Mock 上游提供，不代表真实供应商的回复质量或延迟。
 
-## 当前边界
+**独立管理端：供应商与模型接入**
 
-本仓库是**单机、面向二次开发的框架 Demo**，不是开箱即用的多租户生产平台：
+![PI 管理端模型接入](docs/images/pi-admin-models.png)
 
-- **运行与存储**：会话等保存在服务端 SQLite；运行锁、后台任务和 SSE 重放缓存在单进程内。保持单 Agent 副本、单 worker；扩容前外置任务、锁与事件存储。审批记录持久化不代表任务能跨重启恢复。
-- **MCP 接入**：当前连接配置的远程 Streamable HTTP MCP；没有后台新增/管理任意 stdio、SSE、HTTP 三种 MCP 服务器的完整控制面，也没有可安装连接器市场。
-- **记忆与知识库**：长期记忆只做手动维护；自动抽取、租户文档上传、内置 RAG、PDF 解析和任意脚本沙箱未实现，第三方知识库按受控工具扩展。
-- **多模态**：支持图片、文件 ASR 与实时 WebSocket ASR；压缩录音需服务端安装 FFmpeg。模型类型识别或供应商 `/models` 返回条目不等于实际接口可用。
-- **身份与治理**：未内置企业 SSO、多租户组织隔离、精细账单对账或完整合规归档。默认会话保留 30 天，启动时清理；发布内容需独立规划保留与容量。
-- **生产安全**：仅业务 BFF 对外，内部服务放私网；部署 HTTPS、独立且稳定的加密根密钥、业务对象级鉴权、限流及工具目标限制，关闭演示模式并移除演示账号。API Key 加密不能替代主机、数据库和备份权限管理。
+**Chat：完成后收起过程，增量渲染 Markdown 与 Mermaid**
 
-交互设计参考了 [Agent2API](https://github.com/aimod-cc/Agent2API) 和 [Octop](https://github.com/TencentCloud/Octop) 等开源项目，不依赖其运行时。若后续引入第三方源码，请分别核实许可；本仓库当前未附 `LICENSE`，不要自行推定为 MIT / Apache 等授权。
+![PI Chat 桌面端](docs/images/pi-chat-desktop.png)
+
+**移动端：展开执行过程与思考原文**
+
+<img src="docs/images/pi-chat-mobile-process.png" alt="PI Chat 手机端执行过程" width="375" />
+
+复现隔离界面验收：先运行 `npm run build`，再执行 `npm run test:ui`，打开终端提示的 `18900` 端口。它使用临时数据，不读写正式数据库、不连接真实模型；退出时清理。固定测试账号仅用于本机隔离验收，详见 [验收说明](docs/REVIEW.md)。
+
+## 文档
+
+- [架构与边界](docs/ARCHITECTURE.md)
+- [部署、环境变量与备份](docs/DEPLOYMENT.md)
+- [业务鉴权、Tool / MCP 与客户端 SDK](docs/INTEGRATION.md)
+- [模型、供应商、STT / TTS 与决策](docs/MODELS.md)
+- [会话、压缩、记忆与运行机制](docs/RUNTIME.md)
+- [验收范围与已知限制](docs/REVIEW.md)
+
+完整截图及旧界面截图的版本说明在 [截图目录](docs/images/README.md)，不将旧 HTML 页面冒充为此分支的新界面。

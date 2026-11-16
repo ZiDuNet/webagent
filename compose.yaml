@@ -1,79 +1,92 @@
-name: webagent
-
-x-service: &service
-  image: webagent-demo:local
-  build:
-    context: .
-    target: runtime
-  init: true
-  restart: unless-stopped
-  read_only: true
-  cap_drop:
-    - ALL
-  security_opt:
-    - no-new-privileges:true
-  tmpfs:
-    - /tmp:rw,nosuid,nodev,size=536870912,mode=1777
-  stop_grace_period: 30s
-  logging:
-    driver: json-file
-    options:
-      max-size: 10m
-      max-file: "3"
-  healthcheck:
-    test: ["CMD", "python", "scripts/healthcheck.py"]
-    interval: 10s
-    timeout: 5s
-    start_period: 30s
-    retries: 5
-
-x-environment: &environment
-  WEBAGENT_INTERNAL_SECRET: ${WEBAGENT_INTERNAL_SECRET:?请先运行 python3 scripts/init_env.py}
-  WEBAGENT_BUSINESS_URL: http://business:8000
-  WEBAGENT_AGENT_URL: http://agent:8010
-  WEBAGENT_MCP_URL: http://mcp:8020/mcp
-  WEBAGENT_DATA_DIR: /app/data
+name: webagent-pi
 
 services:
-  mcp:
-    <<: *service
-    command: ["python", "-m", "uvicorn", "webagent.mcp_server.server:app", "--host", "0.0.0.0", "--port", "8020", "--workers", "1"]
+  backend:
+    image: webagent-pi-backend:local
+    build:
+      context: .
+      target: backend
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    shm_size: 256mb
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=536870912,mode=1777
     environment:
-      <<: *environment
-      WEBAGENT_HEALTH_URL: http://127.0.0.1:8020/health
-
-  agent:
-    <<: *service
-    command: ["python", "-m", "uvicorn", "webagent.agent.app:app", "--host", "0.0.0.0", "--port", "8010", "--workers", "1"]
-    environment:
-      <<: *environment
-      WEBAGENT_SECRET_KEY: ${WEBAGENT_SECRET_KEY:?请先运行 python3 scripts/init_env.py}
-      WEBAGENT_HEALTH_URL: http://127.0.0.1:8010/health
-    volumes:
-      - agent-data:/app/data
-    depends_on:
-      mcp:
-        condition: service_healthy
-
-  business:
-    <<: *service
-    environment:
-      <<: *environment
-      WEBAGENT_ADMIN_PASSWORD: ${WEBAGENT_ADMIN_PASSWORD:?请先运行 python3 scripts/init_env.py}
-      WEBAGENT_SEED_DEMO_USERS: ${WEBAGENT_SEED_DEMO_USERS:-1}
+      WEBAGENT_BIND_HOST: 0.0.0.0
+      WEBAGENT_PORT: 8000
+      WEBAGENT_PI_DATA_DIR: /app/data
+      WEBAGENT_SECRET_KEY: ${WEBAGENT_SECRET_KEY:?请先运行 npm run init:env}
+      WEBAGENT_CONTROL_PASSWORD: ${WEBAGENT_CONTROL_PASSWORD:?请设置独立的管理密码}
+      WEBAGENT_ADMIN_PASSWORD: ${WEBAGENT_ADMIN_PASSWORD:?请设置业务管理员初始密码}
+      WEBAGENT_SEED_DEMO_USERS: ${WEBAGENT_SEED_DEMO_USERS:-0}
       WEBAGENT_COOKIE_SECURE: ${WEBAGENT_COOKIE_SECURE:-0}
-      WEBAGENT_SESSION_COOKIE: ${WEBAGENT_SESSION_COOKIE:-wa_container_session}
-      WEBAGENT_HEALTH_URL: http://127.0.0.1:8000/api/health
-    ports:
-      - "${WEBAGENT_BIND_HOST:-127.0.0.1}:${WEBAGENT_HTTP_PORT:-8080}:8000"
+      WEBAGENT_ALLOW_STDIO: ${WEBAGENT_ALLOW_STDIO:-0}
+      WEBAGENT_LOCAL_TOOLS: ${WEBAGENT_LOCAL_TOOLS:-off}
+      WEBAGENT_SERVE_ADMIN: ${WEBAGENT_SERVE_ADMIN:-1}
+      WEBAGENT_SERVE_CHAT: ${WEBAGENT_SERVE_CHAT:-1}
+    expose: [8000]
     volumes:
-      - business-data:/app/data
+      - pi-data:/app/data
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  admin:
+    image: webagent-pi-admin:local
+    build:
+      context: .
+      target: admin
+      args:
+        VITE_CHAT_URL: ${WEBAGENT_CHAT_URL:-http://localhost:${WEBAGENT_CHAT_PORT:-8080}/chat/}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=67108864,mode=1777
+    ports:
+      - "${WEBAGENT_BIND_HOST:-127.0.0.1}:${WEBAGENT_ADMIN_PORT:-8081}:8080"
     depends_on:
-      agent:
+      backend:
         condition: service_healthy
-      mcp:
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  chat:
+    image: webagent-pi-chat:local
+    build:
+      context: .
+      target: chat
+      args:
+        VITE_ADMIN_URL: ${WEBAGENT_ADMIN_URL:-http://localhost:${WEBAGENT_ADMIN_PORT:-8081}/admin/}
+        VITE_BUSINESS_URL: ${WEBAGENT_BUSINESS_URL:-}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=67108864,mode=1777
+    ports:
+      - "${WEBAGENT_BIND_HOST:-127.0.0.1}:${WEBAGENT_CHAT_PORT:-8080}:8080"
+    depends_on:
+      backend:
         condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
 volumes:
-  business-data:
-  agent-data:
+  pi-data:

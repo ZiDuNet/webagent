@@ -15,7 +15,7 @@ logs
 uploads
 backups
 reference
-web/vendor
+.cache
 *.zip
 *.tar.gz
 *.log

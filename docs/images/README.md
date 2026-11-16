@@ -1,31 +1,21 @@
-# 正式界面截图
+# 截图版本说明
 
-这些图片用于仓库首页和开发文档，来自实际运行的 WebAgent，不是产品原型、设计稿或将预写答案塞入页面的模拟截图。
+## WebAgent-PI
 
-## 截图来源
+以下 PNG 为当前正式 React 应用的浏览器截图。后端使用真实 PI SDK，数据与上游仅限临时 SQLite 和本机 Mock，不含真实账号密钥与会话。可通过 `npm run test:ui` 复现，并非独立原型页面。
 
-拍摄日期：**2026-11-12**。图片采用浏览器截图原始 JPEG，无后期拼接、内容替换或密钥遮盖编辑。
+| 文件 | 内容 |
+| --- | --- |
+| `pi-admin-models.png` | 独立管理端、供应商和模型用途分类 |
+| `pi-admin-core.png` | PI 三个核心包安装版本与受控升级入口 |
+| `pi-chat-desktop.png` | 桌面对话、完成后折叠的过程、Markdown 表格及 Mermaid |
+| `pi-chat-mobile-process.png` | 375px 手机端展开执行过程和本轮思考原文 |
+| `pi-chat-mobile-html.png` | 手机端隔离 HTML 预览与下载、截图、发布入口 |
 
-| 图片 | 取景内容 | 来源 |
-| --- | --- | --- |
-| [chat-desktop.jpg](chat-desktop.jpg) | Markdown 设备表、折叠过程、输入区、上下文进度 | 真实模型 + `user1` 只读业务工具 |
-| [chat-process.jpg](chat-process.jpg) | 实际工具参数、统计 JSON 结果与折叠时间线 | 同一巡检会话，展开 `get_device_stats` |
-| [chat-mermaid.jpg](chat-mermaid.jpg) | Mermaid 横向图、回答用量与关闭思考选项 | 真实模型基于已查询结果生成摘要，本轮未再次调用工具 |
-| [chat-mobile.jpg](chat-mobile.jpg) | 移动对话、模型/推理入口、工具弹层 | 相同正式 React 应用置于两个 `390 × 660` CSS px 视口 |
-| [business-devices.jpg](business-devices.jpg) | 设备统计、表格、筛选与操作 | 独立 Compose 演示实例的设备种子数据 |
-| [admin-models.jpg](admin-models.jpg) | 新版 React 模型池、品牌卡片、自定义供应商入口 | 独立临时库，本机验收网关，其他品牌未填 Key；1280 × 960 |
-| [admin-decision.jpg](admin-decision.jpg) | 决策模型绑定、互斥且可全关的开关、范围、阈值、数量和超时 | 同一隔离验收实例；1280 × 1200 |
-| [admin-voice.jpg](admin-voice.jpg) | STT / TTS 模型池、独立默认绑定与测试入口 | 同一隔离验收实例；1280 × 1200 |
-| [admin-tools.jpg](admin-tools.jpg) | 工具四态、BM25、PagePilot 入口 | 独立 Compose 演示实例，未配置 PagePilot Token |
-| [admin-runtime.jpg](admin-runtime.jpg) | 上下文、运行上限、辅助模型、重试 | 独立 Compose 演示实例，默认设置 |
+## 历史参考
 
-未单独标注的截图尺寸为 `1280 × 720`。移动图在同一取景页中并列加载正式应用，以展示两个实际交互状态；取景页已删除，不是交付的小程序。聊天库、旧后台截图和新版模型截图使用独立实例，数量与配置不是同一数据库快照。新版“验收”条目使用本机测试网关验证请求与渲染，不代表真实厂商认证。
+此目录原有 JPG 来自重构前版本，仅保留为历史 UI 设计参考；其中原生 HTML 管理页、旧业务页面和端口描述不代表 `WebAgent-PI` 的部署与功能验收。
 
-## 更新规范
+新架构的真实入口是独立 React `/admin/` 与 `/chat/`，实现和验收以当前源码、README、测试及新版本截图为准。新截图应使用不含供应商 Key、Token 和真实用户会话的隔离数据。
 
-1. 使用正式应用与脱敏业务样本；不拍私聊、真实客户信息、API Key、访问密码、全局 Token 或内部服务密钥。
-2. 聊天截图验证真实工具记录，不能仅凭模型说“已查询”就标为真实调用；使用测试网关或演示模式时必须在说明里明确区分。
-3. 后台优先用独立演示实例，不为取景覆盖正在使用的模型、密钥、权限和业务数据。
-4. 保留原始截图，确认没有加载中、错误遮罩、失焦菜单或临时调试面板；以实际交互取景，不修改 DOM 伪造结果。
-5. UI 明显变更后更新对应图片与本文件日期；不把未来规划写进截图描述。手机视口只证明响应式 Web 布局，不代表微信小程序真机验收。
-6. 文件名保持稳定，更新后检查 [首页](../../README.md) 中的相对引用和图片可读性；不要把本地运行数据、日志或 `.env` 一起提交。
+历史文件：`admin-models.jpg`、`admin-decision.jpg`、`admin-runtime.jpg`、`admin-tools.jpg`、`admin-voice.jpg`、`business-devices.jpg`、`chat-desktop.jpg`、`chat-mermaid.jpg`、`chat-mobile.jpg`、`chat-process.jpg`。

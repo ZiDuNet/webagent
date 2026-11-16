@@ -1,2 +1,0 @@
-"""WebAgent demo package."""
-

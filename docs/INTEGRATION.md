@@ -1,678 +1,348 @@
-# WebAgent 业务系统对接手册
+# 业务系统接入手册
 
-本文面向“拿到一个新的业务系统，需要把 Agent 嵌入进去”的开发场景。目标是只写适配层，不改 Agent 核心。
+## 1. 先确定边界
 
-## 1. 最小接入面
+目标是复用业务系统的身份与服务，而不是再做一套用户权限系统。
 
-业务系统至少需要提供四类能力：
+- 管理端维护框架资源，始终使用独立 `control_users` 登录，或使用单独签发的管理 Token。
+- Chat 用户来自业务系统；后端用 `IdentityAdapter` 验证当前会话 / Token。
+- Tool 只是能力契约，执行可以是原生函数、HTTP 或 MCP，不要求业务 API 包装成 MCP。
+- 会话归属使用稳定 `subject + namespace`，不要求业务系统提供数字主键。
+- 对象权限、租户范围、数据脱敏和字段权限由业务服务最终实施。
+- 提示词、Skill、BM25 和决策模型都不能授予权限。
 
-1. **身份确认**：根据当前请求返回用户、角色和权限 action code。
-2. **业务工具**：把要开放给 Agent 的 REST/GraphQL/gRPC 能力包装成 MCP 工具或动态 HTTP 工具。
-3. **同源代理**：浏览器只访问业务域名，由业务 BFF 把用户 Token 注入 Agent 请求。
-4. **审计**：记录工具调用、审批、业务写入和来源。
+Node 系统可同进程嵌入，其他语言可保留现有业务后端，通过同源代理与 HTTP / MCP 接入。SSO 不是必需条件；仅在确实需要跨系统登录时再做认证适配。
 
-推荐的请求链：
+## 2. 后端嵌入与原生 Tool
 
-```text
-Browser
-  -> 业务 BFF /api/agent/*
-      - 校验 HttpOnly Cookie / Session
-      - 注入 Authorization: Bearer <user-token>
-      - 注入 X-Internal-Token
-  -> Agent Gateway
-      - 调 /api/me 重新确认身份
-      - 做权限、助手白名单、工具四态、用户勾选过滤
-  -> MCP / 动态 HTTP 工具
-      - 仍然携带同一个用户 Token
-  -> 业务 API
-      - 执行最终 RBAC 和业务校验
+`server/src/sdk.ts` 导出 `createWebAgent`、`ToolSpec`、`IdentityAdapter` 等。workspace 构建后从 `@webagent/server` 导入；当前服务包为内部包，跨仓库使用应先按组织要求打包或引用，不声称已发布到公共 npm。
+
+以下 `businessSessions` 与 `deviceService` 是宿主项目自己的现有服务：
+
+```ts
+import { createWebAgent, type IdentityAdapter, type ToolSpec } from "@webagent/server";
+import { businessSessions, deviceService } from "./business-services.js";
+
+const identityAdapter: IdentityAdapter = {
+  resolve: async (credential) => {
+    const current = await businessSessions.resolve(credential);
+    if (!current) return null;
+    return {
+      subject: current.userUuid,
+      namespace: current.tenantKey,
+      username: current.username,
+      display_name: current.displayName,
+      role: current.role,
+      permissions: current.permissions,
+      is_admin: current.isBusinessAdmin,
+    };
+  },
+};
+
+const listDevices: ToolSpec = {
+  name: "business_list_devices",
+  title: "查询设备",
+  description: "查询当前业务用户数据范围内的设备，可按关键词筛选。",
+  category: "设备业务",
+  source: "native",
+  permission: "device:read",
+  risk: "read",
+  parameters: {
+    type: "object",
+    properties: { keyword: { type: "string" } },
+    additionalProperties: false,
+  },
+  execute: async (args, context) => deviceService.listForUser({
+    userId: context.identity.subject,
+    credential: context.credential,
+    keyword: args.keyword,
+    signal: context.signal,
+  }),
+};
+
+const service = await createWebAgent({
+  identityAdapter,
+  tools: [listDevices],
+  demoBusiness: false,
+  staticUi: false,
+});
+await service.app.listen({ host: "127.0.0.1", port: 8000 });
 ```
 
-Agent 不信任浏览器传来的 `user_id`，也不接受“管理员替用户执行”的隐式身份切换。
+`createWebAgent()` 返回 Fastify 实例和运行服务，可在同一进程注册额外业务路由；不必另起 PI 子进程或 ACP 服务。若已有其他 HTTP 框架，使用内部端口反向代理通常比强行迁移业务框架更稳妥。
 
-## 2. 身份契约
+### 身份适配约定
 
-业务系统提供一个 Agent 可调用的当前用户接口，例如：
+| 字段 | 约定 |
+| --- | --- |
+| `subject` | 业务系统内稳定、唯一的身份标识，如 UUID / 不可变用户主键；用户名改名不能改变归属 |
+| `namespace` | 可选业务域 / 租户前缀，与 `subject` 共同组成 `owner_key` |
+| `id` | 可选数字 ID，仅为 Demo 与旧数据兼容；没有时不要伪造 |
+| `username` | 展示与审计用，不作为授权唯一键 |
+| `role` | 用于助手角色范围，不替代权限码 |
+| `permissions` | 当前真实业务权限码数组，权限变更后应立即反映 |
+| `is_admin` | 业务属性，不放行管理 API |
 
-```http
-GET /api/me
-Authorization: Bearer <user-token>
+适配器只需要返回稳定的 `subject`；不同业务或租户的 `subject` 可能重号时，填 `namespace` 形成 `namespace:subject` 的 `owner_key`。`namespace` 现在隔离会话、记忆、发布与运行归属，但不等于完整的多租户管理隔离：管理员账号、模型、工具和全局设置仍是单控制面。真正的租户级管理面、配额和密钥隔离需要后续扩展，不能只添加前端 `tenant_id` 就宣称支持。
+
+如果适配器既没有 `subject` 也没有 `id`，框架会用当前登录凭据摘要做降级归属。这样不会串号，但 Token 轮换后会看不到旧会话，Web 与小程序也无法共享；正式接入应始终返回稳定 `subject`。
+
+### 跨端会话与稳定身份
+
+会话列表不按「浏览器 / 小程序 / 设备」区分，而是按 `IdentityAdapter.resolve()` 返回的稳定 `subject + namespace` 生成的 `owner_key` 归属。Web 和小程序可以各自持有不同的业务 Token，只要两个 Token 都解析到同一个 `owner_key`，就会看到同一份 `/api/agent/sessions` 列表。
+
+```ts
+return {
+  subject: current.userUuid,    // 不能使用可修改的用户名、手机号或 Token
+  namespace: current.tenantKey, // 单租户系统可省略
+  username: current.username,
+  display_name: current.displayName,
+  role: current.role,
+  permissions: current.permissions,
+  is_admin: current.isBusinessAdmin,
+};
 ```
 
-返回：
+同一用户在不同端打开同一会话时，后端仍然只允许一个运行任务；另一个端可通过会话详情里的 `active_run` 发现并订阅当前任务，或等任务结束再发送消息。不要用「每个端新建一个会话」来规避运行锁，否则历史会被拆散。
 
-```json
-{
-  "user": {
-    "id": 123,
-    "username": "alice",
-    "display_name": "Alice",
-    "role": "operator",
-    "permissions": ["device:read", "device:update"],
-    "is_admin": false
-  }
+如果业务系统只能提供可变化的账号名，应在宿主维护 `account -> stable_subject` 的持久映射表，并保证 Web、小程序、后台使用同一映射；不要在不同端各自生成随机 ID，也不要把 Token 原文当业务 `subject`。
+
+每次工具执行前重新 `resolve()`，还会读取工具启用状态、权限码及助手白名单。Tool 的 `execute()` 仍必须复用原服务的行级 / 租户权限检查；不要直接相信模型传入的 `user_id`、`tenant_id` 或资源 ID。
+
+### 写入与取消
+
+写入 Tool 使用 `risk: "write"`，删除用 `"delete"`。确认模式下先生成审批卡，实际函数尚未执行。用户确认后重新鉴权、一次性执行，再把真实结果交回 PI。审批不能重复消费，过期或权限变化时拒绝。
+
+允许的完全访问模式只跳过业务写入确认，不绕过业务授权。连接器应传播 `AbortSignal`；取消不代表回滚已提交操作。写入接口建议业务自身提供幂等键与查询操作状态，不自动重试具有副作用的工具。
+
+原生函数只允许开发者在代码中注册。后台不支持上传 JS / npm 包执行，也不开放通用 Shell。小程序、桌面端或已有 BFF 已经有完整数据接口时，优先在 Node 宿主写 `ToolSpec` 调这些服务，而不是为了「统一」再包一层 MCP；只要 `execute()` 复用原接口的用户鉴权和数据范围，Agent 就继承同一权限边界。
+
+### 直接写 Tool，不经过 MCP
+
+```ts
+const listOrders: ToolSpec = {
+  name: "mini_program_list_orders",
+  title: "查询我的订单",
+  description: "查询当前登录用户在小程序中的订单，可按状态筛选。",
+  category: "订单",
+  source: "native",
+  permission: "order:read",
+  risk: "read",
+  parameters: {
+    type: "object",
+    properties: { status: { type: "string", enum: ["paid", "shipped", "done"] } },
+    additionalProperties: false,
+  },
+  execute: async (args, context) =>
+    orderService.list({
+      token: context.credential,
+      subject: context.identity.subject,
+      status: args.status,
+      signal: context.signal,
+    }),
+};
+```
+
+这条路径没有 MCP 进程、没有额外网络跳转，也不会把业务 Token 交给第三方；模型只看到工具描述与 Schema，真正权限仍由 `orderService` 判断。MCP 适合复用外部现成能力或跨语言服务，不是所有业务接入的必选项。
+
+## 3. 前端 SDK
+
+`sdk/` 提供 `@webagent/sdk`，使用标准 fetch / Response / ReadableStream，支持每次请求动态取得 Token：
+
+```ts
+import { WebAgentClient } from "@webagent/sdk";
+import { getBusinessAccessToken } from "./auth.js";
+
+const agent = new WebAgentClient({ token: getBusinessAccessToken });
+const { session } = await agent.createSession({ title: "设备检查" });
+
+let runId = "";
+let cursor = "";
+for await (const event of agent.stream({
+  session_id: session.id,
+  message: "查询当前在线设备",
+  approval_mode: "confirm",
+})) {
+  if (event.id) cursor = event.id;
+  if (event.name === "run.started") runId = String(event.data.run_id);
+  if (event.name === "text.delta") console.log(event.data.delta);
+}
+
+for await (const event of agent.resume(runId, cursor)) {
+  console.log(event.name, event.data);
 }
 ```
 
-约定：
+示例中的 `resume()` 用于真实断线后的恢复，正常完成不必再调用。主动停止是 `agent.cancel(runId)`，`AbortController.abort()` 只断开本次浏览器请求，不停止后台。
 
-- `permissions` 使用稳定 action code，不用“角色名”直接控制工具。
-- 工具只声明所需 action code，例如 `device:update`。
-- 业务 API 必须再做一次权限校验，Adapter 的过滤只是第一道。
-- Token 需要短期、可撤销，并建议绑定 audience。
-- 当前 Demo 的身份与归属字段使用稳定整数 `id`。业务系统使用 UUID/字符串用户 ID 时，应在可信身份适配层做稳定映射，或统一修改身份/存储契约；不能在前端临时生成数字，也不能回收旧用户 ID 给另一个账号。
-- 当前不实现多租户；多个业务系统若共享 Agent 实例，必须先增加业务/租户命名空间并贯穿用户、会话、发布记录查询，或各自部署实例，不能直接混用各系统可能重复的数字用户 ID。
+SDK 还包含 `me`、`status`、`models`、`assistants`、`tools`、`sessions`、`messages`、`forkSession`、`deleteSession`、`compact`、`approve`、`reject`、`memories`、`publications`。未封装的 REST 可通过 `json()` 调用。
 
-## 3. 工具接入
+React 组件见 `chat/src/index.ts`。Chat 样式依赖主题 CSS；在宿主复用时同时引入组件样式与 theme，避免复制旧 HTML 应用。默认 Chat Demo 使用自身业务登录；宿主应替换登录 UI 和 API 身份获取，而不是把业务 Token 放在 URL 查询串。
 
-### 3.1 MCP 工具
+### 小程序接入
 
-适合工具较多、需要独立演进、需要复用 MCP 生态的系统。
+本版 Chat 是移动 Web 参考，并非原生微信小程序。小程序需实现自己的组件与网络适配：
 
-每个工具至少包含：
+- `wx.request` 普通 JSON 请求可包装为自定义 fetch，但 SSE 必须启用分块接收并实现 `ReadableStream` / Response 兼容。
+- 如果运行环境无 Web Streams，单独解析 `onChunkReceived`，保留 SSE UTF-8 / CRLF 跨包边界与事件 ID。
+- 小程序 Token 仍由自己的登录系统产生，不用框架管理账号。
+- 模型 / 工具 / 记忆 / 审批沿用同一 API；Markdown / Mermaid / HTML 预览需使用适合小程序的组件或受控 WebView。
+- 无法持续连接时保存 run_id，恢复前台后查询会话 `active_run`，重新订阅；切后台不自动取消运行。
+
+不把 SDK 可注入 fetch 等同于无需适配即可在任意小程序直接运行。
+
+## 4. HTTP 工具
+
+管理端「工具与连接器 → HTTP API」新增：
+
+- 唯一英文 `name`、说明、输入 JSON Schema。
+- HTTP 方法、完整可信 URL、权限码、风险。
+- URL 路径变量使用 `{device_id}`，其余参数以 query 或 JSON 传递。
+- 后端始终注入当前业务 `Authorization: Bearer ...`，模型不能传入或覆盖。
+- 附加请求头支持 `${user.id}`、`${session.id}`，禁止覆盖 Authorization、Cookie、Host 等身份 / 传输字段。
 
 ```json
 {
-  "name": "update_device",
-  "description": "修改指定设备。执行前需要用户审批。",
+  "name": "business_device_detail",
+  "display_name": "设备详情",
+  "description": "查询当前用户可访问的一台设备",
+  "permission": "device:read",
+  "risk": "read",
+  "method": "GET",
+  "url_template": "https://business.example/api/devices/{device_id}",
+  "headers": { "X-Agent-Session": "${session.id}" },
   "input_schema": {
     "type": "object",
-    "properties": {
-      "device_id": {"type": "integer"},
-      "status": {"type": "string", "enum": ["在线", "离线", "维护中"]}
-    },
+    "properties": { "device_id": { "type": "integer", "minimum": 1 } },
     "required": ["device_id"]
-  },
-  "permission": "device:update",
-  "risk": "write",
-  "category": "设备"
-}
-```
-
-在 Demo 的 MCP Server 中，这些元数据写在工具描述尾部：
-
-```text
-[META] permission=device:update; risk=write; category=设备 [/META]
-```
-
-工具实现只做三件事：
-
-1. 从请求上下文读取当前用户 Token。
-2. 调用业务 API。
-3. 把业务结果整理成 JSON 返回。
-
-禁止：
-
-- Adapter 直连业务数据库。
-- Adapter 持有超级管理员 Token。
-- 暴露 `execute_sql`、`call_any_api`、`run_script` 这类万能工具。
-- 用模型参数决定租户、用户或权限边界。
-
-### 3.2 动态 HTTP 工具
-
-适合少量已有 REST API，不想为每个接口写 MCP 代码。
-
-管理员在「AI 配置 → 工具 → 新增工具」填写：
-
-- 工具名、显示名、描述
-- 权限 action code
-- 风险等级：`read` / `write` / `delete`
-- HTTP 方法
-- URL 模板，例如 `http://127.0.0.1:8000/api/devices/{device_id}`
-- 输入 JSON Schema
-- 可选附加 Header
-
-路径参数从输入 Schema 中取值并替换 `{device_id}`；其余参数：
-
-- `GET` / `DELETE` 作为 query 参数。
-- `POST` / `PUT` / `PATCH` 作为 JSON body。
-
-运行时自动注入：
-
-```http
-Authorization: Bearer <当前用户 Token>
-Accept: application/json
-```
-
-不允许通过工具定义覆盖 `Authorization`、`Host`、`Content-Length`，也不允许 Header 中出现换行。
-
-### 3.3 工具四态
-
-| 状态 | 含义 | 用户是否可见 | 用户是否可取消 |
-|---|---|---:|---:|
-| 可见可选 | 默认展示，用户自行勾选 | 是 | 是 |
-| 可见固定 | 默认展示，始终启用 | 是 | 否 |
-| 不可见默认启用 | 不展示，但 Agent 默认使用 | 否 | 否 |
-| 不可见不可用 | 不展示，也不执行 | 否 | 否 |
-
-四种状态对所有工具生效，写和删除工具也可以隐藏。隐藏只影响用户侧可见性，不改变审批与业务 API 的最终 RBAC。
-
-最终可用工具的计算顺序：
-
-```text
-账号权限
-  ∩ 助手工具白名单
-  ∩ 管理员四态配置
-  ∩ 用户本轮勾选
-  -> BM25 / 决策模型（最多启用一种，也可全部关闭）
-  -> 补回固定启用工具，并提供入选 Skill 的渐进加载工具
-```
-
-BM25 的作用不是“向量记忆”，而是工具很多时减少模型上下文占用。它只对已通过权限和四态过滤的工具检索 Top 16；固定工具补回后可能超过 16。决策模型对已授权候选与允许的 Skill 评分，两种开关都关闭则全部保留。决策异常时保留原候选，不暗中改用 BM25。配置、协议与传给评分服务的数据范围见 [运行配置：决策模型](RUNTIME.md#决策模型)。
-
-接入方通过 `PUT /api/agent/config` 设置开关：
-
-```json
-{"bm25_enabled": false, "decision_enabled": false}
-```
-
-开启决策时同时指定后台创建的 `model_kind=decision` 模型 ID，例如：
-
-```json
-{"decision_enabled": true, "decision_model_id": 8, "decision_tools": true, "decision_skills": true, "decision_threshold": 0.6, "decision_min_count": 8, "decision_timeout_seconds": 5}
-```
-
-开启决策会自动关闭 BM25，开启 BM25 会自动关闭决策。两个布尔值同时为 `true` 会返回 422。内部以 `tool_selection_mode` 单值持久化并兼容历史 BM25 配置；不需要接入方自己维护互斥状态。
-
-### 3.4 直连 Tool：业务系统已有数据接口时的接入
-
-小程序、老后台等场景往往已经有完整的数据接口，不想为了 Agent 再起一个 MCP 进程。此时直接用「动态 HTTP 工具」或代码级 SDK 注册即可，本质是把已有接口声明成 Tool：
-
-```python
-from webagent.sdk import ToolSpec, AgentAdminClient
-
-spec = ToolSpec(
-    name="list_orders",
-    description="查询当前用户的订单列表，支持状态筛选",
-    input_schema={
-        "type": "object",
-        "properties": {"status": {"type": "string", "enum": ["paid", "unpaid"]}},
-    },
-    risk="read",
-    permission="order:read",
-    method="POST",
-    url_template="https://your-api.example.com/internal/orders/list",
-)
-
-client = AgentAdminClient(
-    agent_url="http://127.0.0.1:8010",
-    business_url="http://127.0.0.1:8000",
-    internal_secret=internal_service_secret,
-)
-token = client.login(admin_username, admin_password)
-client.upsert_tool(token, spec)
-```
-
-`webagent/sdk.py` 还提供 `serve_tools()`，给 FastAPI 业务系统一键暴露「工具元数据 + 调用」两个约定端点，方便把已有 service 函数直接映射成 Tool。非 FastAPI 框架只要实现同样的两个端点即可，不需要引入任何 Agent 依赖。
-
-`login()` 兼容响应的 `token`/`access_token`，也兼容 Demo 的 HttpOnly 会话 Cookie。Compose 的 Cookie 名不同，调用时传 `session_cookie_name="wa_container_session"` 或配置同名环境变量；不要为了 SDK 把 Cookie 改成浏览器可读。已有 SSO 系统通常直接把业务 BFF 校验得到的用户 Token 交给 SDK，而不是再次密码登录。
-
-`serve_tools()` 强制传入业务鉴权回调。下面的 `business_identity`、`business_orders` 是接入方自己的业务模块，不是框架内置的管理员凭据：
-
-```python
-from fastapi import FastAPI, HTTPException
-from webagent.sdk import serve_tools
-from my_business import business_identity, business_orders
-
-app = FastAPI()
-
-async def authorize(request, spec):
-    user = await business_identity.from_authorization(request.headers.get("Authorization"))
-    if user is None:
-        raise HTTPException(401, "登录已失效")
-    if spec and spec.permission not in user.permissions:
-        raise HTTPException(403, "没有该操作权限")
-    return user
-
-async def handler(name, arguments, user):
-    if name == "list_orders":
-        return await business_orders.list_for_user(user, status=arguments.get("status"))
-    raise HTTPException(404, "工具未注册")
-
-serve_tools([spec], handler, authorize=authorize)(app, prefix="/agent-tools")
-```
-
-`authorize(request, None)` 用于元数据列表的身份校验，`authorize(request, spec)` 用于每次执行的身份与 action code 校验；返回 `None` 会拒绝请求。`handler(name, arguments, user)` 接收的用户只来自该回调，不能使用参数里的 `user_id`。同步和异步回调均支持。输入 Schema 是提供给模型的契约，不代替业务接口的字段、对象归属与业务规则校验；可在回调中使用自己的 Pydantic 模型。
-
-此帮助函数不会自动注册工具；应把 `spec.url_template` 指向 `https://业务域名/agent-tools/list_orders`，用 `upsert_tool()` 注册。`GET /agent-tools` 是发现元数据，不是执行授权边界。现有 MCP 通过环境变量 `WEBAGENT_MCP_URL` 连接远程 HTTP 服务；当前没有后台新增任意 stdio/SSE MCP 服务器的完整管理功能，不应把动态 HTTP 工具入口描述成三种 MCP 传输均已实现。
-
-鉴权融合的关键规则：
-
-- Agent 调用直连工具时**透传当前登录用户 Token**（`Authorization: Bearer <user-token>`），业务接口必须再次校验该 Token 对应的 action code，而不是信任工具名。
-- 工具层不做租户/用户推断。所有 `user_id`、`tenant_id`、`org_id` 都来自业务侧解析后的 Token，绝不能由模型参数传入。
-- 写/删工具必须声明 `risk`，Agent 会走审批卡；审批通过后的执行同样带用户 Token，最终落库仍由业务 API 的 RBAC 兜底。
-
-### 3.5 PagePilot 发布连接器
-
-PagePilot 提供的 MCP Server 是**本地 stdio** 进程（`pagep-mcp --server ... --token ...`），不是远程 streamable HTTP 端点。本框架的 MCP 客户端固定连接远程 HTTP MCP，因此没有把 PagePilot 伪装成 MCP，而是通过它的官方 REST 接口接入：
-
-```http
-POST {pagepilot_base_url}/api/deploy
-Authorization: Bearer <pagepilot-token>
-Content-Type: application/json
-
-{
-  "content": "<!doctype html>...",
-  "title": "设备运维日报",
-  "description": "由 WebAgent 发布",
-  "filename": "index.html"
-}
-```
-新建与更新都使用 `POST /api/deploy`。新建时用户明确提供的非空密码通过 `accessPassword` 随内容一起提交；内容写入后，再设置访问密码和可见范围。更新请求使用官方追加版本模式，在上述内容字段之外同时加入：
-
-```json
-{
-  "customCode": "owned-code",
-  "enableCustomCode": true,
-  "createVersion": true
-}
-```
-
-`customCode` 必须由后端从当前用户在当前 PagePilot 地址下的本地记录取得，不能直接接受用户给出的未知 code。三个字段必须一起传；普通 `code` 不是 `DeployRequest` 的字段，不能照搬旧更新请求体后盲目 POST 新建。框架还会核对响应 code，若与更新目标不一致则停止后续设置，提示核对远端状态。
-
-后台「AI 配置 → 工具 → PagePilot 发布连接器」维护：
-
-- Base URL
-- Bearer Token（Fernet 加密落库，接口只返回掩码）
-- 启用开关
-- 默认标题后缀、发布说明模板（支持 `{title}` / `{date}` / `{user}`）和默认可见范围
-
-启用后工具目录提供 `publish_to_pagepilot`，以及查询本地记录的 `list_published_pages`、`get_published_page`：
-
-- 风险等级：`write`，默认走审批卡。
-- 发布参数包括 `html`、`title`、`description`、`filename`、`access_password`、`visibility`，可用 `publication_id` 或兼容的 `code` 更新本地已有页面。
-- 每次新建和更新都让用户决定访问密码、可见范围。Agent 必须先询问是否设置密码，再传本轮明确选择；`access_password=""` 允许任何知道 URL 的人访问，禁止自动生成密码。`unlisted` 只是隐藏于公开列表，不代表有密码。
-- 标题规则：用户标题 +「（后台后缀）」，例如「日报（设备运维）」；用户不填标题时使用后台后缀加日期。
-- 单文件上限 3 MB，要求完整 HTML 文档。
-- 发布审计记录用户、站点 code、本地记录 ID、版本、URL 和大小；本地只保存 `password_set`，不保存访问密码明文。
-
-HTML 预览中的发布按钮走后端代理 `/api/agent/pagepilot/publish`，Token 不会进入浏览器。预览本身使用 `sandbox="allow-scripts"` 且不允许同源，模型 HTML 不能读取业务登录态。
-
-远端 API 清单（所有请求均由后端使用配置的 Base URL 和共享 Bearer Token 发起）：
-
-| 方法与路径 | 请求与用途 |
-|---|---|
-| `POST /api/deploy` | 新建使用 `content/title/description/filename` 等字段；更新额外带本地归属的 `customCode`、`enableCustomCode=true`、`createVersion=true` |
-| `PATCH /api/deploys/{code}/access` | `{"password": "..."}` 设置密码，空串清除 |
-| `POST /api/deploys/{code}/access/set` | 设置密码的官方兼容别名，仅在前一条 PATCH 返回 404/405 时调用，请求体相同 |
-| `PATCH /api/deploys/{code}/visibility` | `{"visibility": "public"}` 或 `{"visibility": "unlisted"}` |
-| `POST /api/deploys/{code}/visibility` | 可见范围的官方兼容别名，仅在前一条 PATCH 返回 404/405 时调用，请求体相同 |
-
-超时、5xx 和其他错误不会触发兼容回退；内容写入也不通过换路由自动重试，以免结果未知时重复创建站点或版本。注意 `POST /api/deploys/{code}/access` 是访客验证密码接口，**不是**设置密码的兼容路由。
-
-接口设计依据为 PagePilot [公开 OpenAPI](https://pagepilot.chaoxi.live/openapi.json)、[生产网页脚本](https://pagepilot.chaoxi.live/app/assets/index.js)及[官方 Skill/CLI 包](https://pagepilot.chaoxi.live/skill/pagep.zip)：OpenAPI 声明 POST 发布和两个设置兼容别名，生产网页与 CLI 使用上述 POST 追加版本字段。这里的验证范围是公开资料的只读核查与 `scripts/test_publications.py` 的隔离 Mock 回归；没有对目标远端执行发布、更新或设置写入来证明其已验收，实际部署仍需另行授权验证。
-
-#### 共享 Token 的数据隔离
-
-PagePilot Token 是整个业务系统共享的服务凭证，远端站点列表包含所有用户。**「已发布」始终查询本地数据库，不能调用 PagePilot 全量列表后在前端过滤。** 即使未来接 PagePilot MCP，也不能直接向用户开放共享 Token 的 `list_sites`。
-
-`publications.user_id` 来自业务 BFF 传入的可信 Token，经 Agent 的身份接口确认；接口不接受浏览器/模型传入的所有者 `user_id`。`session_id` 只用于记录来源和筛选，不决定归属，也不能作为更新权限证明。用户换新会话后仍能看到自己的发布记录。
-
-更新时先检查当前用户拥有本地 `publication_id`，或当前 PagePilot 地址下属于该用户的 `code`；其他用户记录和本地未知的历史 `code` 一律拒绝。远端已经存在但没有本地归属的旧页面不会自动导入，也不能通过提供 URL 认领。更换 PagePilot Base URL 后，旧记录可以查看，但更新必须恢复对应的连接器地址。
-
-每次发布尝试先写入 `publication_versions`，保留完整 HTML 内容快照、标题、说明、大小和状态，再保存远端返回的 URL/版本。后续更新增加内容版本，不覆盖历史 HTML。`publications` 保存当前页面索引，详情中可查历史尝试；失败记录不等同于远端已成功发布的版本。
-
-删除会话、清空消息或默认 30 天的会话清理不会删除发布记录和 HTML 版本；`session_id` 没有级联删除约束。生产存储需将发布内容纳入备份、恢复、容量和独立保留策略，不能假设会话到期就会释放这部分空间。
-
-#### BFF/API 接入
-
-业务 BFF 对浏览器暴露以下同源接口，并将前缀 `/api/agent` 转成 Agent 服务端的 `/api`：
-
-| 方法与 BFF 路径 | 返回/作用 |
-|---|---|
-| `GET /api/agent/pagepilot/publications` | 当前用户分页记录；查询参数 `q`、`session_id`、`limit=1..100`、`offset`；返回 `items/total/limit/offset`，列表不带 HTML |
-| `GET /api/agent/pagepilot/publications/{publication_id}` | `{"publication": ...}`，包含当前 HTML 和 `versions` 摘要 |
-| `GET /api/agent/pagepilot/publications/{publication_id}/versions/{version_id}` | `{"version": ...}`，包含该版本 HTML、URL、状态和错误 |
-| `POST /api/agent/pagepilot/publish` | 新建或更新，返回本地 `publication_id`、URL、远端版本、状态与可能的警告 |
-
-这四个接口均使用当前业务用户身份；读取接口不会请求 PagePilot。发布请求示例：
-
-```json
-{
-  "html": "<!doctype html><html><head><title>日报</title></head><body>今日巡检正常</body></html>",
-  "title": "设备日报",
-  "description": "今日设备巡检结果",
-  "filename": "index.html",
-  "access_password": "",
-  "visibility": "unlisted",
-  "session_id": "s_current",
-  "publication_id": 42
-}
-```
-
-新建时省略 `publication_id`；`session_id` 可省略，提供时必须属于当前账号。更新优先传本地 `publication_id`；若同时传兼容的 `code`，必须和该记录一致。`visibility` 取 `public` 或 `unlisted`。UI/SDK 每次显式传入密码字符串，空字符串会清除密码；HTTP API 兼容旧客户端，省略或 `null` 在更新时保留原密码，新建时不设置密码，不能把“省略”当作“明确公开”。发布说明可留空，能够生成时可由 Agent 生成。
-
-发布返回 `status=published` 表示内容与访问设置完成。`status=partial`、`ok=false`、`warning` 表示内容已经发布，但密码或可见范围设置失败；前端必须显示 URL 和警告，提醒核对访问保护，不能显示全部成功，也不能自动重试新建。内容请求失败保留本地 `failed` 尝试；服务中断后同样提示核对远端，避免重复创建。
-
-#### 服务端 SDK
-
-`PagePilotClient` 继承 `AgentAdminClient`，使用已认证的业务用户 Token 和内部服务密钥；它既不接收前端 `user_id`，也不把全局 PagePilot Token 发给浏览器。
-
-```python
-from webagent.sdk import PagePilotClient
-
-client = PagePilotClient(
-    agent_url="http://127.0.0.1:8010",
-    business_url="http://127.0.0.1:8000",
-    internal_secret=internal_service_secret,
-)
-
-page = client.list_publications(
-    current_business_user_token, q="日报", limit=20, offset=0
-)
-publication = client.get_publication(current_business_user_token, publication_id=42)
-version = client.get_version(
-    current_business_user_token, publication_id=42, version_id=7
-)
-result = client.publish_html(
-    current_business_user_token,
-    html=updated_report_html,
-    title="设备日报",
-    description="更新今日巡检结果",
-    access_password=user_selected_password,
-    visibility=user_selected_visibility,
-    publication_id=42,
-    session_id=current_session_id,
-)
-```
-
-方法约定：`list_publications()` 返回分页对象；`get_publication()` 返回包含 HTML/版本摘要的记录；`get_version()` 返回指定版本；`publish_html()` 强制显式提供 `access_password: str` 与 `visibility: str`，不会生成密码。上述变量来自业务服务的已认证请求与用户本轮选择，不能从模型参数推导用户身份。
-
-对已有小程序 API，直接把该 SDK 放在业务服务端/BFF，或按上述 HTTP 契约转发即可，不必将业务接口改成 MCP。业务方继续负责登录态、Token 交换和最终 RBAC；共享 PagePilot Token 仅在 Agent 后端访问远端时使用。
-
-## 4. 同源代理与前端嵌入
-
-推荐业务系统实现：
-
-```http
-POST /api/agent/chat/stream
-GET  /api/agent/chat/stream/{run_id}
-GET  /api/agent/tools
-GET  /api/agent/models
-GET  /api/agent/assistants
-POST /api/agent/sessions
-POST /api/agent/approvals/{id}/approve
-POST /api/agent/approvals/{id}/reject
-```
-
-助手列表包含布尔字段 `is_default`。创建会话或首次对话时，省略 `assistant_id` 即由服务端选用当前账号可用的默认助手；默认项不可用时按助手排序回退。使用创建会话返回的 `session.assistant_id` 加载工具和发送消息，后续会话保持该绑定。显式传入 `assistant_id` 可覆盖默认选择，但仍需通过权限校验。管理员在助手创建 / 更新接口中传入 `is_default=true` 即可切换唯一默认项，传入 `false` 可取消；停用助手自动取消其默认标记。
-
-业务 BFF 的职责：
-
-1. 校验当前用户。
-2. 把用户 Token 放进 `Authorization`。
-3. 加内部服务密钥。
-4. 转发 `Last-Event-ID`。
-5. 对 SSE 响应使用 `StreamingResponse`，不要缓存或二次缓冲。
-
-前端对话可以是：
-
-- 业务后台内的独立页面。
-- 右侧抽屉或 iframe。
-- Web Component。
-- 业务系统原生组件。
-
-无论哪种，API Key、MCP 内部密钥和 Agent 服务地址都不应下发浏览器。
-
-### 4.1 HTML、React 与移动端
-
-`web/` 提供 HTML/JS 业务及其他配置后台；`frontend/` 提供 React + TypeScript 聊天、发布记录，以及 Ant Design 模型管理组件。HTML 的模型菜单内嵌同一个 `ModelsSettings`，无需维护两份模型表单。实际小程序需用原生请求 / SSE 适配与组件实现相同交互。
-
-部署构建后，根入口 `/` 默认进入同端口 `/react/`，原生配置管理台位于 `/admin/`。停止使用 HTML 聊天首页不意味着关闭业务后端；后端继续承接登录、业务 API 与 BFF。接入宿主系统时可直接嵌入 React 组件，无需保留 Demo 的这两个页面路由。
-
-模型管理独立入口为 `/react/?view=models`，可从 `frontend/src/index.ts` 导入 `ModelsSettings`，传入 `baseUrl="/api/agent"`、`initialCategory="chat|voice|image|decision"` 与 `onChanged`。宿主负责配置页导航和更新后刷新模型列表，服务端继续核验管理员身份。供应商模板与模型协议详见 [模型接入手册](MODELS.md)。
-
-SSE 的 `run.phase` 携带 `phase` 与 `title`，描述身份、工具发现、决策筛选、上下文检查和实际触发的压缩。决策筛选完成的 `phase=decision_result` 还可携带 `description`、`meta`、`arguments` / `result` 与 `input_label` / `output_label`，用于展示筛选摘要、输入输出及用量。原始决策 I/O 只通过当前事件短暂发送给管理员，不写入会话记录；非管理员仅收到数量摘要。若未调用决策模型，阶段详情说明触发门槛或候选上限原因。`step.started` 携带 `step/max_steps`，用于区分模型首轮与后续轮次。阶段事件不含思考原文，也不授予任何额外权限；宿主应以实际事件切换状态，不使用定时器伪造推理或工具调用。React 组件在一行中展示当前动作和真实思考尾部，按需展开完整过程，结束后收起；可参考 `frontend/src/lib/conversationRun.ts` 的事件状态管理。
-
-`step.started.max_steps=0` 表示本次不限制推理轮数；响应 `budget.max_tool_calls=0` 表示不限制工具调用次数。展示时应使用“不限”，不能用 `value || default` 将 `0` 替换成默认次数。助手配置的 `0` 则表示跟随全局；运行超时仍有效，具体语义见 [运行设置](RUNTIME.md#3-助手执行方式与运行上限)。
-
-React 的 `answerContent.ts` 按流式累积内容提取 HTML；`ConversationRun` 将准备阶段、思考原文、后端已脱敏的工具参数/结果及回答增量组织为 `ProcessData.activities`。`processActivity.ts` 与 `ProcessLine` 按时间顺序播放可读分段，支持暂停与溢出平移，完成时立即停止并折叠。播放只更新过程组件，主正文继续独立流式渲染。片段队列只在浏览器内存保留最近 300 段；完整思考是否入库仍由管理员配置，不能把原始 `tool.args.delta` 拼接到 UI 或日志。
-
-宿主可复用这些纯逻辑处理响应式 Web 或小程序数据：单行过程可播放 HTML 源码片段，主正文中 HTML 生成中不铺大段源码、完成后默认小卡片、预览点击后才加载。手机端保留暂停按钮与展开完整过程，不能依赖悬停操作。
-
-接入组件时，发布列表和历史版本一律走本地发布接口；HTML 预览放在隔离容器内，模型生成的 HTML 不能取得父页面 Cookie、内部密钥或 PagePilot Token。移动弹层应遵循视口高度、独立内容滚动与安全区规则，不能直接使用固定桌面宽度。
-
-### 4.2 录音转写协议与真实验证
-
-语音入口 `POST /api/agent/transcribe` 接受音频 data URL，由服务端读取默认 STT `asr_model_id`；不允许浏览器传供应商 API Key。可在模型语音页绑定，未配置时按钮关闭。`supports_transcription=true` 是能力声明，仍需配置与测试正确协议。请求语言优先于模型 `_asr.language`，都未设置时默认 `zh`。
-
-在模型 `extra_params` 中配置：
-
-```json
-{
-  "_asr": {
-    "protocol": "chat_audio",
-    "endpoint": "/compatible-mode/v1/chat/completions",
-    "data_format": "data_uri"
   }
 }
 ```
 
-`protocol` 支持 `auto`、`transcriptions`、`chat_audio`、`dashscope`、`realtime`；`endpoint` 和 `data_format` 可省略。上例端点仅演示供应商相对路径，使用网关时应按该网关实际路由填写，不能照搬到另一家。端点必须与供应商 Base URL 同源，跨域服务另建供应商。
+这是面向受信任业务 API 的轻量连接器，不是万能 OpenAPI 编排器。第三方服务密钥优先放 MCP 加密凭据或开发原生适配器，不能把业务 Token 转发给不可信网站。目标 API 必须最终校验用户数据权限，不能只依据 `X-Agent-*` 请求头信任身份。
 
-| 协议 | 文件与请求结构 |
-|---|---|
-| `transcriptions` | multipart 文件到 Base URL + `/audio/transcriptions`；典型为 Whisper/OpenAI 转写 |
-| `chat_audio` | Chat Completions `input_audio`；标准为 Base64+`format`，Qwen 默认 `data:audio/...;base64,...` |
-| `dashscope` | 原生 `/api/v1/services/aigc/multimodal-generation/generation`；按模型家族选择 Qwen3-ASR 的 `audio` 或 Qwen-Audio-3.x 的 `input_audio` |
-| `realtime` | `wss://{provider-host}/api-ws/v1/realtime?model={model_id}`；上传录音转换为 16 kHz 单声道 PCM 后分片发送 |
+## 5. MCP 三种传输
 
-Chat Audio/原生/实时适配在需要时调用系统 FFmpeg 将 WebM/Opus、OGG、MP4 转成单声道 16 kHz WAV。部署语音功能时安装 FFmpeg，确保它在 Agent 服务进程的 `PATH`；缺少转换器时返回错误，不会默默丢掉录音。音频只用于本次转写，不应把供应商凭证或私有聊天内容当测试样本。
+使用官方 `@modelcontextprotocol/sdk` 客户端：
 
-后台 STT 测试支持实际录音或上传音频，调用 `POST /api/agent/admin/models/{id}/transcribe`，不修改默认绑定。通用 `/models/{id}/test` API 仍保留 1 秒静音连通探测，不能代替真实人声识别质量验收。缺少识别字段、401/404/400 或实时协议不匹配不能报成功。能发现模型名不意味着网关开放对应协议；最终以目标供应商和真实短录音验收为准。
+| 类型 | 配置 | 注意 |
+| --- | --- | --- |
+| Streamable HTTP | `url`、可选加密 headers | 推荐新 MCP 服务 |
+| SSE | `url`、可选加密 headers | 兼容旧服务 |
+| stdio | `command`、字符串 `args`、加密 env | 默认禁用；部署者配置允许后才启动 |
 
-协议参考：[OpenAI Chat Audio](https://developers.openai.com/api/docs/guides/audio-chat-completions)、[Qwen3-ASR](https://help.aliyun.com/zh/model-studio/recording-file-recognition-qwen)、[Qwen-Audio 原生 ASR](https://help.aliyun.com/en/model-studio/qwen-audio-asr-http-api)、[Qwen 实时语音](https://help.aliyun.com/en/model-studio/qwen-audio-realtime-user-guides)。
-
-#### TTS 输出与 SDK
-
-语音合成使用独立的 `model_kind=tts` 和全局 `tts_model_id`。`POST /api/agent/audio/speech` 接受 `{text,voice?,response_format?,speed?}`，返回 `audio/*` 二进制并设置 `Cache-Control: no-store`。普通用户只能使用默认模型，管理员测试可额外传 `model_row_id`。浏览器应从状态接口读取 `tts.configured` 及格式、语速、字数限制，再用 Blob URL 播放或下载，不接收 Key。
-
-```python
-from webagent.sdk import SpeechClient
-
-speech = SpeechClient(agent_url=agent_url, internal_secret=internal_secret)
-audio_bytes, mime_type = speech.synthesize(
-    current_business_token,
-    "今日设备运行正常。",
-    response_format="wav",
-)
-```
-
-该示例在业务服务端使用已认证用户的 Token；SDK 不提升用户权限。OpenAI Speech 和 DashScope 两种 Qwen TTS HTTP schema 已适配，参数及下载边界见 [模型接入手册](MODELS.md#8-tts-协议)。单次输出最多 10 MB，不自动重试收费请求；当前聊天页未内置每条回答自动朗读，业务方可通过组件自行组合。
-
-### 4.3 推理开关与供应商参数
-
-前端应从模型接口读取有效 `reasoning_efforts`、`reasoning_can_disable`，仅提供模型实际支持的设置。`off` 与 `none` 表示用户希望关闭深度推理，后端按模型协议处理：DeepSeek 混合模型 `thinking.type=disabled`，Qwen 混合模型 `enable_thinking=false`，声明支持标准关闭的模型 `reasoning_effort=none`。显式关闭在额外参数合并后应用，会覆盖默认开启设置。
-
-固定推理模型如 DeepSeek-R1、`deepseek-reasoner`、QwQ、明确的 `*-thinking` 不承诺可关闭。未知代理不要仅凭支持 `reasoning_effort` 就认定支持 `none`；应由供应商元数据/测试确认。协议需要覆盖时可用：
-
-```json
-{"_reasoning": {"protocol": "thinking", "can_disable": false}}
-```
-
-`protocol` 可取 `auto`、`effort`、`thinking`、`enable_thinking`；`can_disable=false` 可禁止关闭。`_reasoning`、`_asr` 是框架配置，不进入模型正文；非标准供应商参数通过 SDK `extra_body` 发出。关闭推理不能保证低延迟：本轮真实 DeepSeek 请求已不返回思考内容，但上游仍耗时约 17 秒。
-
-## 5. SSE 事件协议
-
-请求：
-
-```http
-POST /api/agent/chat/stream
-Accept: text/event-stream
-Content-Type: application/json
-```
-
-请求体示例：
+管理端支持表单和标准 `mcpServers` JSON 批量导入，导入不调用远端、不默认开放工具：
 
 ```json
 {
-  "message": "查看全部设备",
-  "session_id": "s_xxx",
-  "assistant_id": 1,
-  "model_row_id": 11,
-  "enabled_tools": ["list_devices"],
-  "reasoning_effort": "medium",
-  "approval_mode": "confirm",
-  "attachments": []
+  "mcpServers": {
+    "业务 MCP": {
+      "type": "streamable-http",
+      "url": "https://business.example/mcp",
+      "headers": { "Authorization": "Bearer replace-locally" },
+      "tool_policies": {
+        "device_search": { "permission": "device:read", "risk": "read" },
+        "device_update": { "permission": "device:update", "risk": "write" }
+      }
+    },
+    "本地 MCP": {
+      "command": "node",
+      "args": ["/opt/trusted-mcp/server.js"],
+      "env": { "SERVICE_TOKEN": "replace-locally" }
+    }
+  }
 }
 ```
 
-`approval_mode` 可取 `confirm` 或 `full_access`。后者只跳过写/删工具的用户确认，不会改变账号权限、助手白名单、工具四态和业务 API RBAC；管理员可通过运行设置关闭。
+导入后点「测试 / 同步」拉取工具，再确认权限映射。未知工具默认不开放；明确允许所有登录业务用户的基础只读能力可设 `public: true, risk: "read"`。外部服务描述中的 `[META]permission=...;risk=...[/META]` 可作映射来源，显式后台映射优先；只连接信任的 MCP 服务。
 
-响应头包含：
+`forward_user_token` 只用于受信任业务 MCP，将当前业务 Token 注入请求头；第三方 MCP 一般用自己的服务 Token。JSON 中 `$ENV` 按字面保存，不自动读取服务器环境变量。MCP 输出是数据，不能改变权限或运行规则。
 
-```http
-Content-Type: text/event-stream
-X-Run-Id: <run-id>
-Cache-Control: no-cache
-X-Accel-Buffering: no
-```
+共享 PagePilot Token 若直接交给通用 MCP，不会自动得到框架本地发布归属保护；需要按下一节使用专用连接器或自行开发用户归属适配。
 
-每个事件：
+## 6. PagePilot 发布连接器
 
-```text
-id: 42
-event: tool.finished
-data: {"tool":"list_devices","call_id":"call_1","status":"ok","summary":"查询设备：共 6 台"}
+内置 Tool `pagepilot_publish_html` 与 `pagepilot_list_my_pages`，后台配置地址 / Token；未配置时发布 Tool 不提供给 PI。
 
-```
+- 每条发布记录以稳定 `owner_key`（`namespace:subject`）归属，而非仅以 session 区分；session 只是可选来源信息。
+- 本地保存 HTML、版本、返回 URL 和远端 code，不调用共享 Token 的全量列表来展示「我的页面」。
+- 更新必须使用当前用户本地归属记录，禁止用户凭远端 code 更新别人的页面。
+- 用户选择标题、可见范围与密码；密码可为空，不自动生成。标题可拼接后台后缀。
+- Agent 调用要先询问是否加密码；Schema 要求显式 `access_password`，空字符串代表用户明确不设。
+- 工具中的密码字段对过程、PI 条目、审计脱敏，实际审批参数加密保存。用户主动在普通聊天正文里输入的密码不属于工具字段脱敏保证，建议通过专门发布表单输入敏感信息。
+- 内容已经发布而密码 / 可见范围更新失败时返回 `partial`，保留 URL 和告警，避免盲目重试产生重复页面。
 
-主要事件：
+远端协议：`POST /api/deploy`，更新用 `customCode` / `createVersion`，密码和可见范围走 deploy 元信息端点。PagePilot 版本不同时需在 `publications.ts` 适配，并在隔离环境验证，不能只通过 Token 测试就认定发布功能全部兼容。
 
-| 事件 | 关键字段 | 说明 |
-|---|---|---|
-| `run.started` | `model`, `provider`, `demo_mode`, `approval_mode`, `tools` | 本轮运行开始 |
-| `run.phase` | `phase`, `title`, optional `description`, `meta`, `arguments`, `result` | 运行阶段；`decision_result` 管理员可见决策模型输入输出，普通用户只见摘要 |
-| `context` | `budget_tokens`, `compressed`, `summarized_messages` | 上下文预算与压缩 |
-| `thinking.delta` | `delta` | 供应商返回的思考增量；默认实时展示，落库由管理员设置控制 |
-| `step.started` | `step`, `max_steps` | 第 N 轮推理 |
-| `text.delta` | `delta` | 正文增量 |
-| `tool.started` | `tool`, `call_id`, `arguments`, `risk` | 工具开始执行 |
-| `tool.finished` | `status`, `summary`, `result_text` | 工具执行结果 |
-| `tool.approval_required` | `id`, `tool`, `arguments`, `risk`, `summary` | 需要用户审批 |
-| `retry` | `attempt`, `delay_ms`, `reason` | LLM 重试 |
-| `model.fallback` | `from`, `to`, `reason` | 切换备用模型 |
-| `usage` | `usage` | 本轮累计 token 与费用 |
-| `session.title` | `title` | 自动生成或更新会话标题 |
-| `run.completed` | `status`, `answer`, `session_usage`, `run` | 正常运行结束 |
-| `run.failed` | `message`, `status_code` | 运行失败 |
+## 7. Skill 与知识库
 
-客户端应：
+Skill 以后端 `data/pi/skill-library/` 为唯一事实来源，每个目录包含 `SKILL.md`、可选文本参考文件和 `.webagent-skill.json` 启停元数据，正文不写入数据库。管理端可全局开关，也可逐项启停；助手通过 `skill_slugs` 选择可用 Skill，留空表示继承全局已启用的 Skill。
 
-- 用事件 ID 维护 `lastEventId`。
-- 断线后请求 `GET /api/agent/chat/stream/{run_id}`，带 `Last-Event-ID`。
-- 收到 `run.completed` 后结束本地流。
-- 收到 `run.failed` 时展示服务端错误，不要无限重连。
-- 默认在当前页面实时展示 `thinking.delta`，可展开查看；不要擅自存入浏览器长期存储。服务端默认 `store_reasoning=0`，只保存思考标记和用量；管理员设置为 `1` 后才保存后续思考原文，无法恢复此前未保存的数据。
+运行时按助手物化到 `data/pi/skill-runtime/`，模型先看到名称与描述，需要时通过 PI 原生 `read` 读取 `SKILL.md` 和文本参考文件。参考文件仅 `.md/.txt/.json/.yaml/.yml/.csv`，读取被限制在物化目录内，不允许路径穿越、符号链接、二进制或脚本执行。仅有目录访问权限不等于获得业务权限，Skill 不能提升工具或数据授权。
 
-## 6. 审批与权限变更
+此分支不自动读取业务项目中的 AGENTS.md / SOUL.md，也不执行任意插件。系统角色规则通过助手提示词配置，业务 SOP 适合用 Skill；需脚本时开发有明确权限的原生 Tool 或隔离服务。管理端支持导入 Skill ZIP / 目录，但只提取受支持的文本参考文件，不执行其中的脚本。迁移旧数据库 Skill 时会先写 `.legacy-skills.json` 备份，迁移完成后再移除旧表。
 
-默认 `confirm` 模式下，写/删工具会返回 `tool.approval_required`，审批对象包含：
+租户自建知识库、PDF 解析、向量存储暂不落地。RAGFlow、IMA 等可作为 MCP 或原生检索 Tool 接入；检索前必须按当前业务身份过滤文档范围，检索结果属于不可信数据。
 
-- 审批 ID、工具名、参数、风险等级、摘要、有效期。
-- 用户、会话、助手、模型、工具运行记录。
-- 待继续的消息历史和剩余工具调用。
+## 8. 管理端嵌入与 Token
 
-审批记录落在 `pending_approvals` 表，服务重启后仍可处理。审批被点击时使用“pending → processing”的原子更新，因此重复点击不会重复执行。
+管理端始终有独立的 `control_users` 与登录 Cookie，业务系统身份不会自动获得管理权限。若把 `admin/dist` 部署在业务系统、独立管理域名或跨域页面，可以签发管理端 Token：
 
-恢复审批时会：
+1. 在「接入与安全 → 管理端 Token」创建，填写名称、过期时间与允许来源。
+2. 打开管理端登录页，选择「使用管理 Token 连接」。
+3. 同源部署留空 API 地址；跨域部署填写 `https://your-host/api/control`。
+4. 跨域时把管理端所在 Origin 加入 Token 白名单；留空时浏览器只允许同源使用。
 
-1. 重新校验当前用户。
-2. 重新构建 Agent 上下文。
-3. 重新检查工具权限、四态和助手白名单。
-4. 使用当前用户 Token 执行工具。
+管理 Token 只能调用 `/api/control`，不能调用 `/api/agent`，也不能替代业务 Token。原始 Token 只显示一次，数据库只保存哈希；轮换后旧 Token 立即失效。生产环境必须使用 HTTPS，不要把 Token 放进 URL、日志、截图或前端构建变量。
 
-审批不保存明文登录 Token。用户权限在审批等待期间被撤销时，批准会失败并要求重新发起。
+管理端 API：
 
-如果用户选择 `full_access`，写/删工具不会生成 `tool.approval_required`，而是直接执行并继续返回 `tool.started` / `tool.finished`。这只是交互策略变化，Agent 仍使用同一个用户 Token，业务 API 仍做最终授权。
+| API | 作用 |
+| --- | --- |
+| `GET /api/control/admin/control-tokens` | 列出管理 Token（不含哈希） |
+| `POST /api/control/admin/control-tokens` | 创建并只返回一次原始 Token |
+| `PUT /api/control/admin/control-tokens/:id` | 修改名称、启用状态、过期时间和来源 |
+| `POST /api/control/admin/control-tokens/:id/rotate` | 轮换 Token，旧值立即失效 |
+| `DELETE /api/control/admin/control-tokens/:id` | 删除 Token |
 
-## 7. 业务系统删除用户时的预留接口
+跨域直连需要代理或后端返回的 CORS 头，并正确转发 `Authorization: Bearer ...`。仍然推荐由业务网关同源反向代理 `/api/control`，这样管理 Cookie 与 Token 两种方式都能工作。
 
-当前 Demo 不自动删除 Agent 侧会话和审计。接入真实系统时，建议由业务系统在删除/停用用户后调用一个内部清理钩子，具体策略按合规要求决定。
+## 9. 主要 API 与事件
 
-预留契约：
+| API | 作用 |
+| --- | --- |
+| `GET /api/me` | 当前业务身份 |
+| `GET /api/agent/models` / `assistants` / `tools` | 当前可选模型、助手和工具；`tools` 返回可见选择项及隐藏固定启用数量 |
+| `POST /api/agent/sessions` | 创建默认或指定助手会话 |
+| `GET /api/agent/sessions/:id/messages` | 消息与 active_run |
+| `POST /api/agent/chat/stream` | 创建后台任务并订阅 SSE |
+| `GET /api/agent/chat/stream/:runId` | 按 Last-Event-ID 重连 |
+| `POST /api/agent/runs/:id/cancel` | 取消后台任务 |
+| `POST /api/agent/approvals/:id/approve` / `reject` | 用户确认 / 拒绝 |
+| `POST /api/agent/questions/:id/answer` | 回答 `ask_user` 交互问题；支持选项、补充文本和取消 |
+| `WS /api/agent/voice/stream?session_id=...` | 当前会话绑定的实时语音通话；ASR / TTS 未配置或会话运行中时拒绝 |
+| `POST /api/agent/transcribe` | 普通文件 STT；识别结果由前端回填输入框，默认不自动发送 |
+| `WS /api/agent/voice/dictate?session_id=...` | 输入框实时听写；partial / final 回填，不创建额外会话 |
+| `POST /api/agent/audio/speech` | 普通 TTS 合成；正式 Chat 已在右上角提供朗读入口，业务前端也可复用 |
+| `POST /api/agent/sessions/:id/compact` | 手动压缩 |
+| `POST /api/agent/sessions/:id/fork` | 分叉会话 |
+| `PATCH /api/agent/sessions/:id/messages/:messageId` | 编辑并删除后续上下文 |
+| `DELETE /api/agent/sessions/:id/messages/:messageId` | 删除该消息及后续消息 |
 
-```http
-POST /internal/webagent/users/{user_id}/deleted
-X-Internal-Token: <service-secret>
-Content-Type: application/json
+主要 SSE 名称：`run.started`、`run.phase`、`decision.completed`、`step.started`、`thinking.delta`、`text.delta`、`answer.completed`、`tool.args.delta`、`tool.started`、`tool.finished`、`tool.approval_required`、`question.required`、`retry`、`usage`、`session.title`、`run.completed`、`run.failed`。
 
-{
-  "mode": "retain_anonymized",
-  "requested_by": "admin",
-  "reason": "employee_offboarded"
-}
-```
+`answer.completed` 表示回答正文已经生成完毕，可以结束 Markdown / HTML 渲染、展示复制等只读操作，也可以开始 TTS；此时后台可能仍在自动压缩上下文，`run.completed` 尚未到达，因此下一轮输入应继续禁用。`run.completed` 才表示整个运行（含压缩、落库和辅助任务）结束。
 
-`mode` 建议支持：
+思考是供应商实际返回的可见 reasoning 字段，不会凭空生成模型内部思维。`tool.args.delta` 不发送未完成敏感参数。决策原始 IO 只给独立管理端的短期诊断，不推送给业务 Chat。
 
-| 模式 | 行为 |
-|---|---|
-| `retain` | 保留会话和审计，用于取证 |
-| `retain_anonymized` | 保留统计和审计，正文/工具参数匿名化 |
-| `delete_content` | 删除会话正文、附件、工具结果，保留最小审计 |
-| `delete_all` | 删除会话与 Agent 业务数据，按法规保留不可变审计 |
+`question.required` 与 `tool.approval_required` 语义不同：前者只是模型缺少信息，用户回答后继续原任务；后者是危险操作尚未执行，必须由用户明确确认。前端不要复用审批样式或自动替用户回答。问题在刷新后仍为 pending 时，消息元数据会带上问题对象；已过期或已被新消息取代的问题不能继续提交。
 
-实现时必须：
+## 10. 接入验收清单
 
-- 幂等，重复调用不报错。
-- 写审计。
-- 不删除审批中仍在执行的工具记录，先标记用户禁用。
-- 不通过浏览器调用，只允许业务 BFF 使用内部密钥调用。
-
-在正式接口确定前，业务系统应先把用户标记为不可用，并在 Agent 侧禁用其新会话和工具调用。
-
-## 8. 暂不实现：soul.md、AGENTS.md 与租户知识库
-
-当前版本不实现以下能力：
-
-- 每个助手挂载 `soul.md`、`AGENTS.md` 等人格/行为文件。
-- 租户自行上传知识库文档。
-- 租户级文档隔离、Embedding、重排和检索。
-
-当前等价能力：
-
-| 目标 | 当前做法 |
-|---|---|
-| 助手人格与边界 | 管理员的「助手 → 系统提示词」 |
-| 行为规范与流程知识 | Skill 的 `SKILL.md` 正文 + 参考文件，渐进式加载 |
-| 业务实时数据 | Tool / MCP / 动态 HTTP 工具 |
-| 用户长期偏好 | 手动维护的用户记忆 |
-
-不建议现在“顺手做一个知识库上传”，因为它会同时引入：
-
-- 文件存储、病毒扫描、格式解析和沙箱。
-- 文档 ACL、租户隔离、删除传播和备份。
-- 分块、Embedding、向量库、重排、引用溯源。
-- 检索内容进入模型后的提示注入防护。
-- 知识库更新、索引版本和评测。
-
-后续如果要做，建议单独设计“租户知识库”域：
-
-```text
-tenant_id
-  -> knowledge_base
-      -> document
-          -> chunk / embedding
-          -> ACL
-      -> retrieval_tool
-          -> 引用与审计
-```
-
-知识库应通过独立工具接入 Agent，而不是把全文直接塞进 system prompt。知识库工具返回的文档内容必须视为不可信数据，不能执行其中的指令。
-
-## 9. 接入验收清单
-
-- [ ] 业务 `/api/me` 返回稳定用户 ID、角色和 action code。
-- [ ] Agent 代理要求内部密钥，浏览器不能直连 Agent。
-- [ ] 每个工具都有权限、风险和 JSON Schema。
-- [ ] 工具执行使用当前用户 Token。
-- [ ] 写/删工具产生审批，批准后业务 API 再次鉴权。
-- [ ] 重复审批、跨用户审批、过期审批都被拒绝。
-- [ ] 管理员停用工具后，用户侧和 Agent 运行时都不可用。
-- [ ] 用户取消勾选后，本轮不会调用该工具。
-- [ ] 普通用户不能读取他人会话或恢复他人 SSE 流。
-- [ ] SSE 能收到工具事件，并以 `run.completed` 结束。
-- [ ] 断线后能按 `Last-Event-ID` 恢复。
-- [ ] 供应商 API Key 不在浏览器、日志和工具上下文中出现。
-- [ ] 业务系统和 Agent 都记录审计。
+1. 业务管理员不能登录控制面，控制面登录不能查询业务数据。
+2. 低权限用户在直接 API、聊天工具、审批续跑、分叉历史中均不能越权。
+3. 用户切换 / Token 撤销 / 助手白名单或工具权限修改后，执行前实时生效。
+4. 关闭页面后任务继续；停止按钮真的取消后台；重启不重放修改和发布。
+5. 模型未配置、MCP 超时、业务失败、发布 partial 明确显示，不伪造成功。
+6. 同模型调用输出 Markdown / Mermaid / HTML 时，桌面与移动端不阻塞流式输出。
+7. 密钥不出现在前端包、URL、日志、截图与 git；用户原文的敏感数据由业务数据策略治理。

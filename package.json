@@ -1,0 +1,21 @@
+{
+  "name": "webagent-pi",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "workspaces": ["server", "sdk", "chat", "admin"],
+  "scripts": {
+    "dev": "npm run dev -w server",
+    "start": "npm run start -w server",
+    "build": "npm run build -w sdk && npm run build -w server && npm run build -w chat && npm run build -w admin",
+    "typecheck": "npm run typecheck -w server && npm run build -w sdk && tsc --noEmit -p chat/tsconfig.json && tsc --noEmit -p admin/tsconfig.json",
+    "test": "npm run test -w server && npm run test -w sdk && npm run test:conversation -w chat",
+    "test:ui": "node --import tsx server/test/ui-harness.ts",
+    "dev:chat": "npm run build -w sdk && npm run dev -w chat",
+    "dev:admin": "npm run build -w sdk && npm run dev -w admin",
+    "init:env": "node scripts/init-env.mjs",
+    "migrate": "npm run migrate -w server",
+    "core:upgrade": "node scripts/upgrade-pi.mjs"
+  }
+}
