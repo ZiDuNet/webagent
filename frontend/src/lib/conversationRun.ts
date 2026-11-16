@@ -82,7 +82,13 @@ export class ConversationRun {
     if (name === "run.phase") {
       this.title = data.title || "正在准备运行环境";
       const step = this.activate("step", this.title, now, data.phase ? `phase-${data.phase}` : undefined);
-      this.addActivity(this.title, data.message || "", "step", step.id);
+      if (data.description !== undefined) step.description = data.description;
+      if (data.meta !== undefined) step.meta = data.meta;
+      if (data.arguments !== undefined) step.arguments = data.arguments;
+      if (data.result !== undefined) step.result = data.result;
+      if (data.input_label !== undefined) step.inputLabel = data.input_label;
+      if (data.output_label !== undefined) step.outputLabel = data.output_label;
+      this.addActivity(this.title, data.message || data.preview || data.description || "", "step", step.id);
       this.preview = "";
       this.waitingForModel = false;
     } else if (name === "step.started") {

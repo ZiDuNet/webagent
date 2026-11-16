@@ -16,6 +16,28 @@ test("preparation phases reflect real server work before the first model round",
   assert.deepEqual(process.steps.map((step) => step.status), ["done", "done", "done", "running"]);
 });
 
+test("decision phase exposes administrator input, output, summary and usage details", () => {
+  const run = new ConversationRun();
+  run.accept("run.phase", {
+    phase: "decision_result",
+    title: "已准备 1 个工具 · 0 个技能",
+    description: "决策测试已对 2 个候选评分，阈值 0.60。",
+    meta: "240ms · 输入 120 / 输出 8 tokens",
+    arguments: { input: { state: "查设备", candidates: ["tool:read"] } },
+    result: { parsed_scores: { "tool:read": 0.9 } },
+    input_label: "决策模型输入",
+    output_label: "决策模型输出",
+  });
+  const step = run.snapshot().steps[0];
+  assert.equal(step.description, "决策测试已对 2 个候选评分，阈值 0.60。");
+  assert.equal(step.meta, "240ms · 输入 120 / 输出 8 tokens");
+  assert.equal(step.inputLabel, "决策模型输入");
+  assert.equal(step.outputLabel, "决策模型输出");
+  assert.deepEqual(step.arguments.input.candidates, ["tool:read"]);
+  assert.deepEqual(step.result.parsed_scores, { "tool:read": 0.9 });
+  assert.equal(run.snapshot().activities[0].preview, "决策测试已对 2 个候选评分，阈值 0.60。");
+});
+
 test("thinking never hides the tool action or the answer", () => {
   const run = new ConversationRun();
   run.accept("thinking.delta", { delta: "先查询设备。" });

@@ -398,9 +398,11 @@ async def _select_with_decision(ctx: AgentContext, text: str) -> None:
     state = "\n".join(f"{item['role']}: {str(item['content'])[:1200]}" for item in history)
     state = f"最近对话（参考）：\n{state}\n当前任务：\n{text}"
     eligible = ctx.tools
+    diagnostics: dict[str, Any] | None = {} if ctx.user.get("is_admin") else None
     selected, skills, info, usage = await decision.select_candidates(
         tools=eligible, skills=ctx.skills, state=state, config=ctx.config,
         session_id=ctx.session_id, username=ctx.user["username"], deadline=ctx.deadline,
+        diagnostics=diagnostics,
     )
     names = {spec.name for spec in selected}
     for spec in eligible:
@@ -414,10 +416,93 @@ async def _select_with_decision(ctx: AgentContext, text: str) -> None:
     ctx.decision_usage = usage
     ctx.retry_count += int(usage.get("retry_count") or 0)
     ctx.tool_retrieval.update(selected=len(selected), reason="decision", decision=info)
-    await _emit_event(ctx, "run.phase", {
+    decision_name = str((diagnostics or {}).get("model_name") or info.get("model") or (diagnostics or {}).get("model") or "决策模型")
+    if info.get("reason") == "below_min_count":
+        description = f"当前有 {info.get('candidates', 0)} 个候选，未达到触发门槛；本轮未调用决策模型。"
+    elif info.get("reason") == "candidate_limit":
+        description = f"候选数超过 200 个上限；本轮未调用决策模型，保留全部已授权候选。"
+    elif info.get("fallback"):
+        description = f"{decision_name}评分未成功，已回退并保留全部已授权候选。"
+    elif info.get("used"):
+        description = (
+            f"{decision_name}已对 {info.get('candidates', 0)} 个候选评分，"
+            f"阈值 {float(info.get('threshold', 0.6)):.2f}，筛选后保留 {len(selected)} 个工具和 {len(skills)} 个技能。"
+        )
+    else:
+        description = f"本轮未调用决策模型；当前保留 {len(selected)} 个工具和 {len(skills)} 个技能。"
+    usage_parts = []
+    if info.get("latency_ms") is not None:
+        usage_parts.append(f"{info['latency_ms']}ms")
+    if usage.get("prompt_tokens") or usage.get("completion_tokens"):
+        usage_parts.append(f"输入 {usage.get('prompt_tokens', 0)} / 输出 {usage.get('completion_tokens', 0)} tokens")
+    if usage.get("retry_count"):
+        usage_parts.append(f"重试 {usage['retry_count']} 次")
+    event = {
         "phase": "decision_result",
-        "title": "决策不可用，保留全部已授权候选" if info.get("fallback") else f"已准备 {len(selected)} 个工具 · {len(skills)} 个技能",
-    })
+        "title": (
+            "决策未调用，保留全部已授权候选"
+            if info.get("reason") == "candidate_limit"
+            else "决策不可用，保留全部已授权候选"
+            if info.get("fallback")
+            else f"已准备 {len(selected)} 个工具 · {len(skills)} 个技能"
+        ),
+        "description": description,
+        "preview": description,
+        "meta": " · ".join(usage_parts),
+    }
+    if ctx.user.get("is_admin"):
+        submitted = bool((diagnostics or {}).get("request"))
+        input_value = (
+            (diagnostics or {}).get("request")
+            if submitted
+            else {
+                "state": (diagnostics or {}).get("state", state),
+                "candidates": (diagnostics or {}).get("candidates", []),
+                "submitted_to_model": False,
+                "reason": (diagnostics or {}).get("reason", info.get("reason")),
+            }
+        )
+        output_value = {
+            "provider_response": (diagnostics or {}).get("response"),
+            "parsed_scores": info.get("scores", {}),
+            "threshold": info.get("threshold"),
+            "selected_tools": [tool.name for tool in selected],
+            "selected_skills": [skill.get("name") for skill in skills],
+            "status": (diagnostics or {}).get("status", "skipped"),
+            "reason": (diagnostics or {}).get("reason", info.get("reason")),
+            "error": (diagnostics or {}).get("error"),
+        }
+        event.update(
+            arguments=_bounded_process_detail({
+                "model": (diagnostics or {}).get("model_name") or (diagnostics or {}).get("model") or decision_name,
+                "protocol": (diagnostics or {}).get("protocol"),
+                "endpoint": (diagnostics or {}).get("endpoint"),
+                "submitted_to_model": submitted,
+                "input": input_value,
+            }),
+            result=_bounded_process_detail(output_value),
+            input_label="决策模型输入" if submitted else "筛选输入（未发给模型）",
+            output_label="决策模型输出" if submitted else "筛选结果",
+        )
+    else:
+        event["result"] = {
+            "status": "fallback" if info.get("fallback") else "completed",
+            "candidate_count": info.get("candidates", 0),
+            "selected_tool_count": len(selected),
+            "selected_skill_count": len(skills),
+        }
+    await _emit_event(ctx, "run.phase", event)
+
+
+def _bounded_process_detail(value: Any, limit: int = 40_000) -> Any:
+    serialized = json.dumps(value, ensure_ascii=False, indent=2)
+    if len(serialized) <= limit:
+        return value
+    return {
+        "truncated": True,
+        "total_characters": len(serialized),
+        "preview": serialized[:limit],
+    }
 
 
 def _summary_target_for(

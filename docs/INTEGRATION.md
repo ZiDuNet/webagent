@@ -422,7 +422,7 @@ POST /api/agent/approvals/{id}/reject
 
 模型管理独立入口为 `/react/?view=models`，可从 `frontend/src/index.ts` 导入 `ModelsSettings`，传入 `baseUrl="/api/agent"`、`initialCategory="chat|voice|image|decision"` 与 `onChanged`。宿主负责配置页导航和更新后刷新模型列表，服务端继续核验管理员身份。供应商模板与模型协议详见 [模型接入手册](MODELS.md)。
 
-SSE 的 `run.phase` 携带 `phase` 与 `title`，描述身份、工具发现、上下文检查和实际触发的压缩。`step.started` 携带 `step/max_steps`，用于区分模型首轮与后续轮次。阶段事件不含思考原文，也不授予任何额外权限；宿主应以实际事件切换状态，不使用定时器伪造推理或工具调用。React 组件在一行中展示当前动作和真实思考尾部，按需展开完整过程，结束后收起；可参考 `frontend/src/lib/conversationRun.ts` 的事件状态管理。
+SSE 的 `run.phase` 携带 `phase` 与 `title`，描述身份、工具发现、决策筛选、上下文检查和实际触发的压缩。决策筛选完成的 `phase=decision_result` 还可携带 `description`、`meta`、`arguments` / `result` 与 `input_label` / `output_label`，用于展示筛选摘要、输入输出及用量。原始决策 I/O 只通过当前事件短暂发送给管理员，不写入会话记录；非管理员仅收到数量摘要。若未调用决策模型，阶段详情说明触发门槛或候选上限原因。`step.started` 携带 `step/max_steps`，用于区分模型首轮与后续轮次。阶段事件不含思考原文，也不授予任何额外权限；宿主应以实际事件切换状态，不使用定时器伪造推理或工具调用。React 组件在一行中展示当前动作和真实思考尾部，按需展开完整过程，结束后收起；可参考 `frontend/src/lib/conversationRun.ts` 的事件状态管理。
 
 `step.started.max_steps=0` 表示本次不限制推理轮数；响应 `budget.max_tool_calls=0` 表示不限制工具调用次数。展示时应使用“不限”，不能用 `value || default` 将 `0` 替换成默认次数。助手配置的 `0` 则表示跟随全局；运行超时仍有效，具体语义见 [运行设置](RUNTIME.md#3-助手执行方式与运行上限)。
 
@@ -542,6 +542,7 @@ data: {"tool":"list_devices","call_id":"call_1","status":"ok","summary":"查询�
 | 事件 | 关键字段 | 说明 |
 |---|---|---|
 | `run.started` | `model`, `provider`, `demo_mode`, `approval_mode`, `tools` | 本轮运行开始 |
+| `run.phase` | `phase`, `title`, optional `description`, `meta`, `arguments`, `result` | 运行阶段；`decision_result` 管理员可见决策模型输入输出，普通用户只见摘要 |
 | `context` | `budget_tokens`, `compressed`, `summarized_messages` | 上下文预算与压缩 |
 | `thinking.delta` | `delta` | 供应商返回的思考增量；默认实时展示，落库由管理员设置控制 |
 | `step.started` | `step`, `max_steps` | 第 N 轮推理 |

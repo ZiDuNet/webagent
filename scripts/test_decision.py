@@ -124,31 +124,39 @@ class DecisionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_scoring_wire_format_and_usage_log(self) -> None:
         requests = []
+        diagnostics = {}
         original = httpx2.AsyncClient
         async def respond(request):
             requests.append(request)
             return httpx2.Response(200, json={"answers": {"tool:read": {"noul": 0.9}}, "usage": {"prompt_tokens": 10, "completion_tokens": 2}}, request=request)
         with patch.object(decision.httpx2, "AsyncClient", side_effect=lambda **kwargs: original(**kwargs, transport=httpx2.MockTransport(respond))):
-            scores, usage = await decision.score_candidates(model=self.model, provider=self.provider, config=self.config, state="查设备", candidates=[{"id": "tool:read", "description": "查询设备"}], username="reviewer")
+            scores, usage = await decision.score_candidates(model=self.model, provider=self.provider, config=self.config, state="查设备", candidates=[{"id": "tool:read", "description": "查询设备"}], username="reviewer", diagnostics=diagnostics)
         self.assertEqual(scores["tool:read"], 0.9)
         self.assertEqual(usage["total_tokens"], 12)
         body = json.loads(requests[0].content)
         self.assertEqual(requests[0].url.path, "/decisions")
         self.assertEqual(body["questions"]["tool:read"]["type"], "noul")
         self.assertEqual(requests[0].headers["authorization"], "Bearer fixture-key")
+        self.assertEqual(diagnostics["request"]["state"], "查设备")
+        self.assertEqual(diagnostics["response"]["answers"]["tool:read"]["noul"], 0.9)
+        self.assertEqual(diagnostics["scores"], {"tool:read": 0.9})
         with db.connect() as connection:
             self.assertEqual(connection.execute("SELECT purpose FROM llm_calls ORDER BY id DESC LIMIT 1").fetchone()[0], "decision")
 
     async def test_chat_adapter_scores_without_exposing_raw_answer(self) -> None:
         model = {**self.model, "extra_params": {}}
+        diagnostics = {}
         completion = AsyncMock(return_value={"content": '```json\n{"scores":{"x":0.85}}\n```', "usage": {"total_tokens": 5}})
         with patch.object(llm, "chat_completion", completion):
-            scores, usage = await decision.score_candidates(model=model, provider=self.provider, config=self.config, state="test", candidates=[{"id": "x", "description": "read"}])
+            scores, usage = await decision.score_candidates(model=model, provider=self.provider, config=self.config, state="test", candidates=[{"id": "x", "description": "read"}], diagnostics=diagnostics)
         self.assertEqual(scores, {"x": 0.85})
         self.assertEqual(usage["total_tokens"], 5)
         self.assertEqual(completion.call_args.kwargs["purpose"], "decision")
         self.assertEqual(completion.call_args.kwargs["tools"], [])
         self.assertNotIn("on_event", completion.call_args.kwargs)
+        self.assertEqual(diagnostics["request"]["messages"][1]["content"], json.dumps({"state": "test", "candidates": [{"id": "x", "description": "read"}]}, ensure_ascii=False))
+        self.assertIn('"scores":{"x":0.85}', diagnostics["response"])
+        self.assertEqual(diagnostics["scores"], {"x": 0.85})
 
     async def test_loopback_chat_scorer_can_run_without_key(self) -> None:
         provider = {**self.provider, "base_url": "http://127.0.0.1:8123/v1", "api_key": ""}
@@ -181,6 +189,21 @@ class DecisionTests(unittest.IsolatedAsyncioTestCase):
             row = connection.execute("SELECT status, total_tokens FROM llm_calls ORDER BY id DESC LIMIT 1").fetchone()
         self.assertEqual(row["status"], "error")
         self.assertEqual(row["total_tokens"], 12)
+
+    async def test_candidate_below_trigger_minimum_reports_no_model_request(self) -> None:
+        diagnostics = {}
+        selected, skills, info, usage = await decision.select_candidates(
+            tools=[], skills=[], state="查设备", config={**self.config, "decision_min_count": 1},
+            session_id=None, username="reviewer", deadline=time.monotonic() + 5,
+            diagnostics=diagnostics,
+        )
+        self.assertEqual(selected, [])
+        self.assertEqual(skills, [])
+        self.assertEqual(info["reason"], "below_min_count")
+        self.assertEqual(usage, {})
+        self.assertEqual(diagnostics["status"], "skipped")
+        self.assertEqual(diagnostics["minimum_count"], 1)
+        self.assertNotIn("request", diagnostics)
 
     async def test_failure_keeps_all_candidates_without_bm25(self) -> None:
         tool = ToolSpec("read", "查询", {}, "", "read", "业务")
@@ -283,16 +306,54 @@ class DecisionTests(unittest.IsolatedAsyncioTestCase):
         db.set_tool_setting("fixed", selectable=False, default_selected=True)
         db.set_settings({"demo_mode": "0", "tool_selection_mode": "decision", "decision_model_id": str(self.model["id"]), "decision_min_count": "1"})
         async def scores(**kwargs):
+            if kwargs.get("diagnostics") is not None:
+                kwargs["diagnostics"].update(
+                    model="fixture-decision",
+                    model_name="决策测试",
+                    protocol="decisions",
+                    request={"state": kwargs["state"], "questions": kwargs["candidates"]},
+                    response={"answers": {item["id"]: 0.1 for item in kwargs["candidates"]}},
+                    status="ok",
+                )
             return {item["id"]: 0.1 for item in kwargs["candidates"]}, {}
         score = AsyncMock(side_effect=scores)
         with patch.object(runtime, "list_tools", AsyncMock(return_value=tools)), patch.object(decision, "score_candidates", score), patch.object(runtime.tool_search, "rank_tools") as bm25:
             ctx = await runtime.build_context("fixture", None, None, user=USER)
             ctx.session_id = sessions.create_session(USER)["id"]
+            events = []
+            async def emit(name, payload):
+                events.append((name, payload))
+            ctx.emit = emit
             await runtime._select_with_decision(ctx, "查设备")
         identifiers = {item["id"] for item in score.call_args.kwargs["candidates"]}
         self.assertNotIn("tool:delete", identifiers)
         self.assertEqual([tool.name for tool in ctx.tools], ["fixed"])
+        result_event = next(payload for name, payload in events if name == "run.phase" and payload.get("phase") == "decision_result")
+        self.assertEqual(result_event["input_label"], "决策模型输入")
+        self.assertEqual(result_event["arguments"]["input"]["state"], "最近对话（参考）：\n\n当前任务：\n查设备")
+        self.assertIn("tool:read", json.dumps(result_event["result"], ensure_ascii=False))
+        self.assertNotIn("request", ctx.tool_retrieval["decision"])
         bm25.assert_not_called()
+
+    async def test_non_admin_phase_does_not_receive_raw_decision_io(self) -> None:
+        user = {**USER, "role": "user", "is_admin": False}
+        tool = ToolSpec("read", "查询", {}, "device:read", "read", "业务")
+        db.set_settings({"demo_mode": "0", "tool_selection_mode": "decision", "decision_model_id": str(self.model["id"]), "decision_min_count": "1"})
+        async def scores(**kwargs):
+            return {item["id"]: 0.9 for item in kwargs["candidates"]}, {}
+        score = AsyncMock(side_effect=scores)
+        with patch.object(runtime, "list_tools", AsyncMock(return_value=[tool])), patch.object(decision, "score_candidates", score):
+            ctx = await runtime.build_context("fixture", None, None, user=user)
+            ctx.session_id = sessions.create_session(user)["id"]
+            events = []
+            async def emit(name, payload):
+                events.append((name, payload))
+            ctx.emit = emit
+            await runtime._select_with_decision(ctx, "查设备")
+        result_event = next(payload for name, payload in events if name == "run.phase" and payload.get("phase") == "decision_result")
+        self.assertNotIn("arguments", result_event)
+        self.assertNotIn("tool:read", json.dumps(result_event, ensure_ascii=False))
+        self.assertIsNone(score.call_args.kwargs["diagnostics"])
 
     async def test_demo_mode_does_not_call_decision_service(self) -> None:
         with patch.object(runtime, "list_tools", AsyncMock(return_value=[])), patch.object(decision, "select_candidates", AsyncMock()) as select:

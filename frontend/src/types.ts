@@ -10,6 +10,8 @@ export interface ProcessStep {
   /** 右侧的轻量信息，例如耗时、风险、结果摘要 */
   meta?: string;
   description?: string;
+  inputLabel?: string;
+  outputLabel?: string;
   arguments?: unknown;
   result?: unknown;
   /** 思考原文（仅 think 步骤，可能不落库） */

@@ -90,8 +90,8 @@ function StepRow({ step, expanded, reasoningStored, onToggle }: { step: ProcessS
       {step.reasoning !== undefined && <ReasoningBlock reasoning={step.reasoning} stored={reasoningStored} streaming={step.status === "running"} />}
       {step.content !== undefined && <OutputBlock content={step.content} streaming={step.status === "running"} id={step.id} />}
       {step.description && <p className="process__description">{step.description}</p>}
-      {step.arguments !== undefined && <ArgumentBlock label="参数" value={step.arguments} />}
-      {step.result !== undefined && <ArgumentBlock label="结果" value={step.result} />}
+      {step.arguments !== undefined && <ArgumentBlock label={step.inputLabel || "参数"} value={step.arguments} />}
+      {step.result !== undefined && <ArgumentBlock label={step.outputLabel || "结果"} value={step.result} />}
     </div>}
   </div>;
 }

@@ -68,6 +68,11 @@ export interface AgentEvent {
   delta?: string;
   message?: string;
   title?: string;
+  description?: string;
+  preview?: string;
+  meta?: string;
+  input_label?: string;
+  output_label?: string;
   tool?: string;
   call_id?: string;
   arguments?: unknown;
