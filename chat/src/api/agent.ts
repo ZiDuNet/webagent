@@ -24,7 +24,7 @@ export interface AgentModel {
   is_default: boolean;
   capabilities?: string[];
 }
-export interface AgentAttachment { name: string; mime_type: string; data_url: string; size?: number }
+export interface AgentAttachment { name: string; mime_type: string; data_url?: string; path?: string; size?: number }
 export interface AgentTool { name: string; title?: string; description: string; selectable: boolean; default_selected: boolean }
 export interface AgentToolsResponse { items: AgentTool[]; auto_enabled_count?: number }
 export interface AgentAssistant { id: number; name: string; description?: string; is_default: boolean; model_row_id?: number; allow_model_switch?: boolean; context_max_tokens?: number }
@@ -48,9 +48,11 @@ export interface AgentStatus {
   welcome_title?: string;
   welcome_subtitle?: string;
   welcome_prompts?: string[] | string;
+  welcome_logo?: string;
   store_reasoning: boolean;
   context_max_tokens?: number;
   context_reserve_tokens?: number;
+  memory?: { enabled: boolean; auto_extract: boolean; auto_confirm: boolean; count: number; pending: number };
 }
 export interface VoiceModelStatus { configured: boolean; model_id?: number | null; model_name?: string; model_kind?: string; protocol?: string; reason?: string }
 export interface AgentApproval { id: string; tool: string; summary?: string; arguments?: unknown; risk?: string; expires_at?: string }
@@ -71,6 +73,7 @@ export interface AgentMessage {
   role: "user" | "assistant";
   content: string;
   reasoning?: string;
+  attachments?: AgentAttachment[];
   tool_runs: AgentToolRun[];
   created_at: string;
   metadata: {

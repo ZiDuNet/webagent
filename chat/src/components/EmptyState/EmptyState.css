@@ -1,0 +1,181 @@
+.empty-state {
+  width: 100%;
+  max-width: 848px;
+  margin: clamp(16px, 6vh, 64px) auto 12px;
+  padding: 0 2px;
+}
+
+.empty-state__intro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.empty-state__mark {
+  position: relative;
+  display: grid;
+  width: 62px;
+  height: 62px;
+  place-items: center;
+  border: 1px solid rgba(39, 201, 106, 0.22);
+  border-radius: 20px;
+  background:
+    radial-gradient(120% 120% at 30% 15%, rgba(39, 201, 106, 0.24), rgba(39, 201, 106, 0.03) 70%),
+    #101720;
+  color: var(--accent);
+  box-shadow: 0 18px 46px rgba(39, 201, 106, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* 上传的 Logo 按原图比例自适应：只限制最大宽高，不强制裁成方块。 */
+.empty-state__logo {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(400px, 72vw);
+  max-height: 132px;
+  object-fit: contain;
+  filter: drop-shadow(0 14px 34px rgba(0, 0, 0, 0.45));
+}
+
+.empty-state__intro h2 {
+  margin: 18px 0 0;
+  color: #eef3f9;
+  font-size: 21px;
+  font-weight: 660;
+  letter-spacing: -0.02em;
+}
+
+.empty-state__intro p {
+  max-width: 540px;
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.empty-state__quick {
+  margin-top: 38px;
+}
+
+.empty-state__label {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
+.empty-state__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(214px, 1fr));
+  gap: 11px;
+}
+
+.empty-state__card {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 15px 16px;
+  border: 1px solid #232b36;
+  border-radius: 12px;
+  background: #141920;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.empty-state__card:hover {
+  border-color: #3a4658;
+  background: #171e27;
+  transform: translateY(-1px);
+}
+
+.empty-state__card:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.empty-state__badge {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  place-items: center;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.empty-state__badge--blue { background: rgba(106, 168, 255, 0.12); color: #6aa8ff; }
+.empty-state__badge--green { background: rgba(61, 220, 132, 0.12); color: #3ddc84; }
+.empty-state__badge--amber { background: rgba(240, 180, 81, 0.12); color: #f0b451; }
+.empty-state__badge--violet { background: rgba(167, 139, 250, 0.13); color: #a78bfa; }
+.empty-state__badge--teal { background: rgba(53, 208, 196, 0.12); color: #35d0c4; }
+.empty-state__badge--rose { background: rgba(244, 114, 166, 0.12); color: #f472a6; }
+
+.empty-state__text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 1px;
+}
+
+.empty-state__text strong {
+  color: #dde5f0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.empty-state__text em {
+  color: #6f7c8f;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .empty-state {
+    margin-top: 10px;
+  }
+
+  .empty-state__mark {
+    width: 54px;
+    height: 54px;
+    border-radius: 17px;
+  }
+
+  .empty-state__logo {
+    max-width: min(260px, 66vw);
+    max-height: 92px;
+  }
+
+  .empty-state__intro h2 {
+    margin-top: 15px;
+    font-size: 18px;
+  }
+
+  .empty-state__intro p {
+    font-size: 11.5px;
+  }
+
+  .empty-state__quick {
+    margin-top: 26px;
+  }
+
+  .empty-state__grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .empty-state__card {
+    padding: 10px 12px;
+  }
+
+  .empty-state__badge {
+    width: 33px;
+    height: 33px;
+    border-radius: 9px;
+  }
+}

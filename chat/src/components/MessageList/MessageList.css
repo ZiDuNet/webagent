@@ -139,6 +139,38 @@
   line-height: 1.7;
 }
 
+.message__attachments {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 168px));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.message__attachments a {
+  display: block;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: #0d131a;
+}
+
+.message__attachments img {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  object-fit: cover;
+  transition: transform 0.18s ease;
+}
+
+.message__attachments a:hover img {
+  transform: scale(1.02);
+}
+
+.message__attachments a:only-child img {
+  max-height: 300px;
+  object-fit: contain;
+}
+
 .stream-cursor {
   display: inline-block;
   width: 5px;
@@ -214,5 +246,13 @@
 
   .message__bubble {
     max-width: 82vw;
+  }
+
+  .message__attachments {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .message__attachments img {
+    max-height: 180px;
   }
 }

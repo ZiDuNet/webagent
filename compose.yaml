@@ -20,6 +20,7 @@ services:
       WEBAGENT_DATA_DIR: /app/data
       WEBAGENT_SECRET_KEY: ${WEBAGENT_SECRET_KEY:?请先运行 npm run init:env}
       WEBAGENT_CONTROL_PASSWORD: ${WEBAGENT_CONTROL_PASSWORD:?请设置独立的管理密码}
+      WEBAGENT_RESET_CONTROL_PASSWORD: ${WEBAGENT_RESET_CONTROL_PASSWORD:-0}
       WEBAGENT_COOKIE_SECURE: ${WEBAGENT_COOKIE_SECURE:-0}
       WEBAGENT_ALLOW_STDIO: ${WEBAGENT_ALLOW_STDIO:-0}
       WEBAGENT_LOCAL_TOOLS: ${WEBAGENT_LOCAL_TOOLS:-off}
@@ -59,6 +60,11 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   chat:
     image: webagent-pi-chat:local
@@ -85,6 +91,11 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 volumes:
   pi-data:

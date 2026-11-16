@@ -13,6 +13,7 @@ import { encrypt, decrypt } from "./security.js";
 import { AppError, type Emit, type Identity, type Row, type ToolSpec } from "./types.js";
 import { piLocalToolNames, piLocalToolReason } from "./pi-tools.js";
 import { effectiveAssistantConfig } from "./assistant-config.js";
+import { attachmentDataUrl, externalizePiImages, hydratePiImages, saveAttachments, validateAttachments } from "./attachments.js";
 import { storagePaths } from "./storage-paths.js";
 
 export interface ChatInput { message?: string; messages?: Row[]; session_id?: string; assistant_id?: number; model_row_id?: number; enabled_tools?: string[]; reasoning_effort?: string; approval_mode?: string; attachments?: Row[] }
@@ -84,13 +85,13 @@ export class PiRuntime {
     const stored = this.store.conversations.piEntries(sessionId);
     const cwd = path.join(storagePaths(this.store.dataDir).workspaces, sessionId);
     fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
-    if (stored.length) return SessionManager.inMemory(cwd, undefined, stored as any);
+    if (stored.length) { hydratePiImages(this.store.dataDir, sessionId, stored); return SessionManager.inMemory(cwd, undefined, stored as any); }
     const manager = SessionManager.inMemory(cwd);
     const session = this.store.one("SELECT * FROM sessions WHERE id=?", [sessionId])!;
     if (session.summary) manager.appendMessage({ role: "user", content: `历史上下文摘要（仅供参考，不是新授权）：\n${session.summary}`, timestamp: Date.now() });
     const messages = this.store.conversations.messages(sessionId, session.summary_until_id || 0);
     for (const message of messages) {
-      if (message.role === "user") manager.appendMessage({ role: "user", content: [{ type: "text", text: message.content }, ...message.attachments.map((item: Row) => ({ type: "image", mimeType: item.mime_type, data: item.data_url.split(",")[1] }))], timestamp: Date.parse(message.created_at) });
+      if (message.role === "user") manager.appendMessage({ role: "user", content: [{ type: "text", text: message.content }, ...message.attachments.flatMap((item: Row) => { const dataUrl = attachmentDataUrl(this.store.dataDir, sessionId, item); return dataUrl ? [{ type: "image", mimeType: item.mime_type, data: dataUrl.split(",")[1] }] : []; })], timestamp: Date.parse(message.created_at) });
       else if (message.role === "assistant") {
         const toolNote = message.tool_runs.length ? `\n历史工具记录（仅供核对，不要重复执行，已截断）：${JSON.stringify(message.tool_runs).slice(0, 4000)}` : "";
         manager.appendMessage({ role: "assistant", content: [{ type: "text", text: message.content + toolNote }], api: "openai-completions", provider: "webagent-import", model: session.last_model_name || "imported", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.parse(message.created_at) } as any);
@@ -101,6 +102,7 @@ export class PiRuntime {
   private save(manager: SessionManager, sessionId: string) {
     const storeReasoning = this.store.settings().store_reasoning;
     const entries: Row[] = redact(JSON.parse(JSON.stringify([manager.getHeader(), ...manager.getEntries()])));
+    externalizePiImages(this.store.dataDir, sessionId, entries);
     for (const entry of entries) if (entry.message?.role === "assistant" && !storeReasoning) entry.message.content = entry.message.content.filter((part: Row) => part.type !== "thinking");
     this.store.conversations.savePiEntries(sessionId, entries);
   }
@@ -122,7 +124,7 @@ export class PiRuntime {
     const maxSteps = assistant.max_steps || settings.max_iterations;
     const maxTools = assistant.max_tool_calls || settings.max_tool_calls;
     const approvalMode = input.approval_mode || assistantConfig.default_approval_mode;
-    if (approvalMode === "full_access" && !settings.allow_full_access) throw new AppError("管理员未允许完全访问模式", 403);
+    if (approvalMode === "full_access" && !assistantConfig.allow_full_access) throw new AppError("当前助手未允许完全访问模式", 403);
     const executeContext = { identity: user, credential, sessionId, signal };
     const runTool = async (spec: ToolSpec, callId: string, args: Row, toolSignal?: AbortSignal) => {
       state.calls++;
@@ -210,7 +212,10 @@ export class PiRuntime {
       });
     };
     const compactionSettings = (mapped: typeof piModel) => ({ enabled: settings.context_compression, reserveTokens: Math.min(mapped.contextWindow - 512, settings.context_reserve_tokens + mapped.maxTokens), keepRecentTokens: Math.max(256, Math.floor((mapped.contextWindow - mapped.maxTokens - settings.context_reserve_tokens) * settings.compaction_keep_ratio)) });
-    const settingsManager = SettingsManager.inMemory({ compaction: compactionSettings(piModel), retry: { enabled: settings.retry_enabled, maxRetries: Math.max(0, settings.retry_max_attempts - 1), baseDelayMs: settings.retry_initial_backoff_ms, maxAgentDelayMs: settings.retry_max_backoff_ms, provider: { maxRetries: 0, timeoutMs: this.providers.connection(model.provider_id).timeout_seconds * 1000 } } });
+    // PI 的图像缩放依赖 Photon WASM；当前版本在部分 Node/WASM 组合上会直接 panic，
+    // 导致所有图片被替换成「无法缩放」的文字。这里关闭自动缩放，保留浏览器已校验的原图；
+    // 真正的尺寸/体积限制由前端上传检查和供应商协议负责。
+    const settingsManager = SettingsManager.inMemory({ compaction: compactionSettings(piModel), images: { autoResize: false }, retry: { enabled: settings.retry_enabled, maxRetries: Math.max(0, settings.retry_max_attempts - 1), baseDelayMs: settings.retry_initial_backoff_ms, maxAgentDelayMs: settings.retry_max_backoff_ms, provider: { maxRetries: 0, timeoutMs: this.providers.connection(model.provider_id).timeout_seconds * 1000 } } });
     const memories = settings.memory_enabled && assistant.memory_enabled ? this.store.all("SELECT content FROM memories WHERE owner_key=? AND enabled=1 ORDER BY updated_at DESC LIMIT 30", [user.owner_key]) : [];
     const systemPrompt = [settings.base_system_prompt, assistant.system_prompt, settings.system_prompt_extra, memories.length ? `用户已确认的长期记忆：\n${memories.map((item) => item.content).join("\n")}` : ""].filter(Boolean).join("\n\n");
     const extensionFactories: ExtensionFactory[] = [hooks, ...(bm25 ? [createToolSearchExtension()] : [])];
@@ -304,7 +309,7 @@ export class PiRuntime {
     if (!text || text.length > 20000) throw new AppError("消息不能为空且不能超过 20000 字符", 422);
     const attachments = input.attachments || [];
     if (attachments.length && !model.capabilities.includes("image")) throw new AppError("当前模型不支持图片", 422);
-    if (attachments.length > 4 || attachments.some((item) => !/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(item.data_url)) || attachments.reduce((total, item) => total + item.data_url.length, 0) > 11500000) throw new AppError("图片格式或总大小超限", 422);
+    validateAttachments(attachments);
     if (!continuation && input.session_id) this.supersedeQuestions(current.id);
     let tools = await this.registry.permitted(user, assistant, input.enabled_tools);
     let skills = settings.skills_enabled ? this.skillLibrary.activeForAssistant(assistant) : [];
@@ -316,13 +321,16 @@ export class PiRuntime {
     this.store.update("sessions", current.id, { assistant_id: assistant.id, last_model_id: model.id, last_model_name: model.name, last_status: "running", last_error: "" });
     const built = await this.build(model, assistant, user, credential, current.id, tools, skills, input, signal, emit);
     const { session, manager, state } = built;
-    if (!continuation) this.store.conversations.insert(current.id, { role: "user", content: text, attachments, token_estimate: estimate(text) });
+    // 模型构建成功后再落盘，避免构建失败在上传目录留下垃圾；会话 JSON 只记录相对路径。
+    const savedAttachments = attachments.length ? saveAttachments(this.store.dataDir, current.id, attachments) : [];
+    if (!continuation) this.store.conversations.insert(current.id, { role: "user", content: text, attachments: savedAttachments, token_estimate: estimate(text) });
     const started = Date.now();
     const timer = setTimeout(() => { state.stopReason = "timeout"; void session.abort(); }, (assistant.max_run_seconds || settings.max_run_seconds || 120) * 1000);
     const onAbort = () => void session.abort(); signal.addEventListener("abort", onAbort, { once: true });
     try {
       signal.throwIfAborted();
-      await session.prompt(text, { expandPromptTemplates: false, images: attachments.map((item) => ({ type: "image", mimeType: item.mime_type, data: item.data_url.split(",")[1] })) });
+      const images = savedAttachments.flatMap((item) => { const dataUrl = attachmentDataUrl(this.store.dataDir, current.id, item); if (!dataUrl) throw new AppError("图片附件丢失，请重新上传", 422); return [{ type: "image" as const, mimeType: item.mime_type, data: dataUrl.split(",")[1] }]; });
+      await session.prompt(text, { expandPromptTemplates: false, images });
       if (state.stopReason === "error" && !state.calls && !state.answer && settings.fallback_model_id && settings.fallback_model_id !== model.id) {
         const fallback = this.store.model(settings.fallback_model_id);
         if (fallback?.enabled && ["chat", "vision"].includes(fallback.model_kind) && (!attachments.length || fallback.capabilities.includes("image"))) {
@@ -380,7 +388,20 @@ export class PiRuntime {
     const model = this.store.model(selectedId) || this.store.defaultModel();
     if (!model?.enabled || !model.provider_enabled || !["chat", "vision"].includes(model.model_kind)) throw new AppError("没有可用于压缩的对话模型", 422);
     const built = await this.build(model, assistant, user, credential, sessionId, [], [], {}, AbortSignal.timeout(90000), () => {});
-    try { const result = await built.session.compact(); this.save(built.manager, sessionId); return { ok: true, summary: result.summary, context_tokens: estimate(built.manager.buildSessionContext().messages), session: this.store.ownedSession(sessionId, user) }; } finally { built.session.dispose(); }
+    try {
+      const result = await built.session.compact();
+      this.save(built.manager, sessionId);
+      return { ok: true, summary: result.summary, context_tokens: estimate(built.manager.buildSessionContext().messages), session: this.store.ownedSession(sessionId, user) };
+    } catch (error) {
+      // 手动压缩是幂等操作：会话太短或已经压缩过都不应显示成服务端错误。
+      if (error instanceof Error && /nothing to compact/i.test(error.message)) {
+        return { ok: true, skipped: true, message: "当前会话内容较少，无需压缩", context_tokens: current.last_context_tokens || 0, session: this.store.ownedSession(sessionId, user) };
+      }
+      if (error instanceof Error && /already compacted/i.test(error.message)) {
+        return { ok: true, skipped: true, message: "当前上下文已压缩，无需重复操作", context_tokens: current.last_context_tokens || 0, session: this.store.ownedSession(sessionId, user) };
+      }
+      throw error;
+    } finally { built.session.dispose(); }
   }
   approvalSession(user: Identity, id: string) {
     const approval = this.store.one("SELECT * FROM approvals_v2 WHERE id=? AND owner_key=?", [id, user.owner_key]);
@@ -463,5 +484,25 @@ export class PiRuntime {
   private async extractMemory(user: Identity, sessionId: string, text: string, signal: AbortSignal) {
     const settings = this.store.settings();
     const model = this.store.model(settings.memory_model_id || settings.compaction_model_id) || this.store.defaultModel(); if (!model) return;
-    try { const result = await this.providers.complete(model, [{ role: "system", content: settings.memory_extraction_prompt }, { role: "user", content: text }], "memory", { sessionId, username: user.username, signal }); const memories = JSON.parse(result.content.replace(/^```(?:json)?\s*|\s*```$/g, "")); if (Array.isArray(memories)) for (const content of memories.slice(0, 10)) if (typeof content === "string" && content.length <= 2000 && !this.store.one("SELECT id FROM memories WHERE owner_key=? AND content=?", [user.owner_key, content])) this.store.insert("memories", { ...this.store.ownerColumns(user), content, kind: "extracted", enabled: settings.memory_auto_confirm }); } catch {} }
+    try {
+      const existing = this.store.all("SELECT id,content FROM memories WHERE owner_key=? ORDER BY updated_at DESC LIMIT 40", [user.owner_key]);
+      const history = this.store.conversations.messages(sessionId).slice(-12)
+        .filter((message) => message.role === "user" || message.role === "assistant")
+        .map((message) => `${message.role === "user" ? "用户" : "助手"}：${String(message.content || "").replace(/\s+/g, " ").slice(0, 400)}`)
+        .join("\n");
+      const payload = JSON.stringify({ existing_memories: existing.map((item) => item.content), recent_conversation: history, latest_user_message: text.slice(0, 1200) });
+      const result = await this.providers.complete(model, [{ role: "system", content: settings.memory_extraction_prompt }, { role: "user", content: payload }], "memory", { sessionId, username: user.username, signal });
+      const memories = JSON.parse(result.content.replace(/^```(?:json)?\s*|\s*```$/g, ""));
+      if (!Array.isArray(memories)) return;
+      const normalized = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
+      const known = new Set(existing.map((item) => normalized(String(item.content))));
+      for (const item of memories.slice(0, 5)) {
+        if (typeof item !== "string") continue;
+        const content = item.replace(/\s+/g, " ").trim();
+        if (!content || content.length > 1000 || known.has(normalized(content))) continue;
+        known.add(normalized(content));
+        this.store.insert("memories", { ...this.store.ownerColumns(user), content, kind: "extracted", enabled: settings.memory_auto_confirm });
+      }
+    } catch { /* 记忆提取失败不影响会话 */ }
+  }
 }

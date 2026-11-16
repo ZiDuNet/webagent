@@ -4,7 +4,7 @@ import { apiErrorMessage } from "../api/pagepilot";
 import type { AccessMode } from "../components/Composer/Composer";
 import { extractHtmlArtifacts } from "../lib/answerContent";
 import { ConversationRun } from "../lib/conversationRun";
-import type { ChatMessage, MessagePart, ProcessData, QuestionData } from "../types";
+import type { ChatAttachment, ChatMessage, MessagePart, ProcessData, QuestionData } from "../types";
 
 export { extractHtmlArtifacts } from "../lib/answerContent";
 
@@ -19,7 +19,15 @@ function processFromMessage(message: AgentMessage): ProcessData | null {
     ...runs.map((run, index) => ({ id: run.call_id || String(index), title: run.tool, kind: "tool" as const, status: ["error", "failed", "rejected", "cancelled"].includes(run.status) ? "failed" as const : run.status === "pending" ? "approval" as const : "done" as const, meta: run.summary, arguments: run.arguments, result: run.result })),
   ] };
 }
-function storedMessage(message: AgentMessage, liveProcess?: ProcessData, renderKey?: string): ChatMessage {
+function previewAttachments(sessionId: string, attachments: AgentAttachment[] = []): ChatAttachment[] {
+  return attachments.flatMap((item) => {
+    if (item.data_url) return [{ name: item.name, mime_type: item.mime_type, url: item.data_url, size: item.size }];
+    const file = item.path?.split("/").pop();
+    if (!file) return [];
+    return [{ name: item.name, mime_type: item.mime_type, size: item.size, url: `/api/agent/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(file)}` }];
+  });
+}
+function storedMessage(message: AgentMessage, liveProcess: ProcessData | undefined, renderKey: string | undefined, sessionId: string): ChatMessage {
   const process = liveProcess && !message.metadata.approval_status && !message.metadata.question_status ? { ...liveProcess, reasoningStored: Boolean(message.reasoning) } : processFromMessage(message);
   const parts: MessagePart[] = process ? [{ kind: "process", process }] : [];
   parts.push(...(message.role === "assistant" ? extractHtmlArtifacts(message.content, String(message.id)).parts : [{ kind: "markdown" as const, content: message.content }]));
@@ -30,7 +38,7 @@ function storedMessage(message: AgentMessage, liveProcess?: ProcessData, renderK
     const status = (message.metadata.question_status || (message.metadata.status === "question_required" ? "pending" : "expired")) as QuestionData["status"];
     parts.push({ kind: "question", question: { id: q.id, question: q.question, description: q.description, options: q.options, selection: q.selection, allow_free_text: q.allow_free_text, required: q.required, expires_at: q.expires_at, status, values: message.metadata.question_answer?.values, free_text: message.metadata.question_answer?.free_text } });
   }
-  return { id: String(message.id), renderKey, role: message.role, name: message.role === "user" ? "你" : "智能助手", parts, usage: message.metadata.usage, time: new Date(message.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) };
+  return { id: String(message.id), renderKey, role: message.role, name: message.role === "user" ? "你" : "智能助手", parts, attachments: previewAttachments(sessionId, message.attachments), usage: message.metadata.usage, time: new Date(message.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) };
 }
 export interface SendAgentOptions { modelId?: number; toolIds: string[]; reasoning: string; accessMode: AccessMode; assistantId?: number; attachments?: AgentAttachment[] }
 interface MessagesResponse { items: AgentMessage[]; session: AgentSession; active_run: { id: string } | null }
@@ -44,7 +52,7 @@ export function useAgentConversation(sessionId: string | undefined, onSessionCha
   const processRef = useRef(new Map<string, ProcessData>()); const keysRef = useRef(new Map<string, string>());
   sessionRef.current = sessionId; callbackRef.current = onSessionChange;
 
-  const consume = useCallback(async (target: string, controller: AbortController, responsePromise: Promise<Response>, optimisticText?: string, existingRunId?: string) => {
+  const consume = useCallback(async (target: string, controller: AbortController, responsePromise: Promise<Response>, optimisticText?: string, existingRunId?: string, optimisticAttachments?: AgentAttachment[]) => {
     streamRef.current = controller; runIdRef.current = existingRunId; stopRequestedRef.current = false;
     setStreaming(true); setError(null);
     const id = `live-${existingRunId || crypto.randomUUID()}`; const run = new ConversationRun();
@@ -79,7 +87,7 @@ export function useAgentConversation(sessionId: string | undefined, onSessionCha
       if (run.accept(name, data)) scheduleRender();
       if (name === "run.failed") setError(run.title);
     };
-    setMessages((previous) => [...previous, ...(optimisticText ? [{ id: `${id}-user`, role: "user" as const, name: "你", parts: [{ kind: "markdown" as const, content: optimisticText }], streaming: true }] : []), { id, role: "assistant", name: "智能助手", parts: [{ kind: "process", process: run.snapshot() }], streaming: true }]);
+      setMessages((previous) => [...previous, ...(optimisticText ? [{ id: `${id}-user`, role: "user" as const, name: "你", parts: [{ kind: "markdown" as const, content: optimisticText }], attachments: previewAttachments(target, optimisticAttachments), streaming: true }] : []), { id, role: "assistant", name: "智能助手", parts: [{ kind: "process", process: run.snapshot() }], streaming: true }]);
     try {
       const response = await responsePromise;
       if (!current()) { await response.body?.cancel(); return; }
@@ -102,7 +110,7 @@ export function useAgentConversation(sessionId: string | undefined, onSessionCha
       const lastUser = [...latest.items].reverse().find((message) => message.role === "user");
       if (last && run.completed && run.answer) { processRef.current.set(String(last.id), run.snapshot()); keysRef.current.set(String(last.id), id); }
       if (lastUser && optimisticText) keysRef.current.set(String(lastUser.id), `${id}-user`);
-      setMessages(latest.items.map((message) => storedMessage(message, processRef.current.get(String(message.id)), keysRef.current.get(String(message.id)))));
+      setMessages(latest.items.map((message) => storedMessage(message, processRef.current.get(String(message.id)), keysRef.current.get(String(message.id)), target)));
       callbackRef.current?.(latest.session);
     } catch (failure) {
       if (!current()) return;
@@ -120,7 +128,7 @@ export function useAgentConversation(sessionId: string | undefined, onSessionCha
     const controller = new AbortController(); setLoading(true);
     agentRequest<MessagesResponse>(`/api/agent/sessions/${encodeURIComponent(sessionId)}/messages`, { signal: controller.signal }).then((result) => {
       if (controller.signal.aborted) return;
-      setMessages(result.items.map((message) => storedMessage(message, processRef.current.get(String(message.id)), keysRef.current.get(String(message.id)))));
+      setMessages(result.items.map((message) => storedMessage(message, processRef.current.get(String(message.id)), keysRef.current.get(String(message.id)), sessionId)));
       setContextTokens(result.session.last_context_tokens || 0); callbackRef.current?.(result.session); setLoading(false);
       if (result.active_run) void consume(sessionId, controller, fetch(`/api/agent/chat/stream/${encodeURIComponent(result.active_run.id)}`, { signal: controller.signal, credentials: "same-origin", headers: { Accept: "text/event-stream" } }), undefined, result.active_run.id);
     }).catch((failure: unknown) => !controller.signal.aborted && setError(apiErrorMessage(failure))).finally(() => !controller.signal.aborted && setLoading(false));
@@ -131,7 +139,7 @@ export function useAgentConversation(sessionId: string | undefined, onSessionCha
   const send = useCallback(async (text: string, options: SendAgentOptions) => {
     if (!sessionId || streamRef.current) return;
     const controller = new AbortController();
-    await consume(sessionId, controller, fetch("/api/agent/chat/stream", { method: "POST", signal: controller.signal, credentials: "same-origin", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify({ message: text, session_id: sessionId, model_row_id: options.modelId, assistant_id: options.assistantId, enabled_tools: options.toolIds, reasoning_effort: options.reasoning || undefined, approval_mode: options.accessMode, attachments: options.attachments || [] }) }), text);
+    await consume(sessionId, controller, fetch("/api/agent/chat/stream", { method: "POST", signal: controller.signal, credentials: "same-origin", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify({ message: text, session_id: sessionId, model_row_id: options.modelId, assistant_id: options.assistantId, enabled_tools: options.toolIds, reasoning_effort: options.reasoning || undefined, approval_mode: options.accessMode, attachments: options.attachments || [] }) }), text, undefined, options.attachments);
   }, [sessionId, consume]);
   const approve = useCallback(async (id: string, accepted: boolean) => {
     if (!sessionId || streamRef.current) return;

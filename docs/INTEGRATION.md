@@ -176,7 +176,7 @@ for await (const event of agent.resume(runId, cursor)) {
 
 SDK 还包含 `me`、`status`、`models`、`assistants`、`tools`、`sessions`、`messages`、`forkSession`、`deleteSession`、`compact`、`approve`、`reject`、`memories`、`publications`。未封装的 REST 可通过 `json()` 调用。
 
-React 组件见 `chat/src/index.ts`。Chat 样式依赖主题 CSS；在宿主复用时同时引入组件样式与 theme，避免复制旧 HTML 应用。默认 Chat Demo 使用自身业务登录；宿主应替换登录 UI 和 API 身份获取，而不是把业务 Token 放在 URL 查询串。
+React 组件见 `chat/src/index.ts`。Chat 样式依赖主题 CSS；在宿主复用时同时引入组件样式与 theme，避免复制旧 HTML 应用。Chat 本身不提供账号密码表单：集成时由宿主登录态（Cookie / Bearer）经 `IdentityAdapter` 解析，独立部署用接入 Token 打开；不要把长期业务 Token 放进 URL 查询串。
 
 ### 小程序接入
 
@@ -305,6 +305,8 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 | `PUT /api/control/admin/control-tokens/:id` | 修改名称、启用状态、过期时间和来源 |
 | `POST /api/control/admin/control-tokens/:id/rotate` | 轮换 Token，旧值立即失效 |
 | `DELETE /api/control/admin/control-tokens/:id` | 删除 Token |
+| `POST /api/control/admin/brand-logo` | 上传空态品牌徽标（Base64 图片，≤2 MB），返回 `brand/<hash>.<ext>` |
+| `GET /api/control/brand/:file` | 管理端预览徽标（公开静态资源） |
 
 跨域直连需要代理或后端返回的 CORS 头，并正确转发 `Authorization: Bearer ...`。仍然推荐由业务网关同源反向代理 `/api/control`，这样管理 Cookie 与 Token 两种方式都能工作。
 
@@ -316,6 +318,7 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 | `GET /api/agent/models` / `assistants` / `tools` | 当前可选模型、助手和工具；`tools` 返回可见选择项及隐藏固定启用数量 |
 | `POST /api/agent/sessions` | 创建默认或指定助手会话 |
 | `GET /api/agent/sessions/:id/messages` | 消息与 active_run |
+| `GET /api/agent/sessions/:id/attachments/:file` | 历史消息图片预览（会话归属校验） |
 | `POST /api/agent/chat/stream` | 创建后台任务并订阅 SSE |
 | `GET /api/agent/chat/stream/:runId` | 按 Last-Event-ID 重连 |
 | `POST /api/agent/runs/:id/cancel` | 取消后台任务 |
@@ -325,7 +328,8 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 | `POST /api/agent/transcribe` | 普通文件 STT；识别结果由前端回填输入框，默认不自动发送 |
 | `WS /api/agent/voice/dictate?session_id=...` | 输入框实时听写；partial / final 回填，不创建额外会话 |
 | `POST /api/agent/audio/speech` | 普通 TTS 合成；正式 Chat 已在右上角提供朗读入口，业务前端也可复用 |
-| `POST /api/agent/sessions/:id/compact` | 手动压缩 |
+| `POST /api/agent/sessions/:id/compact` | 手动压缩（幂等，跳过时返回 `skipped: true`） |
+| `GET /api/agent/brand/:file` | 空态品牌徽标（公开静态资源，文件名带内容哈希） |
 | `POST /api/agent/sessions/:id/fork` | 分叉会话 |
 | `PATCH /api/agent/sessions/:id/messages/:messageId` | 编辑并删除后续上下文 |
 | `DELETE /api/agent/sessions/:id/messages/:messageId` | 删除该消息及后续消息 |

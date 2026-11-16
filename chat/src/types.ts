@@ -103,9 +103,17 @@ export interface ChatMessage {
   name: string;
   time?: string;
   parts: MessagePart[];
+  attachments?: ChatAttachment[];
   streaming?: boolean;
   pendingRun?: boolean;
   usage?: UsageData;
+}
+
+export interface ChatAttachment {
+  name: string;
+  mime_type: string;
+  url: string;
+  size?: number;
 }
 
 export interface ModelOption {

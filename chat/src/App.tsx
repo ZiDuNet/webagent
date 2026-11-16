@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agentJson, agentRequest, type AgentAssistant, type AgentAttachment, type AgentModel, type AgentSession, type AgentStatus, type AgentTool, type AgentToolsResponse, type AgentUser } from "./api/agent";
 import { apiErrorMessage, PagePilotApiError, readApiResponse } from "./api/pagepilot";
 import { Composer, type AccessMode } from "./components/Composer/Composer";
@@ -10,6 +10,8 @@ import { MemoryDialog } from "./components/Memory/MemoryDialog";
 import { SessionList } from "./components/SessionList/SessionList";
 import { Dialog } from "./components/ui/Dialog";
 import { Icon } from "./components/ui/Icon";
+import { EmptyState } from "./components/EmptyState/EmptyState";
+import { parseQuickStart } from "./lib/quickStart";
 import { VoiceCallDialog, type VoiceCallConfig } from "./components/VoiceCall/VoiceCallDialog";
 import { useAgentConversation } from "./hooks/useAgentConversation";
 import { useVoiceInput } from "./hooks/useVoiceInput";
@@ -23,9 +25,6 @@ export default function App() {
   const [tokenAttempted, setTokenAttempted] = useState(false);
   const [authMode, setAuthMode] = useState<"business" | "token">("business");
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [loggingIn, setLoggingIn] = useState(false);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [selectedAssistantId, setSelectedAssistantId] = useState<number>();
   const [models, setModels] = useState<AgentModel[]>([]);
@@ -41,6 +40,8 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [publishedOpen, setPublishedOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [statusRevision, setStatusRevision] = useState(0);
+  const appliedAssistantRef = useRef<number | undefined>(undefined);
   const [voiceCallOpen, setVoiceCallOpen] = useState(false);
   const [moreActionsOpen, setMoreActionsOpen] = useState(false);
   const [publishing, setPublishing] = useState<ArtifactData | null>(null);
@@ -49,6 +50,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [sessionQuery, setSessionQuery] = useState("");
   const [attachments, setAttachments] = useState<AgentAttachment[]>([]);
+  const [toast, setToast] = useState<string | null>(null);
+  const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
+  const sessionLoadingSeenRef = useRef(false);
   const [voiceInsert, setVoiceInsert] = useState<{ text: string; nonce: number }>();
   const [voiceReset, setVoiceReset] = useState(0);
   const [ttsAutoRead, setTtsAutoRead] = useState(false);
@@ -177,12 +181,15 @@ export default function App() {
       .then((result) => {
         if (controller.signal.aborted) return;
         setStatus(result);
-        setAccessMode(result.default_approval_mode || "confirm");
-        setTtsAutoRead(Boolean(result.tts_auto_read && result.tts?.configured));
+        if (appliedAssistantRef.current !== assistantId) {
+          appliedAssistantRef.current = assistantId;
+          setAccessMode(result.default_approval_mode || "confirm");
+          setTtsAutoRead(Boolean(result.tts_auto_read && result.tts?.configured));
+        }
       })
       .catch((failure: unknown) => !controller.signal.aborted && setError(apiErrorMessage(failure)));
     return () => controller.abort();
-  }, [user, assistantId]);
+  }, [user, assistantId, statusRevision]);
 
   const createSession = async () => {
     if (!assistantId) { setError("请先选择助手。"); return; }
@@ -206,10 +213,31 @@ export default function App() {
     if (!activeSessionId) { setError("请先点击「新建对话」，再发送消息。"); return; }
     if (!models.length) { setError("管理员尚未配置可用对话模型。"); return; }
     if (attachments.length && !models.find((model) => String(model.id) === modelId)?.capabilities?.includes("image")) { setError("当前模型不支持图片，请切换支持图片的模型。"); return; }
-    await conversation.send(text, { modelId: Number(modelId), toolIds, reasoning, accessMode, assistantId: assistantId || undefined, attachments });
+    // 先清空输入区，图片预览已经跟随消息进入对话流，避免流式期间附件仍然挂在输入框上。
+    const pending = attachments;
     setAttachments([]);
+    await conversation.send(text, { modelId: Number(modelId), toolIds, reasoning, accessMode, assistantId: assistantId || undefined, attachments: pending });
     await refreshSessions();
   };
+
+  // 未选中会话时点快捷入口：先建会话，等消息加载完成后再发送，避免加载结果覆盖乐观消息。
+  if (conversation.loading) sessionLoadingSeenRef.current = true;
+  const startPrompt = async (text: string) => {
+    const message = text.trim();
+    if (!message) return;
+    if (activeSessionId) { await perform(() => send(message)); return; }
+    sessionLoadingSeenRef.current = false;
+    await perform(async () => { await createSession(); setPendingPrompt(message); });
+  };
+  useEffect(() => {
+    if (!pendingPrompt || conversation.loading || conversation.streaming) return;
+    if (!sessionLoadingSeenRef.current || !activeSessionId) return;
+    sessionLoadingSeenRef.current = false;
+    setPendingPrompt(null);
+    void perform(() => send(pendingPrompt));
+    // send/perform 每次渲染都会重建，这里只跟随会话与加载状态变化。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPrompt, conversation.loading, conversation.streaming, activeSessionId]);
   const stopSpeaking = useCallback(() => {
     ttsGenerationRef.current += 1;
     ttsAbortRef.current?.abort();
@@ -291,11 +319,19 @@ export default function App() {
       stopSpeaking();
       return;
     }
-    setTtsAutoRead(true);
+    // 只朗读开启之后的新回答：把当前最后一条记为基线，不回读历史消息。
     const latest = [...conversation.messages].reverse().find((message) => message.role === "assistant" && !message.streaming);
     const text = latest?.parts.filter((part) => part.kind === "markdown").map((part) => part.kind === "markdown" ? part.content : "").join("\n").trim();
-    if (text) { lastSpokenRef.current = text; void speakText(text); }
+    lastSpokenRef.current = text || "";
+    setTtsAutoRead(true);
+    setToast("自动朗读已开启，从下一条回答开始播放");
   };
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   useEffect(() => {
     lastSpokenRef.current = "";
@@ -306,7 +342,7 @@ export default function App() {
   const addAttachments = async (files: FileList | null) => {
     if (!files?.length) return;
     if (attachments.length + files.length > 4) throw new Error("每条消息最多添加 4 张图片。");
-    const existingSize = attachments.reduce((total, item) => total + (item.size ?? atob(item.data_url.split(",")[1] || "").length), 0);
+    const existingSize = attachments.reduce((total, item) => total + (item.size ?? (item.data_url ? atob(item.data_url.split(",")[1] || "").length : 0)), 0);
     if (existingSize + Array.from(files).reduce((total, file) => total + file.size, 0) > 8 * 1024 * 1024) throw new Error("本轮图片总大小不能超过 8 MB。");
     const next = await Promise.all(Array.from(files).map(async (file) => {
       if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) throw new Error("仅支持 PNG、JPEG、WebP 和 GIF 图片。");
@@ -338,19 +374,6 @@ export default function App() {
     if (action === "published") { setPublishedOpen(true); return; }
   };
 
-  const login = async (event: FormEvent) => {
-    event.preventDefault();
-    setLoggingIn(true);
-    setLoginError(null);
-    try {
-      const result = await agentJson<{ user: AgentUser }>("/api/login", { username, password });
-      setPassword("");
-      setUser(result.user);
-      setAuthMode("business");
-    } catch (failure) { setLoginError(failure instanceof Error ? failure.message : "登录失败。"); }
-    finally { setLoggingIn(false); }
-  };
-
   if (checkingLogin) return <div className="app-auth"><Icon name="loader" className="wa-spinner" size={26} /><p>正在检查业务系统登录态…</p></div>;
   if (!user && tokenAttempted) return (
     <main className="app-auth">
@@ -365,16 +388,17 @@ export default function App() {
   );
   if (!user) return (
     <main className="app-auth">
-      <form className="app-login" onSubmit={(event) => void login(event)}>
+      <section className="app-login">
         <span className="brand__mark">WA</span>
-        <h1>登录 WebAgent</h1>
-        <p>使用业务系统账号，查看你的会话和已发布页面。</p>
-        <label className="wa-field"><span>账号</span><input name="username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required autoFocus /></label>
-        <label className="wa-field"><span>密码</span><input name="password" autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
+        <h1>需要业务登录态或接入 Token</h1>
+        <p>Chat 不提供独立的账号密码。集成到业务系统时由宿主登录态自动识别；单独部署时请在管理端「接入与安全」签发 Token，再用 <code>/chat/?token=…</code> 打开。</p>
         {loginError && <p className="wa-error" role="alert">{loginError}</p>}
-        <button type="submit" className="wa-button wa-button--primary" disabled={loggingIn}>{loggingIn ? "登录中…" : "登录"}</button>
-        <small>这是业务用户登录，框架管理端使用独立登录。</small>
-      </form>
+        <div className="control-actions">
+          <a className="wa-button wa-button--primary" href="/admin/?page=access">前往管理端签发 Token</a>
+          <button type="button" className="wa-button" onClick={() => location.reload()}>重试</button>
+        </div>
+        <small>管理端账号与业务账号彼此独立：管理端只用于配置运行时，不能代替业务身份进入 Chat。</small>
+      </section>
     </main>
   );
 
@@ -417,8 +441,12 @@ export default function App() {
   const cappedWindow = Math.max(2048, configuredCap > 0 ? Math.min(modelWindow, configuredCap) : modelWindow);
   const totalTokens = Math.max(1200, cappedWindow - Math.min(selectedModel?.max_output_tokens || 0, Math.floor(cappedWindow / 2)) - (status?.context_reserve_tokens ?? 1600));
   const displayedError = error || conversation.error || voice.error;
-  const welcomePrompts = Array.isArray(status?.welcome_prompts) ? status.welcome_prompts : String(status?.welcome_prompts || "").split("\n").filter(Boolean);
-  const compactCurrent = () => perform(async () => { await agentJson(`/api/agent/sessions/${encodeURIComponent(activeSessionId || "")}/compact`, { model_row_id: Number(modelId) || undefined }); conversation.refresh(); });
+  const quickStart = parseQuickStart(status?.welcome_prompts);
+  const compactCurrent = () => perform(async () => {
+    const result = await agentJson<{ skipped?: boolean; message?: string }>(`/api/agent/sessions/${encodeURIComponent(activeSessionId || "")}/compact`, { model_row_id: Number(modelId) || undefined });
+    conversation.refresh();
+    setToast(result?.skipped ? result.message || "当前上下文无需压缩" : "上下文已压缩，历史消息仍保留在会话文件里");
+  });
   const refreshCurrent = () => perform(async () => { await refreshSessions(); conversation.refresh(); });
   const voiceCallConfig: VoiceCallConfig | null = activeSessionId ? {
     sessionId: activeSessionId,
@@ -457,7 +485,7 @@ export default function App() {
         <button type="button" className="new-chat" disabled={loading || conversation.streaming || !assistants.length} onClick={() => void perform(createSession)}><Icon name="plus" size={14} />新建对话</button>
         <label className="sidebar-search"><Icon name="search" size={13} /><input placeholder="搜索会话" aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} /></label>
         <div className="sidebar__scroll"><SessionList sessions={sessions.filter((session) => session.title.includes(sessionQuery)).map((session) => ({ id: session.id, title: session.title, meta: session.assistant_name }))} activeId={activeSessionId} onSelect={chooseSession} onFork={(id) => void perform(() => fork(id))} onRename={(id, title) => void perform(async () => { await agentJson(`/api/agent/sessions/${encodeURIComponent(id)}`, { title }, "PATCH"); await refreshSessions(); })} onDelete={(id) => void perform(async () => { await agentRequest(`/api/agent/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }); const next = await refreshSessions(); if (id === activeSessionId) setActiveSessionId(next[0]?.id); })} /></div>
-        <div className="sidebar__footer"><div className="account"><span className="account__avatar"><Icon name="user" size={15} /></span><span className="account__text"><strong>{user.display_name || user.username}</strong><small>{authMode === "token" ? "匿名接入 Token" : user.role || "当前业务账号"}</small></span><button type="button" className="account__button" aria-label="退出登录" title="退出登录" onClick={() => void perform(async () => { await agentRequest(authMode === "token" ? "/api/agent/auth/logout" : "/api/logout", { method: "POST" }); setUser(null); setActiveSessionId(undefined); setPublishedOpen(false); setPublishing(null); })}><Icon name="external" size={15} /></button></div></div>
+        <div className="sidebar__footer"><div className="account"><span className="account__avatar"><Icon name="user" size={15} /></span><span className="account__text"><strong>{user.display_name || user.username}</strong><small>{authMode === "token" ? "匿名接入 Token" : user.role || "当前业务账号"}</small></span>{authMode === "token" && <button type="button" className="account__button" aria-label="退出登录" title="退出匿名接入会话" onClick={() => void perform(async () => { if (authMode === "token") await agentRequest("/api/agent/auth/logout", { method: "POST" }); setUser(null); setActiveSessionId(undefined); setPublishedOpen(false); setPublishing(null); })}><Icon name="external" size={15} /></button>}</div></div>
       </aside>
       <main className="workspace">
         <header className="workspace__header">
@@ -466,7 +494,7 @@ export default function App() {
           <div className="workspace__actions">
             <button type="button" className={`header-button ${ttsAutoRead ? "is-active" : ""}`} aria-label="自动朗读回答" title={status?.tts?.configured ? (ttsAutoRead ? "关闭自动朗读" : "自动朗读最终回答（过滤代码和 HTML）") : status?.tts?.reason || "管理员尚未配置 TTS 模型"} disabled={!status?.tts?.configured} onClick={toggleTts}><Icon name="audio-lines" size={14} /><span>{ttsBusy ? "朗读中" : ttsAutoRead ? "朗读已开" : "朗读"}</span></button>
             <button type="button" className="header-button header-voice-button" aria-label="语音通话" title={voiceCallReason} disabled={!voiceCallAvailable || conversation.streaming} onClick={() => { stopSpeaking(); setVoiceCallOpen(true); }}><Icon name="audio-lines" size={14} /><span>语音通话</span></button>
-            <button type="button" className="header-button" aria-label="记忆" title="我的长期记忆" onClick={() => setMemoryOpen(true)}><Icon name="sparkles" size={14} /><span>记忆</span></button>
+            <button type="button" className="header-button" aria-label="记忆" title={status?.memory?.pending ? `我的长期记忆（${status.memory.pending} 条待确认）` : "我的长期记忆"} onClick={() => setMemoryOpen(true)}><Icon name="sparkles" size={14} /><span>记忆</span>{Boolean(status?.memory?.count) && <i className="header-count">{status!.memory!.count}</i>}{Boolean(status?.memory?.pending) && <i className="header-count header-count--pending">{status!.memory!.pending}</i>}</button>
             <button type="button" className="header-button" aria-label="已发布" title="我的已发布页面" onClick={() => setPublishedOpen(true)}><Icon name="globe" size={14} /><span>已发布</span></button>
             <button type="button" className="header-icon-button header-desktop-only" disabled={conversation.streaming || !activeSessionId} aria-label="压缩上下文" title="压缩上下文" onClick={() => void compactCurrent()}><Icon name="layers" size={15} /></button>
             <button type="button" className="header-icon-button header-desktop-only" disabled={conversation.streaming} aria-label="刷新会话" onClick={() => void refreshCurrent()}><Icon name="refresh" size={15} /></button>
@@ -478,7 +506,7 @@ export default function App() {
         <div className="workspace__body">
           {(loading || conversation.loading) && <p className="app-loading" role="status"><Icon name="loader" className="wa-spinner" size={14} />正在读取会话…</p>}
           {displayedError && <p className="wa-error app-error" role="alert">{displayedError}</p>}
-          <MessageList messages={conversation.messages} onApprove={(_, id) => void perform(() => conversation.approve(id, true))} onReject={(_, id) => void perform(() => conversation.approve(id, false))} onAnswerQuestion={(_, id, values, freeText) => void perform(() => conversation.answerQuestion(id, values, freeText))} onCancelQuestion={(_, id) => void perform(() => conversation.cancelQuestion(id))} onForkMessage={(id) => activeSessionId && void perform(() => fork(activeSessionId, id))} onEditMessage={(id) => { const message = conversation.messages.find((item) => item.id === id); setEditing({ id, content: message?.parts.filter((part) => part.kind === "markdown").map((part) => part.kind === "markdown" ? part.content : "").join("\n") || "" }); }} onDeleteMessage={(id) => void perform(async () => { await agentRequest(`/api/agent/sessions/${encodeURIComponent(activeSessionId || "")}/messages/${encodeURIComponent(id)}`, { method: "DELETE" }); conversation.refresh(); })} onArtifactAction={artifactAction} emptyState={<div className="empty-state"><span className="empty-state__icon"><Icon name="sparkles" size={21} /></span><h2>{status?.welcome_title || "从业务问题开始"}</h2><p>{activeSessionId ? status?.welcome_subtitle || "模型、工具和操作权限来自当前业务账号。生成的 HTML 可保存到你的发布记录。" : "点击「新建对话」开始。你也可以通过右上角「已发布」查看已有页面。"}</p><div className="empty-state__chips">{activeSessionId && welcomePrompts.slice(0, 4).map((prompt) => <button type="button" key={prompt} onClick={() => void perform(() => send(prompt))}>{prompt}</button>)}</div></div>} />
+          <MessageList messages={conversation.messages} onApprove={(_, id) => void perform(() => conversation.approve(id, true))} onReject={(_, id) => void perform(() => conversation.approve(id, false))} onAnswerQuestion={(_, id, values, freeText) => void perform(() => conversation.answerQuestion(id, values, freeText))} onCancelQuestion={(_, id) => void perform(() => conversation.cancelQuestion(id))} onForkMessage={(id) => activeSessionId && void perform(() => fork(activeSessionId, id))} onEditMessage={(id) => { const message = conversation.messages.find((item) => item.id === id); setEditing({ id, content: message?.parts.filter((part) => part.kind === "markdown").map((part) => part.kind === "markdown" ? part.content : "").join("\n") || "" }); }} onDeleteMessage={(id) => void perform(async () => { await agentRequest(`/api/agent/sessions/${encodeURIComponent(activeSessionId || "")}/messages/${encodeURIComponent(id)}`, { method: "DELETE" }); conversation.refresh(); })} onArtifactAction={artifactAction} emptyState={<EmptyState title={status?.welcome_title || "有什么我能帮你的吗？"} subtitle={activeSessionId ? status?.welcome_subtitle || "模型、工具和操作权限来自当前业务账号，生成的页面可以随时发布。" : "选一个下面的入口直接开始，也可以先手动新建对话。"} prompts={quickStart} logo={status?.welcome_logo || undefined} onPick={(text) => void startPrompt(text)} />} />
           <div className="composer-zone">
             {attachments.length > 0 && <div className="app-attachments">{attachments.map((attachment, index) => <button type="button" key={`${attachment.name}-${index}`} aria-label={`移除图片 ${attachment.name}`} onClick={() => setAttachments((previous) => previous.filter((_, position) => position !== index))}><Icon name="image" size={13} />{attachment.name}<Icon name="x" size={12} /></button>)}</div>}
             <Composer
@@ -521,8 +549,9 @@ export default function App() {
         </div>
       </main>
       <PublishedPages open={publishedOpen} onOpenChange={setPublishedOpen} currentSessionId={activeSessionId} sessions={sessions} currentHtml={currentHtml} onOpenSession={chooseSession} />
-      <MemoryDialog open={memoryOpen} onOpenChange={setMemoryOpen} />
+      <MemoryDialog open={memoryOpen} onOpenChange={(open) => { setMemoryOpen(open); if (!open) setStatusRevision((value) => value + 1); }} autoExtract={status?.memory?.auto_extract} autoConfirm={status?.memory?.auto_confirm} authMode={authMode} onChanged={() => setStatusRevision((value) => value + 1)} />
       <VoiceCallDialog open={voiceCallOpen} config={voiceCallConfig} onClose={() => { setVoiceCallOpen(false); void refreshCurrent(); }} />
+      {toast && <div className="toast" role="status"><Icon name="check-circle" size={13} />{toast}</div>}
       <Dialog open={moreActionsOpen} onOpenChange={setMoreActionsOpen} title="会话操作" description="压缩只改变模型上下文，不会删除聊天记录。">
         <div className="wa-dialog__body mobile-session-actions">
           <button type="button" className="wa-button" disabled={conversation.streaming || !activeSessionId} onClick={() => { setMoreActionsOpen(false); void compactCurrent(); }}><Icon name="layers" size={16} />压缩上下文</button>

@@ -2,7 +2,7 @@
 
 ## 版本边界
 
-此分支完全替换原服务与原生 HTML 应用，保留的业务 Demo 只验证登录态与权限边界，不是框架与某个业务系统的强绑定。文档以 Node / TypeScript、PI 官方 SDK、React Admin / Chat 三端为准。
+此分支完全替换原服务与原生 HTML 应用，测试夹具只验证登录态与权限边界，不是框架与某个业务系统的强绑定。文档以 Node / TypeScript、PI 官方 SDK、React Admin / Chat 三端为准。
 
 不会因为本地测试通过就宣称所有外部模型或部署环境已经实测。测试供应商均为隔离的本机 Mock，不使用真实账号 Key、不发送用户会话到第三方。
 
@@ -98,7 +98,7 @@ npm run test:ui
 ## 已知限制
 
 - 单进程 SQLite，没有多副本共享任务调度与分布式锁。
-- PI entries、展示消息与附件 Base64 在会话 JSON 文件中，不在 SQLite；大量历史需监控 `data/sessions/` 并适配对象存储。
+- PI entries 与展示消息在会话 JSON 文件中，图片附件在 `data/uploads/<sessionId>/`，均不在 SQLite；大量历史需监控 `data/sessions/` 与 `data/uploads/` 并适配对象存储。
 - 进程重启仅保留记录，不支持暂停的 Agent 执行栈自动续跑。
 - 决策原始 IO 与未保存思考为短期内存，重启无法恢复。
 - Chat 是响应式 Web，不是原生微信小程序。

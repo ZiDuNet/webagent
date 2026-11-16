@@ -12,7 +12,7 @@ export const defaults: Row = {
   context_compression: true, bm25_enabled: false, tool_selection_mode: "none", decision_enabled: false,
   decision_model_id: null, decision_tools: true, decision_skills: true, decision_threshold: 0.6,
   decision_min_count: 8, decision_timeout_seconds: 5, memory_enabled: true,
-  memory_auto_extract: false, memory_auto_confirm: false, memory_model_id: null,
+  memory_auto_extract: true, memory_auto_confirm: false, memory_model_id: null,
   memory_extraction_prompt: promptDefaults.memory_extraction_prompt,
   base_system_prompt: promptDefaults.base_system_prompt,
   compaction_prompt: promptDefaults.compaction_prompt,
@@ -20,7 +20,9 @@ export const defaults: Row = {
   decision_prompt: promptDefaults.decision_prompt,
   system_prompt_extra: "", default_reasoning_effort: "",
   default_approval_mode: "confirm", allow_full_access: true,
-  welcome_title: "有什么我能帮你的吗？", welcome_subtitle: "", welcome_prompts: "你能做什么？\n帮我分析一下这份数据\n介绍一下当前可用的工具",
+  welcome_title: "有什么我能帮你的吗？", welcome_subtitle: "",
+  welcome_prompts: "查询业务数据|用只读工具查看设备、项目与运行状态\n分析当前情况|梳理数据异常、风险点和处理优先级\n生成数据报表|汇总指标并输出可发布的 HTML 页面\n制定执行计划|拆解步骤、责任人和交付物\n优化已有内容|按你的要求改写、精简或扩写\n记住我的偏好|把长期有效的规则加入我的记忆",
+  welcome_logo: "",
   asr_model_id: null, asr_realtime_model_id: null, tts_model_id: null, voice_asr_model_id: null, voice_tts_model_id: null,
   voice_input_mode: "auto", voice_auto_send: false, tts_auto_read: false, tts_max_read_chars: 1200,
   skills_enabled: true, skill_files_enabled: true, title_model_id: null, fallback_model_id: null,
@@ -277,6 +279,19 @@ export class ConfigStore {
     const next = items.filter((assistant) => Number(assistant.id) !== Number(id));
     if (next.length === items.length) throw new AppError("助手不存在", 404);
     writeCollection(this.assistantsFile, next);
+  }
+
+  /** 清除旧设备演示助手留下的固定文案；只匹配完整旧值，不覆盖管理员自定义内容。 */
+  removeLegacyDeviceAssistant() {
+    const legacyDescription = "查询、统计、修改和删除设备，工具范围跟随账号权限与管理员开关。";
+    const legacyPrompt = "你负责设备信息表的日常运维。优先使用工具获取真实数据，涉及写入和删除时说明影响范围，等待用户在审批卡中确认。";
+    const items = readCollection(this.assistantsFile);
+    let changed = false;
+    for (const item of items) {
+      if (item.description === legacyDescription) { item.description = "继承当前业务用户权限，使用已注册的工具协助处理业务。"; changed = true; }
+      if (item.system_prompt === legacyPrompt) { item.system_prompt = "你是业务助手，使用工具获取真实数据，不编造结果，不绕过权限。写入操作通过审批工具执行。"; changed = true; }
+    }
+    if (changed) writeCollection(this.assistantsFile, items);
   }
 
   toolPolicy(name: string) {

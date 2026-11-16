@@ -12,6 +12,11 @@ export const assistantOverrideColumns = [
   "tts_max_read_chars",
   "default_reasoning_effort",
   "default_approval_mode",
+  "allow_full_access",
+  "welcome_title",
+  "welcome_subtitle",
+  "welcome_prompts",
+  "welcome_logo",
 ] as const;
 
 /** Columns that point at `models.id`; used for delete/binding validation only. */
@@ -35,6 +40,11 @@ export type AssistantRuntimeConfig = {
   tts_max_read_chars: number;
   default_reasoning_effort: string;
   default_approval_mode: "confirm" | "full_access";
+  allow_full_access: boolean;
+  welcome_title: string;
+  welcome_subtitle: string;
+  welcome_prompts: string;
+  welcome_logo: string;
 };
 
 const inherited = (value: unknown, fallback: unknown) =>
@@ -61,5 +71,10 @@ export function effectiveAssistantConfig(assistant: Row | undefined, settings: R
     tts_max_read_chars: Number(inherited(source.tts_max_read_chars, settings.tts_max_read_chars || 1200)),
     default_reasoning_effort: String(inherited(source.default_reasoning_effort, settings.default_reasoning_effort || "")),
     default_approval_mode: String(inherited(source.default_approval_mode, settings.default_approval_mode || "confirm")) as AssistantRuntimeConfig["default_approval_mode"],
+    allow_full_access: inheritedBoolean(source.allow_full_access, Boolean(settings.allow_full_access)),
+    welcome_title: String(inherited(source.welcome_title, settings.welcome_title || "")),
+    welcome_subtitle: String(inherited(source.welcome_subtitle, settings.welcome_subtitle || "")),
+    welcome_prompts: String(inherited(source.welcome_prompts, settings.welcome_prompts || "")),
+    welcome_logo: String(inherited(source.welcome_logo, settings.welcome_logo || "")),
   };
 }

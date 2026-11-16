@@ -18,7 +18,7 @@ scripts/   环境初始化与 PI 受控升级
 docs/      架构、部署、模型、运行、业务接入、验收说明
 ```
 
-根目录只保留工程入口和说明文档；本地运行数据、日志、备份与参考项目分别在 `data/`、`logs/`、`backups/`、`reference/`，均已被 Git 忽略，不会进入仓库。
+根目录只保留工程入口和说明文档；本地运行数据与日志分别在 `data/`、`logs/`，均已被 Git 忽略，不会进入仓库。
 
 管理端不是 Chat 端的管理模式。两者有各自入口、依赖、构建产物与 API 权限边界。便于本地体验时可以由同一个 Node 进程托管两个静态产物；Docker Compose 则分别部署三个服务。
 
@@ -45,7 +45,7 @@ npm start
 
 `/` 跳转 Chat；旧 `/react/` 仅跳转 `/chat/`，并没有第三套前端。Chat 在没有 `IdentityAdapter` 时必须用 `?token=` 接入 Token 打开。
 
-管理账号 `admin` 的初始密码来自 `.env` 的 `WEBAGENT_CONTROL_PASSWORD`。管理端与业务端鉴权完全分离：管理端只认 `control_users` 与「管理 Token」，业务端只认 `IdentityAdapter` 或接入 Token。管理密码可在「PI 核心」页修改；环境变量只用于首次建号，不覆盖已保存密码。
+管理账号 `admin` 的初始密码来自 `.env` 的 `WEBAGENT_CONTROL_PASSWORD`。管理端与业务端鉴权完全分离：管理端只认 `control_users` 与「管理 Token」，业务端只认 `IdentityAdapter` 或接入 Token。管理密码可在「PI 核心」页修改；环境变量只用于首次建号，不覆盖已保存密码。如果确实需要用环境变量恢复密码，把 `WEBAGENT_RESET_CONTROL_PASSWORD` 设为 `1` 重启一次（会覆盖 `admin` 密码并撤销所有管理会话），完成后再移除该变量，避免每次重启都覆盖后台改过的密码。
 
 首次启动后，进入管理端配置供应商与真实对话模型，再设置默认助手。**没有模型配置就明确报错，不返回模拟答案。**
 
@@ -71,7 +71,7 @@ docker compose config --quiet
 docker compose up -d --build
 ```
 
-管理端默认 `http://localhost:8081/admin/`，Chat 默认 `http://localhost:8080/chat/`，Node 后端只在内部网络暴露。三个服务分别构建，数据保存在命名卷。远程部署须配置公开前端 URL、HTTPS、独立密码并关闭 Demo 用户，详见 [部署说明](docs/DEPLOYMENT.md)。
+管理端默认 `http://localhost:8081/admin/`，Chat 默认 `http://localhost:8080/chat/`，Node 后端只在内部网络暴露。三个服务分别构建，数据保存在命名卷。远程部署须配置公开前端 URL、HTTPS、独立管理密码，并接入业务身份适配器或签发接入 Token，详见 [部署说明](docs/DEPLOYMENT.md)。
 
 ## 主要能力
 
@@ -87,7 +87,7 @@ docker compose up -d --build
 | 交互 | `ask_user` 让模型在缺少信息时暂停，Chat 渲染单选 / 多选 / 补充文本问答卡；与危险操作审批卡严格分离 |
 | 提示词 | 基础、压缩、标题、决策、记忆提取和附加系统提示词均可在管理端编辑并恢复默认 |
 | Skill | 文件系统为唯一事实来源，支持全局 / 单项启停、助手级选择、ZIP / 目录导入；PI 原生渐进读取，正文不落数据库，不执行 Skill 脚本 |
-| 会话 | 正文、附件与 PI canonical entries 保存为 `data/sessions/<sessionId>.json`；SQLite 只保存归属、标题、用量与运行元数据。支持刷新恢复、分叉、编辑、删除、主动 / 手动压缩、分页检索与保留期清理 |
+| 会话 | 正文与 PI canonical entries 保存为 `data/sessions/<sessionId>.json`，图片附件保存到 `data/uploads/<sessionId>/`（JSON 只存相对路径）；SQLite 只保存归属、标题、用量与运行元数据。支持刷新恢复、分叉、编辑、删除、主动 / 手动压缩、分页检索与保留期清理 |
 | 任务 | 后台运行独立于 SSE 连接，断开页面继续执行，重连回放，显式停止，重启不重放副作用 |
 | 记忆 | 用户独立 CRUD、模型自动提取、默认待确认、管理员配置提取模型与规则 |
 | Chat | Markdown、表格、KaTeX、Mermaid 与基础图表，单行实时过程、完成折叠、移动端弹窗 |
@@ -149,7 +149,7 @@ git diff --check
 
 PI 官方 Bash / PowerShell、文件读写与 CodeMode 在管理端列出，默认 `WEBAGENT_LOCAL_TOOLS=off` 时锁定关闭。部署者显式设为 `WEBAGENT_LOCAL_TOOLS=admin` 后，管理员仍须在工具页逐项启用；这不是沙箱，只适合受信任的单租户部署。框架默认不提供服务器端任意代码执行或截图服务。stdio MCP 同样可能在后端启动本机进程，默认关闭，仅在部署者明确信任服务并设置 `WEBAGENT_ALLOW_STDIO=1` 后可用；网络服务优先使用 Streamable HTTP 或 SSE。
 
-当前默认是单进程 SQLite 运行库 + 本地会话文件方案，不宣称可直接多副本横向扩展。多节点需要共享数据库、分布式任务队列 / 锁、事件总线及专门的对象 / 文件存储适配。备份必须覆盖整个 `data/`（至少 `runtime/agent.db`、`config/`、`tools/`、`skills/` 与 `sessions/`），不能只复制数据库。
+当前默认是单进程 SQLite 运行库 + 本地会话文件方案，不宣称可直接多副本横向扩展。多节点需要共享数据库、分布式任务队列 / 锁、事件总线及专门的对象 / 文件存储适配。备份必须覆盖整个 `data/`（至少 `runtime/agent.db`、`config/`、`tools/`、`skills/`、`sessions/` 与 `uploads/`），不能只复制数据库。
 
 ### 实际界面
 

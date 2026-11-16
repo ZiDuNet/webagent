@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Alert, Button, Checkbox, Divider, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag } from "antd";
-import { Pencil, Star, Trash2 } from "lucide-react";
-import { controlRequest, apiErrorMessage } from "../api/pagepilot";
+import { Pencil, Star, Trash2, Upload as UploadIcon } from "lucide-react";
+import { controlBase, controlRequest, apiErrorMessage } from "../api/pagepilot";
 import { PageHeading, PageState, ResourceActions, useResource, type Row } from "./shared";
 
 const REASONING_OPTIONS = ["off", "none", "minimal", "low", "medium", "high", "xhigh"].map((value) => ({
@@ -20,10 +20,21 @@ export default function AssistantsPage() {
   const [form] = Form.useForm();
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [logoBusy, setLogoBusy] = useState(false);
+  const logoRef = useRef<HTMLInputElement>(null);
+  const logoPath = Form.useWatch("welcome_logo", form) as string | undefined;
 
   const modelOptions = (kinds: string[]) => (models.data?.items || [])
     .filter((model) => model.enabled && model.provider_enabled !== false && kinds.includes(model.model_kind))
     .map((model) => ({ value: model.id, label: `${model.name} · ${model.provider_name || model.model_id}` }));
+
+  const toolOptions = (tools.data?.items || [])
+    .filter((tool) => tool.enabled)
+    .map((tool) => {
+      const tags: string[] = Array.isArray(tool.tags) ? tool.tags : [];
+      const title = String(tool.title || tool.name);
+      return { value: String(tool.name), label: title, tags, toolName: String(tool.name), searchText: `${title} ${tool.name} ${tags.join(" ")}`.toLowerCase() };
+    });
 
   const edit = (value: Row = {}) => {
     form.resetFields();
@@ -53,9 +64,41 @@ export default function AssistantsPage() {
       tts_max_read_chars: nullable(value.tts_max_read_chars),
       default_reasoning_effort: nullable(value.default_reasoning_effort),
       default_approval_mode: nullable(value.default_approval_mode),
+      allow_full_access: nullable(value.allow_full_access),
+      welcome_title: nullable(value.welcome_title),
+      welcome_subtitle: nullable(value.welcome_subtitle),
+      welcome_prompts: nullable(value.welcome_prompts),
+      welcome_logo: nullable(value.welcome_logo),
     });
     setDraft(value);
     setError("");
+  };
+
+  const logoUrl = (value?: string) => {
+    const file = String(value || "").split("/").pop();
+    return file ? `${controlBase()}/brand/${file}` : "";
+  };
+
+  const uploadLogo = async (file?: File) => {
+    if (!file) return;
+    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) { setError("Logo 仅支持 PNG、JPEG、WebP、GIF 图片。"); return; }
+    if (file.size > 2 * 1024 * 1024) { setError("Logo 请控制在 2 MB 以内。"); return; }
+    setLogoBusy(true);
+    setError("");
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error("无法读取图片"));
+        reader.readAsDataURL(file);
+      });
+      const result = await controlRequest<{ path: string }>("/admin/brand-logo", { data_url: dataUrl });
+      form.setFieldValue("welcome_logo", result.path);
+    } catch (failure) {
+      setError(apiErrorMessage(failure));
+    } finally {
+      setLogoBusy(false);
+    }
   };
 
   const save = async (values: Row) => {
@@ -63,7 +106,8 @@ export default function AssistantsPage() {
     setError("");
     const id = values.id || draft?.id;
     try {
-      await controlRequest(`/admin/assistants${id ? `/${id}` : ""}`, values, id ? "PUT" : "POST");
+      // 显式带上徽标：既保证上传后一定写入，也保证「移除」会用 null 覆盖旧值。
+      await controlRequest(`/admin/assistants${id ? `/${id}` : ""}`, { ...values, welcome_logo: logoPath ?? null }, id ? "PUT" : "POST");
       setDraft(null);
       await resource.refresh();
     } catch (failure) {
@@ -178,18 +222,60 @@ export default function AssistantsPage() {
               <Select mode="multiple" allowClear showSearch optionFilterProp="label" options={skills.data?.items.map((skill) => ({ value: skill.slug, label: `${skill.name} (${skill.slug})`, disabled: !skill.enabled }))} />
             </Form.Item>
           </div>
-          <Form.Item name="tool_names" label="工具白名单" extra="留空继承管理员开放范围；仍受当前业务用户权限约束。">
-            <Select mode="multiple" allowClear showSearch optionFilterProp="label" options={tools.data?.items.map((tool) => ({ value: tool.name, label: tool.title || tool.name }))} />
+          <Form.Item name="tool_names" label="工具白名单" extra="留空继承管理员开放范围；仍受当前业务用户权限约束。已停用的工具不会出现在这里。">
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              placeholder="继承管理员开放范围"
+              options={toolOptions}
+              filterOption={(input, option) => String(option?.searchText || "").includes(input.trim().toLowerCase())}
+              optionRender={(option) => {
+                const tags = (option.data as { tags?: string[] }).tags || [];
+                return (
+                  <div className="tool-option">
+                    <span>{option.data.label}</span>
+                    <span className="tool-option__meta">
+                      <code>{option.data.value}</code>
+                      {tags.map((tag) => <Tag key={tag} bordered={false}>{tag}</Tag>)}
+                    </span>
+                  </div>
+                );
+              }}
+            />
           </Form.Item>
+
+          <Divider>对话体验</Divider>
+          <p className="control-muted">空态与默认执行方式跟随助手；这里设置后优先于系统默认值。</p>
+          <Form.Item name="welcome_title" label="空态标题" extra="新会话尚未输入时的标题；留空使用默认标题。"><Input maxLength={120} placeholder="例如：今天想先看哪块业务？" /></Form.Item>
+          <Form.Item name="welcome_subtitle" label="空态说明" extra="留空显示默认说明；需要隐藏说明时可填一个空格。"><Input.TextArea rows={2} maxLength={500} /></Form.Item>
+          {/* 注册隐藏字段：没有它，setFieldValue 不会触发 useWatch，提交时也会漏掉这个值。 */}
+          <Form.Item name="welcome_logo" hidden><Input /></Form.Item>
+          <Form.Item label="品牌徽标" extra="可选，PNG/JPEG/WebP/GIF 且不超过 2 MB；按原图比例自适应显示（桌面最大高 132px、宽 400px），留空使用默认图标。">
+            <input ref={logoRef} style={{ display: "none" }} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { void uploadLogo(event.target.files?.[0]); event.target.value = ""; }} />
+            <Space wrap align="center">
+              {logoPath
+                ? <img className="assistant-logo-preview" src={logoUrl(logoPath)} alt="品牌徽标预览" />
+                : <span className="control-muted">未上传，使用默认图标</span>}
+              <Button icon={<UploadIcon size={14} />} loading={logoBusy} onClick={() => logoRef.current?.click()}>{logoPath ? "更换" : "上传 Logo"}</Button>
+              {logoPath && <Button danger onClick={() => form.setFieldValue("welcome_logo", null)}>移除</Button>}
+            </Space>
+          </Form.Item>
+          <Form.Item name="welcome_prompts" label="快捷入口" extra="每行一个，Chat 端最多显示 6 项；用「标题|描述」补充说明。留空使用内置示例。"><Input.TextArea rows={5} maxLength={4000} placeholder={"查询业务数据|查看设备、项目与运行状态\n分析当前情况|梳理异常、风险与优先级"} /></Form.Item>
+          <div className="control-grid">
+            <Form.Item name="default_reasoning_effort" label="默认推理强度" extra="留空使用模型默认；模型不支持时自动忽略。">
+              <Select allowClear placeholder="模型默认" options={REASONING_OPTIONS} />
+            </Form.Item>
+            <Form.Item name="default_approval_mode" label="默认执行模式" extra="留空使用「变更前确认」。">
+              <Select allowClear placeholder="变更前确认" options={[{ value: "confirm", label: "变更前确认" }, { value: "full_access", label: "完全访问" }]} />
+            </Form.Item>
+            <Form.Item name="allow_full_access" label="允许完全访问" extra="留空继承系统默认；仅跳过写入前确认，不提升业务权限。">
+              <Select allowClear placeholder="继承系统默认" options={[{ value: true, label: "允许" }, { value: false, label: "不允许" }]} />
+            </Form.Item>
+          </div>
 
           <Divider>运行策略覆盖</Divider>
           <div className="control-grid">
-            <Form.Item name="default_reasoning_effort" label="默认推理强度" extra="留空继承全局；模型不支持时会自动忽略。">
-              <Select allowClear placeholder="继承全局" options={REASONING_OPTIONS} />
-            </Form.Item>
-            <Form.Item name="default_approval_mode" label="默认执行模式" extra="留空继承全局；仍不能绕过业务权限。">
-              <Select allowClear placeholder="继承全局" options={[{ value: "confirm", label: "变更前确认" }, { value: "full_access", label: "完全访问" }]} />
-            </Form.Item>
             <Form.Item name="max_steps" label="最大推理轮次" extra="0 继承全局；全局为 0 表示不限。"><InputNumber min={0} style={{ width: "100%" }} /></Form.Item>
             <Form.Item name="max_tool_calls" label="最大工具调用" extra="0 继承全局；全局为 0 表示不限。"><InputNumber min={0} style={{ width: "100%" }} /></Form.Item>
             <Form.Item name="max_run_seconds" label="单次最长秒数" extra="0 继承全局；避免异常任务长期占用资源。"><InputNumber min={0} max={3600} style={{ width: "100%" }} /></Form.Item>

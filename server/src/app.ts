@@ -69,7 +69,18 @@ export async function createWebAgent(options: AppOptions = {}) {
     for (const name of [...(serveChat ? ["chat"] : []), ...(serveAdmin ? ["admin"] : [])]) {
       const dir = path.join(rootDir, name, "dist");
       if (!fs.existsSync(dir)) continue;
-      await app.register(staticFiles, { root: dir, prefix: `/${name}/`, decorateReply: false, index: ["index.html"], cacheControl: true, maxAge: "1h" });
+      await app.register(staticFiles, {
+        root: dir,
+        prefix: `/${name}/`,
+        decorateReply: false,
+        index: ["index.html"],
+        cacheControl: false,
+        // 入口 HTML 必须每次回源，否则重新构建后浏览器仍加载旧 bundle；
+        // 带 hash 的静态资源可以长期缓存。
+        setHeaders: (response, filePath) => {
+          response.setHeader("Cache-Control", filePath.endsWith("index.html") ? "no-cache" : "public, max-age=31536000, immutable");
+        },
+      });
       app.get(`/${name}`, async (_request, reply) => reply.redirect(`/${name}/`));
     }
   }

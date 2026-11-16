@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { fixture, mockServer, sse, toolCall } from "./helpers.js";
 import { config } from "../src/config.js";
 import { encrypt, decrypt } from "../src/security.js";
@@ -387,8 +389,12 @@ test("a later user message cancels a stale pending question; cleanup removes ses
     service.store.conversations.savePiEntries(session.id, [{ type: "session" }]);
     const publication = service.store.insert("publications", { user_id: 2, username: "user1", session_id: session.id, remote_base_url: "http://pagepilot.local", title: "报告", description: "", visibility: "unlisted" });
     service.store.run("UPDATE sessions SET updated_at=? WHERE id=?", [new Date(Date.now() - 40 * 86400000).toISOString(), session.id]);
+    const workspace = path.join(service.store.paths.workspaces, session.id);
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(path.join(workspace, "temp.txt"), "cleanup");
     service.store.purge();
     assert.equal(service.store.one("SELECT id FROM sessions WHERE id=?", [session.id]), undefined);
+    assert.equal(fs.existsSync(workspace), false);
     assert.equal(service.store.conversations.count(session.id), 0);
     assert.deepEqual(service.store.conversations.piEntries(session.id), []);
     assert.equal(service.store.one("SELECT id FROM llm_calls WHERE session_id=?", [session.id]), undefined);

@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -60,42 +61,90 @@ export function MessageList({
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  // 「跟随底部」只在用户真的向上滚动时解除，避免流式输出期间被误判为离开底部。
   const pinnedRef = useRef(true);
+  const frameRef = useRef<number | null>(null);
+  const userScrollRef = useRef(false);
+  const userScrollTimer = useRef<number | null>(null);
+  const emptyRef = useRef(messages.length === 0);
   const [showJump, setShowJump] = useState(false);
+  emptyRef.current = messages.length === 0;
 
-  const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
+  const distanceToBottom = (element: HTMLDivElement) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight;
+
+  const follow = useCallback((force = false) => {
+    if (frameRef.current !== null) return;
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
+      const element = scrollRef.current;
+      if (!element) return;
+      // 空态（快捷入口）不需要贴底，否则内容比视口高时会把标题滚出屏幕。
+      if (emptyRef.current) { element.scrollTop = 0; return; }
+      if (!force && !pinnedRef.current) return;
+      element.scrollTop = element.scrollHeight;
+      setShowJump(false);
+    });
+  }, []);
+
+  const scrollToBottom = () => {
     const element = scrollRef.current;
     if (!element) return;
-    element.scrollTo({ top: element.scrollHeight, behavior });
     pinnedRef.current = true;
+    element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
     setShowJump(false);
+  };
+
+  const markUserScroll = () => {
+    userScrollRef.current = true;
+    if (userScrollTimer.current !== null) window.clearTimeout(userScrollTimer.current);
+    userScrollTimer.current = window.setTimeout(() => {
+      userScrollRef.current = false;
+      userScrollTimer.current = null;
+    }, 220);
   };
 
   const handleScroll = () => {
     const element = scrollRef.current;
     if (!element) return;
-    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-    const pinned = distance < 90;
-    pinnedRef.current = pinned;
-    setShowJump(!pinned);
+    const distance = distanceToBottom(element);
+    // 程序触发的滚动不改变跟随状态，只有用户手势才可能解除跟随。
+    if (userScrollRef.current) pinnedRef.current = distance < 36;
+    if (pinnedRef.current) {
+      if (distance < 36) setShowJump(false);
+    } else if (distance > 160) setShowJump(true);
   };
 
   useEffect(() => {
-    if (!pinnedRef.current) return;
-    const frame = window.requestAnimationFrame(() => scrollToBottom());
-    return () => window.cancelAnimationFrame(frame);
-  }, [messages]);
+    const last = messages[messages.length - 1];
+    if (!messages.length) pinnedRef.current = true;
+    // 用户发消息时总是回到最新回复
+    if (last?.role === "user") pinnedRef.current = true;
+    follow();
+  }, [messages, follow]);
 
   useEffect(() => {
     const content = contentRef.current;
-    if (!content) return;
-    const observer = new ResizeObserver(() => {
-      const container = scrollRef.current;
-      if (container && pinnedRef.current) container.scrollTop = container.scrollHeight;
-    });
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, []);
+    const container = scrollRef.current;
+    if (!content || !container) return;
+    const resize = new ResizeObserver(() => follow());
+    resize.observe(content);
+    resize.observe(container);
+    // 流式文本经常只改文本节点（高度不变也会增长），MutationObserver 兜住这种情况。
+    const mutations = new MutationObserver(() => follow());
+    mutations.observe(content, { childList: true, subtree: true, characterData: true });
+    const viewport = () => follow();
+    window.visualViewport?.addEventListener("resize", viewport);
+    window.addEventListener("resize", viewport);
+    return () => {
+      resize.disconnect();
+      mutations.disconnect();
+      window.visualViewport?.removeEventListener("resize", viewport);
+      window.removeEventListener("resize", viewport);
+      if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
+      if (userScrollTimer.current !== null) window.clearTimeout(userScrollTimer.current);
+    };
+  }, [follow]);
 
   return (
     <div className={`message-list ${className}`.trim()}>
@@ -103,6 +152,10 @@ export function MessageList({
         className="message-list__scroll"
         ref={scrollRef}
         onScroll={handleScroll}
+        onWheel={markUserScroll}
+        onTouchMove={markUserScroll}
+        onPointerDown={markUserScroll}
+        onKeyDown={markUserScroll}
         role="log"
         aria-live="polite"
         aria-label="对话消息"
@@ -118,6 +171,15 @@ export function MessageList({
                     {message.time && <em>{message.time}</em>}
                   </div>
                   <div className="message__bubble">
+                    {Boolean(message.attachments?.length) && (
+                      <div className="message__attachments">
+                        {message.attachments!.map((attachment, index) => (
+                          <a href={attachment.url} target="_blank" rel="noopener noreferrer" title={attachment.name} key={`${attachment.url}-${index}`}>
+                            <img src={attachment.url} alt={attachment.name} loading="lazy" />
+                          </a>
+                        ))}
+                      </div>
+                    )}
                     {message.parts.map((part, index) =>
                       part.kind === "markdown" ? (
                         <Markdown content={part.content} key={index} />
@@ -146,10 +208,9 @@ export function MessageList({
                             data={part.process}
                             defaultOpen={false}
                             onOpenChange={(open) => {
-                              if (open) {
-                                pinnedRef.current = false;
-                                setShowJump(true);
-                              }
+                              if (!open) return;
+                              pinnedRef.current = false;
+                              setShowJump(true);
                             }}
                             persistKey={`webagent:${message.renderKey || message.id}:process:${index}`}
                             key={index}
@@ -218,7 +279,7 @@ export function MessageList({
         <button
           type="button"
           className="message-list__jump"
-          onClick={() => scrollToBottom("smooth")}
+          onClick={scrollToBottom}
         >
           <Icon name="arrow-down" size={14} />
           回到底部

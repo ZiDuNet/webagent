@@ -2,11 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { encodePcmWav } from "../../sdk/src/audio.js";
 import { pcmFromWav } from "../src/speech.js";
 import { drainSpeechText, isLikelyEcho, speakableText } from "../src/speech-text.js";
-import { fixture, mockServer } from "./helpers.js";
+import { fixture, mockServer, sse } from "./helpers.js";
+import type { Row } from "../src/types.js";
 
 test("speech text drains complete sentences and caps long unpunctuated fragments", () => {
   const first = drainSpeechText("第一句。第二", 20);
@@ -115,4 +116,87 @@ test("realtime TTS cancellation before finish stays a handled rejection", async 
     await assert.rejects(session.finish(), /已取消/);
     session.close();
   } finally { await service.close(); for (const socket of sockets.clients) socket.terminate(); await new Promise<void>((resolve) => sockets.close(() => resolve())); await new Promise<void>((resolve) => http.close(() => resolve())); }
+});
+
+async function waitFor(messages: Row[], predicate: (message: Row) => boolean, timeout = 12000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const found = messages.find(predicate);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`等待语音事件超时；已收到：${messages.map((message) => message.type).join(", ")}`);
+}
+
+test("realtime voice call runs ASR, PI answer and streaming TTS end to end over WebSocket", async () => {
+  const upstream = await mockServer((body, request, response) => {
+    if (request.url !== "/v1/chat/completions") return false;
+    assert.match(JSON.stringify(body.messages), /设备运行情况怎么样/);
+    sse(response, [{ content: "当前设备" }, { content: "运行正常。" }]);
+    return true;
+  });
+  const sockets = new WebSocketServer({ server: upstream.server });
+  const protocol: Row[] = [];
+  let ttsText = "";
+  sockets.on("connection", (socket, request) => {
+    const model = new URL(request.url || "", "http://localhost").searchParams.get("model") || "";
+    socket.on("message", (raw) => {
+      const event = JSON.parse(raw.toString());
+      protocol.push({ model, ...event });
+      if (event.type === "session.update") socket.send(JSON.stringify({ type: "session.updated" }));
+      if (model.includes("asr") && event.type === "session.finish") {
+        socket.send(JSON.stringify({ type: "conversation.item.input_audio_transcription.completed", transcript: "设备运行情况怎么样" }));
+        socket.send(JSON.stringify({ type: "session.finished" }));
+      }
+      if (model.includes("tts")) {
+        if (event.type === "input_text_buffer.append") ttsText += String(event.text || "");
+        if (event.type === "session.finish") {
+          socket.send(JSON.stringify({ type: "response.audio.delta", delta: Buffer.from([1, 2, 3, 4]).toString("base64") }));
+          socket.send(JSON.stringify({ type: "session.finished" }));
+        }
+      }
+    });
+  });
+  const service = await fixture(upstream.baseUrl);
+  try {
+    const asr = service.store.config.insertModel({ name: "实时 STT", provider_id: service.model!.provider_id, model_id: "qwen3-asr-flash-realtime", model_kind: "asr_realtime" });
+    const tts = service.store.config.insertModel({ name: "实时 TTS", provider_id: service.model!.provider_id, model_id: "qwen3-tts-flash-realtime", model_kind: "tts_realtime" });
+    service.store.setSettings({ voice_asr_model_id: asr.id, voice_tts_model_id: tts.id });
+    const session = await service.session();
+    await service.app.listen({ host: "127.0.0.1", port: 0 });
+    const address = service.app.server.address() as { port: number };
+    const ws = new WebSocket(`ws://127.0.0.1:${address.port}/api/agent/voice/stream?session_id=${session.id}`, { headers: { Authorization: `Bearer ${service.credential("user1")}` } });
+    const messages: Row[] = [];
+    ws.on("message", (raw) => messages.push(JSON.parse(raw.toString())));
+    await new Promise<void>((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
+    try {
+      await waitFor(messages, (message) => message.type === "connected");
+      ws.send(JSON.stringify({ type: "start" }));
+      const ready = await waitFor(messages, (message) => message.type === "ready");
+      assert.equal(ready.sample_rate, 16000);
+      assert.equal(ready.tts_realtime, true);
+
+      ws.send(JSON.stringify({ type: "audio", audio: Buffer.alloc(640, 0).toString("base64") }));
+      ws.send(JSON.stringify({ type: "commit" }));
+
+      const final = await waitFor(messages, (message) => message.type === "asr.final");
+      assert.equal(final.text, "设备运行情况怎么样");
+      const done = await waitFor(messages, (message) => message.type === "agent.done");
+      assert.equal(done.status, "ok");
+      assert.match(String(done.answer), /当前设备运行正常/);
+      await waitFor(messages, (message) => message.type === "tts.audio");
+      await waitFor(messages, (message) => message.type === "tts.done");
+      assert.match(ttsText, /当前设备运行正常/);
+      assert.ok(protocol.some((event) => event.type === "input_audio_buffer.append" && event.model.includes("asr")));
+      assert.ok(protocol.some((event) => event.type === "input_text_buffer.append" && event.model.includes("tts")));
+      assert.equal(messages.some((message) => message.type === "asr.echo"), false);
+    } finally {
+      ws.terminate();
+    }
+  } finally {
+    await service.close();
+    for (const socket of sockets.clients) socket.terminate();
+    await new Promise<void>((resolve) => sockets.close(() => resolve()));
+    await upstream.close();
+  }
 });

@@ -24,7 +24,8 @@ npm start
 | --- | --- |
 | `WEBAGENT_BIND_HOST` | `127.0.0.1`，容器内部设 `0.0.0.0` |
 | `WEBAGENT_PORT` | 后端 `8000` |
-| `WEBAGENT_CONTROL_PASSWORD` | 首次创建独立管理账号 `admin` 的密码 |
+| `WEBAGENT_CONTROL_PASSWORD` | 首次创建独立管理账号 `admin` 的密码；已有账号时不会自动覆盖 |
+| `WEBAGENT_RESET_CONTROL_PASSWORD` | 设为 `1` 时，本次启动把 `admin` 密码重置为 `WEBAGENT_CONTROL_PASSWORD` 并撤销管理会话；恢复后请移除 |
 | `WEBAGENT_SECRET_KEY` | 凭据加密根密钥；丢失则无法解密已保存 Key，必须备份 |
 | `WEBAGENT_DATA_DIR` | 数据根目录，默认 `./data`；相对路径基于项目根目录，不基于 workspace 当前目录。旧 `WEBAGENT_PI_DATA_DIR` 仅作为兼容读取 |
 | `WEBAGENT_LEGACY_DIR` | `npm run migrate` 的旧库源目录，默认 `legacy/` |
@@ -56,6 +57,7 @@ docker compose logs -f backend
 - `chat`：Nginx，代理业务和 Agent API，拒绝 `/api/control/`。
 - `pi-data`：命名卷保存数据，容器重建不丢会话与模型配置。
 - 容器非 root、只读根目录，写入限于数据卷和 `/tmp`，日志轮转；无需配置浏览器二进制或本机媒体转码工具。
+- 两个 Nginx 都把访问日志和错误日志输出到容器 stdout / stderr，访问日志包含请求耗时 `rt`、上游耗时 `urt`、上游地址 `ua` 和请求 ID `rid`，并透传 `X-Request-ID`。Compose 对 backend / admin / chat 统一按 10 MB × 3 个文件轮转，避免长期运行撑爆磁盘。
 
 PI 官方 Bash / PowerShell、文件读写与 CodeMode 在管理端列出，但默认 `WEBAGENT_LOCAL_TOOLS=off` 时锁定且不会进入模型工具列表。部署者显式设为 `admin` 后，管理员仍需在工具页逐项启用；API 请求和旧数据库配置不能自行越过部署级锁定。本机执行工具没有沙箱，会继承后端进程的文件和网络权限，只适合受信任的单租户部署。后端默认不提供任意命令执行、文件操作或截图接口。stdio MCP 同样会由后端启动管理员指定的本机服务进程，默认关闭；只对信任的 MCP 服务设置 `WEBAGENT_ALLOW_STDIO=1`，并自行承担进程隔离和部署风险。若不需要这些能力，保持默认关闭并使用受控的 Streamable HTTP / SSE MCP。
 
@@ -162,7 +164,7 @@ npm start
 
 恢复时同时恢复加密根密钥与数据目录，再启动相同版本或已验证兼容的新版本。进程重启后，未完成任务显示 `interrupted`；待执行审批、发布结果不明的操作须核对，不自动重放。
 
-默认清理：会话 30 天、事件 1 天；发布内容版本不随会话保留策略删除，需业务自行确定档案保留和清理策略。聊天正文、附件 Base64 与 PI entries 保存在 `data/sessions/*.json`，不在 SQLite；备份必须覆盖整个 `data/`，生产大量多模态历史宜适配对象存储。
+默认清理：会话 30 天、事件 1 天；发布内容版本不随会话保留策略删除，需业务自行确定档案保留和清理策略。聊天正文与 PI entries 保存在 `data/sessions/*.json`，图片附件保存在 `data/uploads/<sessionId>/`（JSON 只存相对路径），均不在 SQLite；备份必须覆盖整个 `data/`，生产大量多模态历史宜适配对象存储。
 
 ## 7. PI 升级
 

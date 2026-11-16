@@ -18,6 +18,7 @@ import { runtimeToolNames } from "./pi-tools.js";
 import { promptDefaults } from "./prompts.js";
 import { skillFromTextFiles, skillFromZip } from "./skills.js";
 import { assistantModelColumns } from "./assistant-config.js";
+import { brandUrl, readBrandLogo, removeBrandLogo, saveBrandLogo } from "./brand.js";
 
 const name = z.string().trim().min(1).max(100);
 const providerSchema = z.object({ name, provider_type: z.literal("openai_compatible").default("openai_compatible"), base_url: z.string().max(1000), api_key: z.string().max(5000).optional(), clear_api_key: z.boolean().optional(), extra_headers: z.record(z.string(), z.string()).default({}), enabled: z.boolean().default(true), timeout_seconds: z.number().min(3).max(180).default(90) });
@@ -35,6 +36,11 @@ const assistantSchema = z.object({
   tts_max_read_chars: z.number().int().min(1).max(4000).nullable().default(null),
   default_reasoning_effort: z.enum(["", "off", "none", "minimal", "low", "medium", "high", "xhigh"]).nullable().default(null),
   default_approval_mode: z.enum(["confirm", "full_access"]).nullable().default(null),
+  allow_full_access: z.boolean().nullable().default(null),
+  welcome_title: z.string().max(120).nullable().default(null),
+  welcome_subtitle: z.string().max(500).nullable().default(null),
+  welcome_prompts: z.string().max(4000).nullable().default(null),
+  welcome_logo: z.string().max(300).nullable().default(null),
   enabled: z.boolean().default(true), is_default: z.boolean().default(false), sort_order: z.number().int().min(0).max(10000).default(100),
 });
 const dynamicSchema = z.object({ name: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), display_name: z.string().max(100).default(""), description: z.string().min(1).max(5000), category: z.string().max(100).default("业务连接器"), permission: z.string().max(100).default(""), risk: z.enum(["read", "write", "delete"]).default("read"), method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("GET"), url_template: z.string().min(1).max(2000), headers: z.record(z.string(), z.string()).default({}), input_schema: z.record(z.string(), z.unknown()).default({ type: "object", properties: {} }), enabled: z.boolean().default(false) });
@@ -59,7 +65,8 @@ const api = "/api/control";
 export function adminRoutes(app: FastifyInstance, context: { store: Store; auth: Auth; skills: SkillLibrary; providers: Providers; speech: Speech; decision: Decision; registry: ToolRegistry; publications: Publications; runs: Runs; core: CoreMaintenance }) {
   const { store, auth, skills, providers, speech, decision, registry, publications, runs, core } = context;
   const publicConfig = () => { const { pagepilot_token, ...settings } = store.settings(); return { ...settings, prompt_defaults: promptDefaults, pagepilot_token_set: Boolean(pagepilot_token), pagepilot_token_masked: mask(pagepilot_token ? decrypt(pagepilot_token) : "") }; };
-  app.addHook("preHandler", async (request) => { if (request.method === "OPTIONS") return; if (request.url.startsWith(`${api}/`) && !request.url.startsWith(`${api}/auth/`)) auth.admin(request); });
+  // 品牌徽标是公开静态资源，其余 /api/control 接口仍要求管理端登录。
+  app.addHook("preHandler", async (request) => { if (request.method === "OPTIONS") return; if (request.url.startsWith(`${api}/`) && !request.url.startsWith(`${api}/auth/`) && !request.url.startsWith(`${api}/brand/`)) auth.admin(request); });
   app.get(`${api}/config`, async () => publicConfig());
   app.put(`${api}/config`, async (request) => {
     const input = request.body as Row; const values: Row = {};
@@ -102,7 +109,9 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     if (next.voice_input_mode && !["auto", "realtime", "file"].includes(next.voice_input_mode)) throw new AppError("voice_input_mode 无效", 422);
     if (next.tts_max_read_chars < 1 || next.tts_max_read_chars > 4000) throw new AppError("tts_max_read_chars 需要在 1–4000 之间", 422);
     if (next.decision_enabled && (!next.decision_model_id || (!next.decision_tools && !next.decision_skills))) throw new AppError("开启决策需要有效模型，并至少选择工具或技能", 422);
+    const previousGlobalLogo = String(store.settings().welcome_logo || "");
     store.setSettings({ ...values, bm25_enabled: next.bm25_enabled, decision_enabled: next.decision_enabled, tool_selection_mode: next.decision_enabled ? "decision" : next.bm25_enabled ? "bm25" : "none" });
+    if (previousGlobalLogo && previousGlobalLogo !== String(next.welcome_logo || "")) releaseBrand(previousGlobalLogo);
     if (!next.store_reasoning) { store.conversations.stripReasoning(); store.run("UPDATE run_events SET payload='{}' WHERE name='thinking.delta'"); }
     store.audit(auth.admin(request).username, "config.update", "runtime", Object.keys(values)); return publicConfig();
   });
@@ -299,6 +308,24 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
   });
   app.post(`${api}/admin/models/:id/transcribe`, async (request) => { const model = store.model(Number((request.params as Row).id)); if (!model) throw new AppError("模型不存在", 404); const body = request.body as Row; return { ok: true, ...await speech.transcribe(model, body.audio_data_url, body.language) }; });
   app.get(`${api}/admin/assistants`, async () => ({ items: store.assistants() }));
+  const brandStillUsed = (relative: string) => String(store.settings().welcome_logo || "") === relative || store.assistants().some((item) => String(item.welcome_logo || "") === relative);
+  /** 换 Logo 或删助手时清掉不再被引用的文件，避免品牌图片越攒越多。 */
+  const releaseBrand = (relative: unknown) => { const value = String(relative || ""); if (value && !brandStillUsed(value)) removeBrandLogo(store.dataDir, value); };
+  app.post(`${api}/admin/brand-logo`, async (request) => {
+    const admin = auth.admin(request);
+    const body = z.object({ data_url: z.string().max(3_200_000) }).parse(request.body);
+    const saved = saveBrandLogo(store.dataDir, body.data_url);
+    store.audit(admin.username, "brand.upload", saved.path, { size: saved.size });
+    return { ...saved, url: brandUrl(saved.path, `${api}/brand`) };
+  });
+  app.get(`${api}/brand/:file`, async (request, reply) => {
+    const logo = readBrandLogo(store.dataDir, String((request.params as Row).file));
+    if (!logo) throw new AppError("Logo 不存在", 404);
+    return reply.type(logo.mime_type)
+      .header("Cache-Control", "public, max-age=31536000, immutable")
+      .header("X-Content-Type-Options", "nosniff")
+      .send(logo.bytes);
+  });
   for (const method of ["POST", "PUT"] as const) app.route({ method, url: `${api}/admin/assistants${method === "PUT" ? "/:id" : ""}`, handler: async (request) => {
     const previous = method === "PUT" ? store.assistant(Number((request.params as Row).id)) : undefined; if (method === "PUT" && !previous) throw new AppError("助手不存在", 404);
     const values = assistantSchema.parse({ ...previous, ...request.body as Row });
@@ -313,9 +340,19 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     }
     if (values.skill_slugs.some((slug) => !skills.has(slug))) throw new AppError("助手选择了不存在的 Skill", 422);
     if (values.is_default) for (const item of store.assistants()) if (Number(item.id) !== Number(previous?.id ?? 0) && item.is_default) store.config.updateAssistant(Number(item.id), { is_default: false });
-    const row = previous ? store.config.updateAssistant(Number(previous.id), values) : store.config.insertAssistant(values); return { assistant: row };
+    const row = previous ? store.config.updateAssistant(Number(previous.id), values) : store.config.insertAssistant(values);
+    if (previous && previous.welcome_logo !== values.welcome_logo) releaseBrand(previous.welcome_logo);
+    return { assistant: row };
   } });
-  app.delete(`${api}/admin/assistants/:id`, async (request) => { const id = Number((request.params as Row).id); store.run("UPDATE sessions SET assistant_id=NULL WHERE assistant_id=?", [id]); if (store.all("SELECT id FROM access_tokens WHERE assistant_id=?", [id]).length) throw new AppError("仍有接入 Token 绑定该助手，请先调整 Token", 409); store.config.deleteAssistant(id); return { ok: true }; });
+  app.delete(`${api}/admin/assistants/:id`, async (request) => {
+    const id = Number((request.params as Row).id);
+    const previous = store.assistant(id);
+    store.run("UPDATE sessions SET assistant_id=NULL WHERE assistant_id=?", [id]);
+    if (store.all("SELECT id FROM access_tokens WHERE assistant_id=?", [id]).length) throw new AppError("仍有接入 Token 绑定该助手，请先调整 Token", 409);
+    store.config.deleteAssistant(id);
+    releaseBrand(previous?.welcome_logo);
+    return { ok: true };
+  });
   app.get(`${api}/admin/tools`, async () => ({ items: await registry.catalog() }));
   app.put(`${api}/admin/tools/:name/tags`, async (request) => {
     const tags = z.object({ tags: z.array(z.string().max(24)).max(12) }).strict().parse(request.body).tags;
@@ -472,24 +509,15 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
   app.post(`${api}/admin/sessions/cleanup`, async (request) => {
     const plan = cleanupPlan(request.body as Row || {});
     if (!plan.ids.length) return { deleted: 0, messages: 0, cutoff: plan.cutoff };
-    store.transaction(() => {
-      for (const id of plan.ids) {
-        store.run("DELETE FROM llm_calls WHERE session_id=?", [id]);
-        store.run("DELETE FROM compaction_events WHERE session_id=?", [id]);
-        store.run("UPDATE publications SET session_id=NULL WHERE session_id=?", [id]);
-        store.run("DELETE FROM sessions WHERE id=?", [id]);
-      }
-    });
-    for (const id of plan.ids) store.conversations.delete(id);
-    store.audit(auth.admin(request).username, "sessions.cleanup", "sessions", { count: plan.ids.length, cutoff: plan.cutoff });
-    return { deleted: plan.ids.length, messages: plan.messages, cutoff: plan.cutoff };
+    const deleted = plan.ids.filter((id) => store.removeSession(id)).length;
+    store.audit(auth.admin(request).username, "sessions.cleanup", "sessions", { count: deleted, cutoff: plan.cutoff });
+    return { deleted, messages: plan.messages, cutoff: plan.cutoff };
   });
   app.delete(`${api}/admin/sessions/:id`, async (request) => {
     const id = (request.params as Row).id;
     const session = store.one("SELECT * FROM sessions WHERE id=?", [id]); if (!session) throw new AppError("会话不存在", 404);
     store.assertIdle(id);
-    store.transaction(() => { store.run("DELETE FROM llm_calls WHERE session_id=?", [id]); store.run("DELETE FROM compaction_events WHERE session_id=?", [id]); store.run("UPDATE publications SET session_id=NULL WHERE session_id=?", [id]); store.run("DELETE FROM sessions WHERE id=?", [id]); });
-    store.conversations.delete(id);
+    store.removeSession(id);
     store.audit(auth.admin(request).username, "session.delete", id, { username: session.username, title: session.title });
     return { ok: true };
   });

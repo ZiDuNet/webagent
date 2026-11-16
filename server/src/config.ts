@@ -10,6 +10,7 @@ export const config = {
   legacyDir: path.resolve(rootDir, process.env.WEBAGENT_LEGACY_DIR || "legacy"),
   secret: process.env.WEBAGENT_SECRET_KEY || process.env.WEBAGENT_INTERNAL_SECRET || "webagent-demo-internal-secret-change-me",
   adminPassword: process.env.WEBAGENT_CONTROL_PASSWORD || "admin123",
+  resetAdminPassword: envFlag("WEBAGENT_RESET_CONTROL_PASSWORD"),
   cookieSecure: envFlag("WEBAGENT_COOKIE_SECURE"),
   sessionHours: Number(process.env.WEBAGENT_SESSION_HOURS || 24),
   localTools: (process.env.WEBAGENT_LOCAL_TOOLS || "off").trim().toLowerCase() === "admin" ? "admin" as const : "off" as const,

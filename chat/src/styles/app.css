@@ -541,67 +541,6 @@
   background: linear-gradient(to top, var(--bg) 58%, rgba(7, 10, 14, 0));
 }
 
-.empty-state {
-  display: flex;
-  max-width: 620px;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  margin: 60px auto;
-  text-align: center;
-}
-
-.empty-state__icon {
-  display: grid;
-  width: 46px;
-  height: 46px;
-  place-items: center;
-  border: 1px solid rgba(39, 201, 106, 0.16);
-  border-radius: 13px;
-  background: rgba(39, 201, 106, 0.055);
-  color: var(--accent);
-}
-
-.empty-state h2 {
-  margin: 16px 0 7px;
-  color: #e4ebf3;
-  font-size: 19px;
-  font-weight: 650;
-  letter-spacing: -0.03em;
-}
-
-.empty-state p {
-  max-width: 400px;
-  margin: 0;
-  color: #657286;
-  font-size: 11.5px;
-  line-height: 1.7;
-}
-
-.empty-state__chips {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 6px;
-  margin-top: 18px;
-}
-
-.empty-state__chips button {
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.02);
-  color: #8996a8;
-  font-size: 10px;
-  cursor: pointer;
-}
-
-.empty-state__chips button:hover {
-  border-color: var(--border-strong);
-  color: #c4cfdd;
-}
-
 .toast {
   position: fixed;
   bottom: 126px;
@@ -722,3 +661,28 @@
   }
 }
 .memory-panel{display:flex;flex-direction:column;gap:24px}.memory-list{display:flex;flex-direction:column;gap:12px}.memory-item{border:1px solid var(--border,#303846);border-radius:12px;padding:16px}.memory-item p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;margin:0 0 14px}.memory-item__actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.memory-item__actions>span{margin-right:auto;font-size:12px}.memory-active{color:#6cdb95}.memory-panel .control-actions{display:flex;gap:8px}
+
+.header-count {
+  display: inline-grid;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(39, 201, 106, 0.14);
+  color: #7fe1a7;
+  font-size: 8.5px;
+  font-style: normal;
+  font-weight: 650;
+}
+
+.header-count--pending {
+  background: rgba(255, 178, 66, 0.16);
+  color: #ffc06b;
+}
+
+.memory-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.7;
+}

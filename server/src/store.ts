@@ -7,6 +7,7 @@ import { AppError, identityOwnerKey, type Identity, type Row } from "./types.js"
 import { ConversationStore } from "./conversation-store.js";
 import { ConfigStore, defaults } from "./config-store.js";
 import { storagePaths } from "./storage-paths.js";
+import { attachmentDataUrl, externalizePiImages, hasInlinePiImages, removeSessionUploads, saveAttachments } from "./attachments.js";
 
 export const now = () => new Date().toISOString();
 export { defaults } from "./config-store.js";
@@ -108,13 +109,14 @@ export class Store {
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     migrateDataLayout(dataDir);
     this.paths = storagePaths(dataDir);
-    for (const directory of [this.paths.runtime, this.paths.backups, this.paths.sessions, this.paths.skills, this.paths.workspaces, this.paths.cache, this.paths.legacy]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    for (const directory of [this.paths.runtime, this.paths.backups, this.paths.sessions, this.paths.skills, this.paths.uploads, this.paths.workspaces, this.paths.cache, this.paths.legacy]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.agent = new DatabaseSync(this.paths.database);
     this.config = new ConfigStore(dataDir);
     this.conversations = new ConversationStore(dataDir);
     this.agent.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=15000;");
     this.agent.exec(agentSchema);
     this.conversations.initialize(this);
+    this.migrateInlineAttachments();
     // 必须在导出并删除配置表之前解除 access_tokens 对 assistants 的外键，
     // 否则 SQLite 会因 FK 检查拒绝 DROP TABLE。
     this.migrateAccessTokenForeignKeys();
@@ -276,8 +278,16 @@ export class Store {
   audit(username: string, action: string, resource: string, detail: unknown = "") { this.insert("audit_log", { ts: now(), username, action, resource, detail: typeof detail === "string" ? detail : JSON.stringify(detail) }); }
   invalidateContext(sessionId: string) { this.conversations.clearPiEntries(sessionId); this.run("UPDATE sessions SET summary='',summary_until_id=0,last_context_tokens=0,last_compacted_at=NULL WHERE id=?", [sessionId]); }
   async initialize() {
-    if (!this.one("SELECT id FROM control_users LIMIT 1")) this.insert("control_users", { username: "admin", password_hash: await hashPassword(config.adminPassword) });
+    const controlUser = this.one("SELECT id FROM control_users LIMIT 1");
+    if (!controlUser) this.insert("control_users", { username: "admin", password_hash: await hashPassword(config.adminPassword) });
+    else if (config.resetAdminPassword) {
+      // 显式重置开关：方便用部署平台的 Secret 恢复管理密码；重置后撤销所有管理会话。
+      this.update("control_users", controlUser.id, { password_hash: await hashPassword(config.adminPassword) });
+      this.run("DELETE FROM control_sessions WHERE user_id=?", [controlUser.id]);
+      console.warn("[control] 已按 WEBAGENT_RESET_CONTROL_PASSWORD 重置 admin 密码并撤销管理会话；请移除该变量后重启");
+    }
     if (!this.config.assistants().length) this.config.insertAssistant({ name: "默认助手", description: "继承当前业务用户权限，使用已注册的工具协助处理业务。", system_prompt: "你是业务助手，使用工具获取真实数据，不编造结果，不绕过权限。写入操作通过审批工具执行。", is_default: true, enabled: true });
+    this.config.removeLegacyDeviceAssistant();
     for (const row of this.config.providers()) if (row.api_key && !String(row.api_key).startsWith("enc:v2:")) this.config.updateProvider(row.id, { api_key: encrypt(decrypt(String(row.api_key))) });
     const savedToken = this.settings().pagepilot_token;
     if (savedToken && !savedToken.startsWith("enc:v2:")) this.setSettings({ pagepilot_token: encrypt(decrypt(savedToken)) });
@@ -294,13 +304,7 @@ export class Store {
       const cutoff = new Date(Date.now() - days * 86400000).toISOString();
       const expired = "SELECT id FROM sessions WHERE updated_at < ? AND id NOT IN (SELECT session_id FROM runs WHERE status='running')";
       const expiredIds = this.all(expired, [cutoff]).map((row) => String(row.id));
-      this.transaction(() => {
-        this.run(`DELETE FROM llm_calls WHERE session_id IN (${expired})`, [cutoff]);
-        this.run(`DELETE FROM compaction_events WHERE session_id IN (${expired})`, [cutoff]);
-        this.run(`UPDATE publications SET session_id=NULL WHERE session_id IN (${expired})`, [cutoff]);
-        this.run("DELETE FROM sessions WHERE updated_at < ? AND id NOT IN (SELECT session_id FROM runs WHERE status='running')", [cutoff]);
-      });
-      for (const id of expiredIds) this.conversations.delete(id);
+      for (const id of expiredIds) this.removeSession(id);
     }
     this.run("DELETE FROM control_sessions WHERE expires_at < ?", [now()]);
     this.run("DELETE FROM access_sessions WHERE expires_at < ?", [now()]);
@@ -308,15 +312,112 @@ export class Store {
       const cutoff = new Date(Date.now() - Number(token.session_retention_days) * 86400000).toISOString();
       const prefix = `token-${token.id}:%`;
       const expiredIds = this.all("SELECT id FROM sessions WHERE owner_key LIKE ? AND updated_at < ? AND id NOT IN (SELECT session_id FROM runs WHERE status='running')", [prefix, cutoff]).map((row) => String(row.id));
-      this.run("DELETE FROM sessions WHERE owner_key LIKE ? AND updated_at < ? AND id NOT IN (SELECT session_id FROM runs WHERE status='running')", [prefix, cutoff]);
-      for (const id of expiredIds) this.conversations.delete(id);
+      for (const id of expiredIds) this.removeSession(id);
     }
+    this.removeOrphanWorkspaces();
+    this.removeOrphanUploads();
+    this.removeOrphanBrandLogos();
     this.run("UPDATE approvals_v2 SET status='expired' WHERE status='pending' AND expires_at < ?", [now()]);
     this.run("UPDATE questions SET status='expired' WHERE status='pending' AND expires_at < ?", [now()]);
     if (settings.run_event_retention_hours > 0) this.run("DELETE FROM run_events WHERE created_at < ?", [new Date(Date.now() - settings.run_event_retention_hours * 3600000).toISOString()]);
     if (settings.llm_call_retention_days > 0) this.run("DELETE FROM llm_calls WHERE created_at < ?", [new Date(Date.now() - settings.llm_call_retention_days * 86400000).toISOString()]);
     if (settings.compaction_event_retention_days > 0) this.run("DELETE FROM compaction_events WHERE created_at < ?", [new Date(Date.now() - settings.compaction_event_retention_days * 86400000).toISOString()]);
     if (settings.audit_retention_days > 0) this.run("DELETE FROM audit_log WHERE ts < ?", [new Date(Date.now() - settings.audit_retention_days * 86400000).toISOString()]);
+  }
+
+  /** 删除会话的统一入口：正文文件、运行元数据、审批 / 问答与工作目录一起清理。 */
+  removeSession(sessionId: string) {
+    if (this.one("SELECT id FROM runs WHERE session_id=? AND status='running'", [sessionId])) return false;
+    this.transaction(() => {
+      this.run("DELETE FROM llm_calls WHERE session_id=?", [sessionId]);
+      this.run("DELETE FROM compaction_events WHERE session_id=?", [sessionId]);
+      this.run("UPDATE publications SET session_id=NULL WHERE session_id=?", [sessionId]);
+      // runs / run_events / approvals_v2 / questions 依赖 ON DELETE CASCADE。
+      this.run("DELETE FROM sessions WHERE id=?", [sessionId]);
+    });
+    this.conversations.delete(sessionId);
+    fs.rmSync(path.join(this.paths.workspaces, sessionId), { recursive: true, force: true });
+    removeSessionUploads(this.dataDir, sessionId);
+    return true;
+  }
+
+  /**
+   * 旧版把图片 Base64 内联在会话 JSON 里。启动时一次性搬到 `data/uploads/<sessionId>/`，
+   * 只替换成功写入的附件；失败保留内联数据，不影响会话可读性。
+   */
+  private migrateInlineAttachments() {
+    const marker = path.join(this.paths.runtime, ".attachments-local-v2");
+    if (fs.existsSync(marker)) return;
+    let failed = false;
+    for (const sessionId of this.conversations.sessionIds()) {
+      try {
+        for (const message of this.conversations.messages(sessionId)) {
+          const attachments: Row[] = Array.isArray(message.attachments) ? message.attachments : [];
+          if (!attachments.some((item) => typeof item?.data_url === "string" && String(item.data_url).startsWith("data:"))) continue;
+          const migrated = attachments.map((item) => {
+            if (!item?.data_url) return item;
+            if (attachmentDataUrl(this.dataDir, sessionId, item)) {
+              const [saved] = saveAttachments(this.dataDir, sessionId, [item]);
+              return saved;
+            }
+            return item;
+          });
+          this.conversations.update(sessionId, Number(message.id), { attachments: migrated });
+        }
+        const entries = this.conversations.piEntries(sessionId);
+        if (hasInlinePiImages(entries)) {
+          externalizePiImages(this.dataDir, sessionId, entries);
+          this.conversations.savePiEntries(sessionId, entries);
+        }
+      } catch (error) {
+        failed = true;
+        console.warn(`[attachments] 会话 ${sessionId} 图片迁移失败，保留内联数据：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (!failed) fs.writeFileSync(marker, new Date().toISOString(), { mode: 0o600 });
+  }
+
+  /** 清理没有对应会话记录的遗留工作目录（例如旧版本删除会话时未清理）。 */
+  removeOrphanWorkspaces() {
+    try {
+      const known = new Set(this.all("SELECT id FROM sessions").map((row) => String(row.id)));
+      for (const entry of fs.readdirSync(this.paths.workspaces, { withFileTypes: true })) {
+        if (!entry.isDirectory() || known.has(entry.name)) continue;
+        fs.rmSync(path.join(this.paths.workspaces, entry.name), { recursive: true, force: true });
+      }
+    } catch { /* 清理失败不影响主流程 */ }
+  }
+
+  /** 清理没有对应会话记录的孤儿附件目录。 */
+  removeOrphanUploads() {
+    try {
+      const known = new Set(this.all("SELECT id FROM sessions").map((row) => String(row.id)));
+      for (const entry of fs.readdirSync(this.paths.uploads, { withFileTypes: true })) {
+        if (!entry.isDirectory() || known.has(entry.name)) continue;
+        fs.rmSync(path.join(this.paths.uploads, entry.name), { recursive: true, force: true });
+      }
+    } catch { /* 清理失败不影响主流程 */ }
+  }
+
+  /**
+   * 清理没被任何助手 / 全局设置引用的品牌徽标。
+   * 保留 24 小时内上传的文件，避免刚上传还没点保存就被清掉。
+   */
+  removeOrphanBrandLogos() {
+    try {
+      const directory = this.paths.brand;
+      const referenced = new Set<string>();
+      for (const row of [{ welcome_logo: this.settings().welcome_logo }, ...this.assistants()]) {
+        const file = String(row?.welcome_logo || "").split("/").pop();
+        if (file) referenced.add(file);
+      }
+      const cutoff = Date.now() - 24 * 3600 * 1000;
+      for (const file of fs.readdirSync(directory)) {
+        if (referenced.has(file)) continue;
+        const target = path.join(directory, file);
+        try { if (fs.statSync(target).mtimeMs < cutoff) fs.rmSync(target, { force: true }); } catch { /* 单个文件失败忽略 */ }
+      }
+    } catch { /* 目录不存在或读取失败都不影响主流程 */ }
   }
   close() { this.agent.close(); }
 }

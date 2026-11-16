@@ -10,6 +10,8 @@ import { Speech } from "./speech.js";
 import { Publications } from "./publications.js";
 import { SkillLibrary } from "./skill-library.js";
 import { speakableText } from "./speech-text.js";
+import { readSessionUpload } from "./attachments.js";
+import { brandUrl, readBrandLogo } from "./brand.js";
 import { AppError, type Row } from "./types.js";
 import { effectiveAssistantConfig } from "./assistant-config.js";
 
@@ -33,6 +35,9 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
     const fileTts = speechStatus(effective.tts_model_id, ["tts"]);
     const voiceAsr = speechStatus(effective.voice_asr_model_id, ["asr_realtime"]);
     const voiceTts = speechStatus(effective.voice_tts_model_id, ["tts_realtime"]);
+    const ownerKey = agent.identity.owner_key;
+    const memoryCount = Number(store.one("SELECT COUNT(*) AS total FROM memories WHERE owner_key=? AND enabled=1", [ownerKey])?.total || 0);
+    const memoryPending = Number(store.one("SELECT COUNT(*) AS total FROM memories WHERE owner_key=? AND enabled=0 AND kind='extracted'", [ownerKey])?.total || 0);
     return {
       ...publicSettings,
       assistant_id: assistant.id,
@@ -40,6 +45,12 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
       runtime: "pi",
       auth_mode: agent.mode,
       fixed_assistant_id: agent.identity.assistant_id ?? null,
+      welcome_title: effective.welcome_title,
+      welcome_subtitle: effective.welcome_subtitle,
+      welcome_prompts: effective.welcome_prompts,
+      welcome_logo: brandUrl(effective.welcome_logo),
+      allow_full_access: effective.allow_full_access,
+      memory: { enabled: Boolean(settings.memory_enabled && (assistant.memory_enabled ?? true)), auto_extract: Boolean(settings.memory_auto_extract), auto_confirm: Boolean(settings.memory_auto_confirm), count: memoryCount, pending: memoryPending },
       asr: fileAsr,
       asr_realtime: realtimeAsr,
       tts: fileTts,
@@ -53,6 +64,15 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
       default_approval_mode: effective.default_approval_mode,
       pagepilot: publications.status(),
     };
+  });
+  // 品牌徽标是公开静态资源：文件名带内容哈希，Chat 在登录前也能正常显示空态。
+  app.get(`${prefix}/brand/:file`, async (request, reply) => {
+    const logo = readBrandLogo(store.dataDir, String((request.params as Row).file));
+    if (!logo) throw new AppError("Logo 不存在", 404);
+    return reply.type(logo.mime_type)
+      .header("Cache-Control", "public, max-age=31536000, immutable")
+      .header("X-Content-Type-Options", "nosniff")
+      .send(logo.bytes);
   });
   app.get(`${prefix}/models`, async (request, reply) => { await auth.agent(request, reply); return { items: store.models(true).map(({ extra_params, ...model }) => model) }; });
   app.get(`${prefix}/assistants`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); return { items: runtime.assistants(user).map(({ system_prompt, allowed_roles, ...assistant }) => assistant) }; });
@@ -74,8 +94,20 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
   app.get(`${prefix}/sessions`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); return { items: store.all("SELECT * FROM sessions WHERE owner_key=? ORDER BY updated_at DESC LIMIT 200", [user.owner_key]).map((session) => ({ ...session, assistant_name: String(store.assistant(Number(session.assistant_id))?.name || "") })) }; });
   app.post(`${prefix}/sessions`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const body = z.object({ title: z.string().max(120).optional(), assistant_id: z.number().int().positive().optional() }).parse(request.body || {}); reply.code(201); return { session: runtime.createSession(user, body) }; });
   app.patch(`${prefix}/sessions/:id`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; store.ownedSession(id, user); store.assertIdle(id); const body = z.object({ title: z.string().trim().min(1).max(120).optional(), assistant_id: z.number().int().positive().optional() }).parse(request.body); if (body.assistant_id) { runtime.assistant(user, body.assistant_id); store.invalidateContext(id); } return { session: store.update("sessions", id, body) }; });
-  app.delete(`${prefix}/sessions/:id`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; store.ownedSession(id, user); store.assertIdle(id); store.run("DELETE FROM sessions WHERE id=? AND owner_key=?", [id, user.owner_key]); store.conversations.delete(id); return { ok: true }; });
+  app.delete(`${prefix}/sessions/:id`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; store.ownedSession(id, user); store.assertIdle(id); store.removeSession(id); return { ok: true }; });
   app.get(`${prefix}/sessions/:id/messages`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; const session = store.ownedSession(id, user); return { session, items: store.conversations.messages(id), active_run: store.one("SELECT id,status FROM runs WHERE session_id=? AND status='running' ORDER BY started_at DESC LIMIT 1", [id]) || null }; });
+  app.get(`${prefix}/sessions/:id/attachments/:file`, async (request, reply) => {
+    const { identity: user } = await auth.agent(request, reply);
+    const { id, file } = request.params as Row;
+    store.ownedSession(id, user);
+    const upload = readSessionUpload(store.dataDir, id, String(file));
+    if (!upload) throw new AppError("附件不存在", 404);
+    return reply
+      .type(upload.mime_type)
+      .header("Cache-Control", "private, max-age=31536000, immutable")
+      .header("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(String(file))}`)
+      .send(upload.bytes);
+  });
   app.delete(`${prefix}/sessions/:id/messages`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; store.ownedSession(id, user); store.assertIdle(id); store.run("DELETE FROM approvals_v2 WHERE session_id=?", [id]); store.invalidateContext(id); store.conversations.clear(id); return { ok: true }; });
   app.post(`${prefix}/sessions/:id/fork`, async (request, reply) => {
     const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; const source = store.ownedSession(id, user); store.assertIdle(id);
@@ -94,8 +126,7 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
       reply.code(201);
       return { session };
     } catch (error) {
-      store.conversations.delete(created.id);
-      store.run("DELETE FROM sessions WHERE id=?", [created.id]);
+      store.removeSession(created.id);
       throw error;
     }
   });

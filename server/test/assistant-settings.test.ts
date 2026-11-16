@@ -31,6 +31,10 @@ test("assistant voice and runtime overrides take precedence over global fallback
       tts_max_read_chars: 1200,
       default_reasoning_effort: "low",
       default_approval_mode: "confirm",
+      allow_full_access: true,
+      welcome_title: "全局标题",
+      welcome_subtitle: "全局说明",
+      welcome_prompts: "全局问题",
     });
 
     const assistant = service.store.assistants().find((item) => item.is_default)!;
@@ -44,6 +48,10 @@ test("assistant voice and runtime overrides take precedence over global fallback
     assert.equal(inherited.json().voice_auto_send, true);
     assert.equal(inherited.json().tts_auto_read, true);
     assert.equal(inherited.json().default_reasoning_effort, "low");
+    assert.equal(inherited.json().welcome_title, "全局标题");
+    assert.equal(inherited.json().welcome_subtitle, "全局说明");
+    assert.equal(inherited.json().welcome_prompts, "全局问题");
+    assert.equal(inherited.json().allow_full_access, true);
 
     const cookie = await managementCookie(service);
     const updated = await service.app.inject({
@@ -58,6 +66,10 @@ test("assistant voice and runtime overrides take precedence over global fallback
         tts_max_read_chars: 600,
         default_reasoning_effort: "high",
         default_approval_mode: "full_access",
+        allow_full_access: false,
+        welcome_title: "助手标题",
+        welcome_subtitle: "助手说明",
+        welcome_prompts: "助手问题一\n助手问题二",
       },
     });
     assert.equal(updated.statusCode, 200, updated.body);
@@ -74,12 +86,16 @@ test("assistant voice and runtime overrides take precedence over global fallback
     assert.equal(overridden.json().tts_max_read_chars, 600);
     assert.equal(overridden.json().default_reasoning_effort, "high");
     assert.equal(overridden.json().default_approval_mode, "full_access");
+    assert.equal(overridden.json().welcome_title, "助手标题");
+    assert.equal(overridden.json().welcome_subtitle, "助手说明");
+    assert.equal(overridden.json().welcome_prompts, "助手问题一\n助手问题二");
+    assert.equal(overridden.json().allow_full_access, false);
 
     const cleared = await service.app.inject({
       method: "PUT",
       url: `/api/control/admin/assistants/${assistant.id}`,
       headers: { cookie },
-      payload: { asr_model_id: null, tts_model_id: null, voice_auto_send: null, tts_auto_read: null, tts_max_read_chars: null, default_reasoning_effort: null, default_approval_mode: null },
+      payload: { asr_model_id: null, tts_model_id: null, voice_auto_send: null, tts_auto_read: null, tts_max_read_chars: null, default_reasoning_effort: null, default_approval_mode: null, allow_full_access: null, welcome_title: null, welcome_subtitle: null, welcome_prompts: null },
     });
     assert.equal(cleared.statusCode, 200, cleared.body);
     const fallback = await service.app.inject({
@@ -92,6 +108,8 @@ test("assistant voice and runtime overrides take precedence over global fallback
     assert.equal(fallback.json().voice_auto_send, true);
     assert.equal(fallback.json().tts_auto_read, true);
     assert.equal(fallback.json().default_reasoning_effort, "low");
+    assert.equal(fallback.json().welcome_title, "全局标题");
+    assert.equal(fallback.json().allow_full_access, true);
   } finally {
     await service.close();
     await upstream.close();
