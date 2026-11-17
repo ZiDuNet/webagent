@@ -87,6 +87,28 @@ test("PC4D verifies business identities and shares ownership across clients with
   } finally { await fixture.close(); }
 });
 
+test("PC4D screen exchange accepts any positive project id without a business access token", async () => {
+  const fixture = await businessFixture();
+  try {
+    for (const pid of [370, 401]) {
+      const access = await fixture.exchange("screen", pid);
+      assert.match(access.token, /^pc4d_/);
+      assert.equal(Object.hasOwn(access, "access_token"), false);
+      assert.equal(Object.hasOwn(access.user, "access_token"), false);
+      assert.equal(access.user.namespace, `pc4d:screen:${pid}`);
+      assert.equal(access.project.id, pid);
+      assert.match(access.user.username, new RegExp(`PID ${pid}$`));
+      const identity = await fixture.auth.identity(access.token);
+      assert.equal(identity.namespace, `pc4d:screen:${pid}`);
+      assert.equal(identity.role, "pc4d_screen");
+    }
+    for (const pid of [0, -1, 1.5, "370"]) {
+      const response = await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/exchange", payload: { channel: "screen", pid } });
+      assert.equal(response.statusCode, 422, `pid=${String(pid)}`);
+    }
+  } finally { await fixture.close(); }
+});
+
 test("PC4D public tools bind PID, respect global policy, and never forward login tokens to screen APIs", async () => {
   const fixture = await businessFixture();
   try {

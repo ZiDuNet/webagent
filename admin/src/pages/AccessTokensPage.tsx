@@ -173,25 +173,12 @@ export default function AccessTokensPage() {
     <>
       <PageHeading
         title="接入与安全"
-        description="为独立部署的 Chat、大屏或第三方前端签发接入 Token。Token 只访问 /api/agent/*，不能进入管理端；每个 Token 固定绑定一个助手。"
+        description="为 Chat、大屏或第三方前端签发；只访问 /api/agent/*。"
         actions={<ResourceActions refresh={resource.refresh} add={() => edit()} label="新增接入 Token" />}
       />
       {notice && <Alert title={notice} type="success" showIcon closable onClose={() => setNotice("")} style={{ marginBottom: 16 }} />}
       {error && draft === null && <Alert title={error} type="error" showIcon closable onClose={() => setError("")} style={{ marginBottom: 16 }} />}
-      <Alert
-        type="info"
-        showIcon
-        title="接入 Token 与业务 Token 是两套凭据"
-        description="接入 Token 代表一个可限制范围的前端接入身份，不携带业务权限；工具仍按业务身份或公开工具权限执行。同一浏览器通过 Cookie 视为同一匿名访客，不同浏览器隔离。"
-        style={{ marginBottom: 20 }}
-      />
-      <Alert
-        type="info"
-        showIcon
-        title="PC4D 三端也通过接入 Token 绑定助手"
-        description="「使用渠道」为 PC4D 大屏 / Web / 小程序时，业务端用 pid（Web 与小程序再带业务 access_token）换取 2 小时短期凭据；浏览器拿不到 wa_ 原文。每个渠道取最近更新的启用 Token，Token 再决定助手、工具和权限。"
-        style={{ marginBottom: 20 }}
-      />
+      <p className="control-muted" style={{ marginBottom: 16 }}>接入 Token 只代表前端接入身份，不携带业务权限；PC4D 三端用 pid 换取 2 小时短期凭据。</p>
       <PageState {...resource}>
         <Table
           rowKey="id"
@@ -263,7 +250,7 @@ export default function AccessTokensPage() {
         <div className="control-actions" style={{ justifyContent: "space-between", marginBottom: 12 }}>
           <div>
             <h2 style={{ margin: 0 }}><ShieldCheck size={17} /> 管理端 Token</h2>
-            <p className="control-muted" style={{ margin: "6px 0 0" }}>用于把独立管理端部署在业务系统内，或跨域调用 <code>/api/control</code>。管理 Token 拥有管理 API 权限，不能访问 Chat 的 <code>/api/agent</code>。</p>
+            <p className="control-muted" style={{ margin: "6px 0 0" }}>用于管理端跨域或嵌入业务系统；拥有管理 API 权限，不能访问 Chat。</p>
           </div>
           <Space>
             <Button icon={<RefreshCw size={14} />} onClick={() => void adminResource.refresh()}>刷新</Button>
@@ -273,8 +260,7 @@ export default function AccessTokensPage() {
         <Alert
           type="warning"
           showIcon
-          title="管理 Token 等同于管理员密码"
-          description="只保存在调用方浏览器的 localStorage。建议设置过期时间与来源白名单，使用 HTTPS，并在泄露后立即轮换。登录页提供「使用管理 Token 连接」入口。"
+          title="管理 Token 等同管理员密码，只保存在调用方浏览器；泄露后立即轮换。"
           style={{ marginBottom: 16 }}
         />
         {adminError && <Alert title={adminError} type="error" showIcon closable onClose={() => setAdminError("")} style={{ marginBottom: 16 }} />}
@@ -383,7 +369,7 @@ export default function AccessTokensPage() {
         keyboard={false}
         footer={<Space><Button onClick={() => void copyToken(issued?.token, "access")} icon={<Copy size={14} />}>{copyState === "access" ? "已复制" : "复制"}</Button><Button type="primary" onClick={() => setIssued(null)}>我已保存</Button></Space>}
       >
-        <Alert type="info" showIcon title="Token 已加密保存" description="列表中的「查看 / 复制」可随时取回原文。请避免通过公开渠道传播；一旦泄露请立即轮换。" style={{ marginBottom: 16 }} />
+        <Alert type="info" showIcon title="Token 已加密保存，可通过列表取回原文；泄露后请立即轮换。" style={{ marginBottom: 16 }} />
         <p className="control-muted">接入方式：打开 <code>/chat/?token=...</code>，或前端向 <code>/api/agent/auth/exchange</code> 发送 <code>Authorization: Bearer &lt;token&gt;</code> 换取浏览器会话 Cookie。</p>
         <Input.TextArea value={issued?.token || ""} readOnly rows={3} spellCheck={false} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
       </Modal>
@@ -421,7 +407,7 @@ export default function AccessTokensPage() {
         keyboard={false}
         footer={<Space><Button onClick={() => void copyToken(adminIssued?.token, "admin")} icon={<Copy size={14} />}>{copyState === "admin" ? "已复制" : "复制"}</Button><Button type="primary" onClick={() => setAdminIssued(null)}>我已保存</Button></Space>}
       >
-        <Alert type="info" showIcon title="管理 Token 已加密保存" description="列表中的「查看 / 复制」可随时取回原文。它等同于管理员密码，请勿放入前端源码或公开仓库。" style={{ marginBottom: 16 }} />
+        <Alert type="warning" showIcon title="管理 Token 等同管理员密码，勿放入前端源码或公开仓库。" style={{ marginBottom: 16 }} />
         <p className="control-muted">使用方式：打开管理端登录页，点击「使用管理 Token 连接」，填写 API 地址与 Token。同源部署地址留空；独立后端填写 <code>https://your-host/api/control</code>。</p>
         <Input.TextArea value={adminIssued?.token || ""} readOnly rows={3} spellCheck={false} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
       </Modal>
@@ -432,7 +418,7 @@ export default function AccessTokensPage() {
         onCancel={() => setRevealed(null)}
         footer={<Space><Button icon={<Copy size={14} />} onClick={() => void copyRowToken(revealed?.token, "revealed")}>{copyState === "revealed" ? "已复制" : "复制"}</Button><Button type="primary" onClick={() => setRevealed(null)}>关闭</Button></Space>}
       >
-        <Alert type="warning" showIcon title="请勿在公开渠道传播" description="Token 以加密形式保存在运行库，只有管理员可以查看。泄露后请立即轮换。" style={{ marginBottom: 16 }} />
+        <Alert type="warning" showIcon title="仅在受控渠道使用；泄露后立即轮换。" style={{ marginBottom: 16 }} />
         <Input.TextArea value={revealed?.token || ""} readOnly rows={3} spellCheck={false} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
       </Modal>
     </>

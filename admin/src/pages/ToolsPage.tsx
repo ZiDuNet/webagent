@@ -92,8 +92,7 @@ export default function ToolsPage() {
   const localLocked = allTools.some((item) => item.source === "pi" && item.locked);
 
   return <>
-    <PageHeading title="工具与连接器" description="统一维护框架内置、PI 官方工具及业务连接器。管理员开放、用户选择、相关性筛选，都不能扩大当前业务身份的权限。" actions={<ResourceActions refresh={refresh} />} />
-    <Alert type="info" showIcon title={localLocked ? "本部署未开放本机执行" : "本机执行由部署者开放"} description={localLocked ? "PI Shell、文件读写和 CodeMode 在下方完整列出，但由 WEBAGENT_LOCAL_TOOLS=off 锁定关闭，不是沙箱执行。基础工具可随时停用；BM25 使用 PI 官方实现，和运行设置中的开关同步。" : "WEBAGENT_LOCAL_TOOLS=admin 已开放本机工具定义；仍需在目录中逐项启用，且没有沙箱，仅适合受信任单租户部署。"} style={{ marginBottom: 20 }} />
+    <PageHeading title="工具与连接器" description="内置、PI 原生与业务连接器；开放不代表扩大业务权限。" actions={<ResourceActions refresh={refresh} />} />
     {notice && <Alert title={notice} type="success" showIcon closable onClose={() => setNotice("")} style={{ marginBottom: 16 }} />}
     {error && draft === null && <Alert title={error} type="error" showIcon style={{ marginBottom: 16 }} />}
     <Tabs activeKey={tab} onChange={setTab} items={[
@@ -108,15 +107,14 @@ export default function ToolsPage() {
           <Tag.CheckableTag checked={tagFilter === "全部"} onChange={() => setTagFilter("全部")}>全部</Tag.CheckableTag>
           {allTags.map((tag) => <Tag.CheckableTag key={tag} checked={tagFilter === tag} onChange={() => setTagFilter(tag)}>{tag}</Tag.CheckableTag>)}
         </div>
-        <Table rowKey="name" dataSource={items} pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 1120 }} columns={[
-          { title: "工具", dataIndex: "title", width: 285, render: (value, row) => <div><strong>{value || row.name}</strong><div className="control-muted">{row.name}</div><Tooltip title={row.description}><div className="control-muted" style={{ maxWidth: 265, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{row.description}</div></Tooltip><div style={{ marginTop: 5 }}>{(row.tags || []).map((tag: string) => <Tag key={tag} bordered={false}>{tag}</Tag>)}</div></div> },
-          { title: "来源", dataIndex: "source", width: 140, render: (value, row) => <div><Tag color={value === "pi" ? "purple" : value === "mcp" ? "blue" : value === "http" ? "gold" : "green"}>{sourceLabel(value)}</Tag><div className="control-muted">{row.category}</div></div> },
-          { title: "风险 / 权限", width: 155, render: (_, row) => <div><Tag color={row.risk === "read" ? "default" : "orange"}>{row.risk === "read" ? "只读" : row.risk === "delete" ? "删除" : "写入"}</Tag><div className="control-muted">{row.permission || "基础能力"}</div></div> },
-          { title: "状态", width: 130, render: (_, row) => <Tooltip title={row.blocked_reason}><span>{row.locked ? <Tag icon={<LockKeyhole size={11} />}>部署禁用</Tag> : row.configured === false ? <Tag color="gold">待配置</Tag> : <Tag color={row.enabled ? "green" : "default"}>{row.enabled ? "已启用" : "已停用"}</Tag>}</span></Tooltip> },
-          { title: "启用", dataIndex: "enabled", width: 95, render: (value, row) => <Tooltip title={row.locked ? row.blocked_reason : row.name === "tool_search" ? "与运行设置的 BM25 开关同步" : "停用后不再提供给模型，每次执行前也会重新检查"}><Switch aria-label={`启用 ${row.name}`} checked={Boolean(value)} disabled={row.locked} loading={updating.includes(row.name)} onChange={(enabled) => void updatePolicy(row, { enabled })} /></Tooltip> },
-          { title: "用户使用策略", width: 220, render: (_, row) => row.policy_editable ? <Select aria-label={`${row.name} 用户策略`} style={{ width: 205 }} value={policy(row)} disabled={updating.includes(row.name)} options={policyOptions} onChange={(value) => void updatePolicy(row, policyValue(value))} /> : <span className="control-muted">{row.locked ? "不可开放" : "运行时内部能力"}</span> },
-          { title: "标签", width: 90, render: (_, row) => <Button size="small" onClick={() => { setTagDraft(row); setTagValues(row.tags || []); }}>编辑</Button> },
-          { title: "定义", width: 70, render: (_, row) => <Button size="small" onClick={() => setJson({ name: row.name, source: row.source, input_schema: row.input_schema, description: row.description, blocked_reason: row.blocked_reason })}>查看</Button> },
+        <Table rowKey="name" dataSource={items} tableLayout="fixed" pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 1020 }} columns={[
+          { title: "工具", dataIndex: "title", width: 260, render: (value, row) => <div><strong>{value || row.name}</strong><div className="control-muted">{row.name}</div><Tooltip title={row.description}><div className="control-muted" style={{ maxWidth: 265, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{row.description}</div></Tooltip><div style={{ marginTop: 5 }}>{(row.tags || []).map((tag: string) => <Tag key={tag} bordered={false}>{tag}</Tag>)}</div></div> },
+          { title: "来源", dataIndex: "source", width: 120, render: (value, row) => <div><Tag color={value === "pi" ? "purple" : value === "mcp" ? "blue" : value === "http" ? "gold" : "green"}>{sourceLabel(value)}</Tag><div className="control-muted">{row.category}</div></div> },
+          { title: "风险 / 权限", width: 140, render: (_, row) => <div><Tag color={row.risk === "read" ? "default" : "orange"}>{row.risk === "read" ? "只读" : row.risk === "delete" ? "删除" : "写入"}</Tag><div className="control-muted">{row.permission || "基础能力"}</div></div> },
+          { title: "状态", width: 105, render: (_, row) => <Tooltip title={row.blocked_reason}><span>{row.locked ? <Tag icon={<LockKeyhole size={11} />}>部署禁用</Tag> : row.configured === false ? <Tag color="gold">待配置</Tag> : <Tag color={row.enabled ? "green" : "default"}>{row.enabled ? "已启用" : "已停用"}</Tag>}</span></Tooltip> },
+          { title: "启用", dataIndex: "enabled", width: 80, render: (value, row) => <Tooltip title={row.locked ? row.blocked_reason : row.name === "tool_search" ? "与运行设置的 BM25 开关同步" : "停用后不再提供给模型，每次执行前也会重新检查"}><Switch aria-label={`启用 ${row.name}`} checked={Boolean(value)} disabled={row.locked} loading={updating.includes(row.name)} onChange={(enabled) => void updatePolicy(row, { enabled })} /></Tooltip> },
+          { title: "用户使用策略", width: 205, render: (_, row) => row.policy_editable ? <Select aria-label={`${row.name} 用户策略`} style={{ width: 205 }} value={policy(row)} disabled={updating.includes(row.name)} options={policyOptions} onChange={(value) => void updatePolicy(row, policyValue(value))} /> : <span className="control-muted">{row.locked ? "不可开放" : "运行时内部能力"}</span> },
+          { title: "操作", width: 108, render: (_, row) => <Space size={0}><Button size="small" type="text" onClick={() => { setTagDraft(row); setTagValues(row.tags || []); }}>标签</Button><Button size="small" type="text" onClick={() => setJson({ name: row.name, source: row.source, input_schema: row.input_schema, description: row.description, blocked_reason: row.blocked_reason })}>定义</Button></Space> },
         ]} />
       </PageState> },
       { key: "http", label: "HTTP API", children: <>
@@ -131,7 +129,7 @@ export default function ToolsPage() {
       </> },
       { key: "mcp", label: "MCP 连接器", children: <>
         <div className="control-actions" style={{ marginBottom: 18 }}><Button type="primary" icon={<Plus size={15} />} onClick={() => edit("mcp")}>新增 MCP</Button><Button onClick={() => setImporting(true)}>导入 JSON</Button><span className="control-muted">推荐远端 HTTP / SSE；stdio 默认禁止启动本机进程。</span></div>
-        <Alert type="info" showIcon title="先测试并同步工具目录，再配置各工具的 permission 或 public。未映射权限的 MCP 工具不会开放给用户。stdio 只能由部署者显式允许，后台开关不能绕过。" style={{ marginBottom: 16 }} />
+        <p className="control-muted">先测试并同步目录，再为工具映射 permission 或 public；未映射的工具不会开放。</p>
         <PageState {...mcp}><Table rowKey="id" dataSource={mcp.data?.items} scroll={{ x: 700 }} columns={[
           { title: "连接器", dataIndex: "name" },
           { title: "协议", dataIndex: "transport", render: (value) => <Tag>{value}</Tag> },

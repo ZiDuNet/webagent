@@ -18,3 +18,24 @@
   background: #0c1016;
   padding: 6px 10px;
 }
+
+/* ── v2 视觉收敛：统一间距、降低提示噪音 ───────────────────────── */
+.control-content{padding:24px clamp(18px,2.6vw,40px) 48px;max-width:1600px;margin:0 auto;flex:1 1 auto}
+.page-heading{margin:0 0 20px;gap:16px;align-items:flex-end}
+.page-heading h1{font-size:22px;font-weight:650;letter-spacing:-.4px;margin:0 0 6px}
+.page-heading p{font-size:12.5px;line-height:1.7;color:#8b98ab;max-width:680px}
+.control-card{border-radius:14px;padding:20px;margin-bottom:16px;background:#10151c}
+.control-card h2{font-size:14px;font-weight:600;letter-spacing:.2px;color:#cfd8e6;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+.control-grid{gap:16px}
+.ant-form-item{margin-bottom:16px}
+.ant-form-item .ant-form-item-label>label{font-size:12px;color:#a9b5c6}
+.ant-form-item-extra{font-size:11.5px!important;line-height:1.6;color:#718096!important;margin-top:4px}
+.ant-table{font-size:13px}
+.ant-table-thead>tr>th{font-size:11.5px!important;letter-spacing:.3px;color:#8695aa!important;font-weight:600!important;padding-block:10px!important;white-space:nowrap}
+.ant-table-tbody>tr>td{padding-block:13px!important}
+.ant-table-tbody>tr:hover>td{background:#141b24!important}
+.ant-btn{font-size:13px}
+.ant-tabs-nav{margin-bottom:18px}
+.ant-divider{font-size:12px;color:#8b98ab;margin:22px 0 14px}
+.control-muted{font-size:12px;color:#8b98ab}
+.ant-alert{border-radius:12px}

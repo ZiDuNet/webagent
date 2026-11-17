@@ -84,6 +84,7 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
       if (key in values && !String(values[key]).trim()) throw new AppError(`${key} 不能为空；如需恢复默认请使用默认值`, 422);
     }
     const next = { ...store.settings(), ...values };
+    if (values.tool_selection_mode !== undefined && !["none", "bm25", "decision"].includes(values.tool_selection_mode)) throw new AppError("工具筛选策略无效，只能是 none、bm25 或 decision", 422);
     if (values.tool_selection_mode) { next.bm25_enabled = values.tool_selection_mode === "bm25"; next.decision_enabled = values.tool_selection_mode === "decision"; }
     else if (values.bm25_enabled === true && values.decision_enabled === undefined) next.decision_enabled = false;
     else if (values.decision_enabled === true && values.bm25_enabled === undefined) next.bm25_enabled = false;
@@ -254,6 +255,10 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
   for (const method of ["POST", "PUT"] as const) app.route({ method, url: `${api}/admin/models${method === "PUT" ? "/:id" : ""}`, handler: async (request, reply) => {
     const previous = method === "PUT" ? store.model(Number((request.params as Row).id)) : undefined; if (method === "PUT" && !previous) throw new AppError("模型不存在", 404);
     const values = modelSchema.parse({ ...previous, ...request.body as Row });
+    if (previous && store.settings().decision_model_id === previous.id) {
+      if (values.model_kind !== "decision") throw new AppError("该模型正被决策筛选使用，不能改为其他类型；请先在运行设置中解除绑定", 409);
+      if (store.settings().decision_enabled && values.enabled === false) throw new AppError("决策筛选正在使用该模型，请先关闭决策或更换模型", 409);
+    }
     const provider = store.provider(values.provider_id); if (!provider) throw new AppError("供应商不存在", 422);
     const inferred = classifyModel(values.model_id); if (values.model_kind === "chat" && !["chat", "vision"].includes(inferred)) values.model_kind = inferred as typeof values.model_kind;
     values.supports_transcription = ["asr", "asr_realtime"].includes(values.model_kind);

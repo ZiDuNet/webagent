@@ -161,6 +161,16 @@ test("BM25 and decision can both be disabled, model bindings and unsafe extra pa
     assert.equal((await update({ bm25_enabled: false, decision_enabled: false, max_iterations: 0, max_tool_calls: 0 })).statusCode, 200);
     assert.equal(service.store.settings().max_iterations, 0);
     assert.equal((await update({ bm25_enabled: true, decision_enabled: true })).statusCode, 422);
+    assert.equal((await update({ tool_selection_mode: "garbage" })).statusCode, 422);
+    const decisionModel = service.store.config.insertModel({ name: "决策绑定", model_id: "decision-custom", provider_id: service.model!.provider_id, model_kind: "decision" });
+    service.store.setSettings({ decision_enabled: true, bm25_enabled: false, tool_selection_mode: "decision", decision_model_id: decisionModel.id, decision_min_count: 1 });
+    const changeKind = await service.app.inject({ method: "PUT", url: `/api/control/admin/models/${decisionModel.id}`, headers: { cookie }, payload: { model_kind: "chat", model_id: "plain-chat" } });
+    assert.equal(changeKind.statusCode, 409, changeKind.body);
+    const disableBound = await service.app.inject({ method: "PUT", url: `/api/control/admin/models/${decisionModel.id}`, headers: { cookie }, payload: { enabled: false } });
+    assert.equal(disableBound.statusCode, 409, disableBound.body);
+    assert.equal((await update({ decision_enabled: false, bm25_enabled: false, tool_selection_mode: "none" })).statusCode, 200);
+    const disableUnbound = await service.app.inject({ method: "PUT", url: `/api/control/admin/models/${decisionModel.id}`, headers: { cookie }, payload: { enabled: false } });
+    assert.equal(disableUnbound.statusCode, 200, disableUnbound.body);
     assert.equal((await update({ asr_model_id: service.model!.id })).statusCode, 422);
     const forbidden = await service.app.inject({ method: "PUT", url: `/api/control/admin/models/${service.model!.id}`, headers: { cookie }, payload: { extra_params: { extra_body: { tools: [] } } } });
     assert.equal(forbidden.statusCode, 422);
@@ -263,6 +273,11 @@ test("decision scoring changes the primary model's authorized tool loadout and e
     assert.ok(tools.includes("business_search")); assert.ok(tools.includes("ask_user")); assert.equal(tools.includes("business_update"), false); assert.equal(tools.includes("tool_search"), false);
     const diagnostics = service.runs.diagnostics(run.id); assert.ok(diagnostics.events.some((event) => event.name === "decision.diagnostics"));
     assert.equal(JSON.stringify(service.store.all("SELECT payload FROM run_events WHERE name='decision.diagnostics'")).includes("查业务记录"), false);
+    const decisionCalls = service.store.all("SELECT * FROM llm_calls WHERE purpose='decision'");
+    assert.equal(decisionCalls.length, 1);
+    assert.equal(decisionCalls[0].status, "ok");
+    assert.equal(decisionCalls[0].input_tokens, 20);
+    assert.equal(decisionCalls[0].output_tokens, 2);
     service.store.setSettings({ admin_session_content: false }); assert.equal(service.runs.diagnostics(run.id).events.some((event) => event.name === "decision.diagnostics"), false);
     assert.throws(() => parseScores({ scores: { one: 1.2 } }, ["one"]), /0–1/);
     assert.equal(decisionConnection({ model_id: "decision-model-preview" }, { base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" }).endpoint, "https://dashscope.aliyuncs.com/compatible-mode/v1/systemone");

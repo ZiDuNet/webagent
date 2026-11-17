@@ -10,8 +10,8 @@ export function initializeEnv(destination, extend = false) {
   const defaults = {
     WEBAGENT_BIND_HOST: "127.0.0.1",
     WEBAGENT_PORT: "8000",
-    WEBAGENT_CHAT_PORT: "8080",
-    WEBAGENT_ADMIN_PORT: "8081",
+    WEBAGENT_SERVE_ADMIN: "1",
+    WEBAGENT_SERVE_CHAT: "1",
     WEBAGENT_SECRET_KEY: randomBytes(32).toString("base64url"),
     WEBAGENT_CONTROL_PASSWORD: randomBytes(18).toString("base64url"),
     WEBAGENT_DATA_DIR: "./data",

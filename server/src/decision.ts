@@ -72,11 +72,15 @@ export class Decision {
       const selectedTools = tools.filter((tool) => !settings.decision_tools || fixed.has(tool.name) || result.scores[`tool:${tool.name}`] >= settings.decision_threshold);
       const selectedSkills = skills.filter((skill) => !settings.decision_skills || result.scores[`skill:${skill.slug}`] >= settings.decision_threshold);
       emit("decision.completed", { used: true, model: model.name, candidates: candidates.length, selected_tools: selectedTools.map((tool) => tool.name), selected_skills: selectedSkills.map((skill) => skill.name), latency_ms: result.latency_ms, threshold: settings.decision_threshold });
-      emit("decision.diagnostics", { ...result, state, candidates });
+      emit("decision.diagnostics", { used: true, ...result, state, candidates });
       return { tools: selectedTools, skills: selectedSkills };
-    } catch {
+    } catch (error) {
       if (signal.aborted) throw new AppError("请求已取消");
-      emit("decision.completed", { used: false, fallback: true, reason: "决策失败，保留原已授权候选，不切换 BM25" });
+      const message = error instanceof Error ? error.message : String(error);
+      emit("decision.completed", { used: false, fallback: true, reason: "决策失败，保留原已授权候选", candidates: candidates.length });
+      // 诊断事件只保存在进程内并受 admin_session_content 控制，便于管理员定位失败原因；
+      // 持久化的 decision.completed 不写远端错误详情，避免把上游返回内容落库。
+      emit("decision.diagnostics", { used: false, error: message.slice(0, 1000), state, candidates });
       return { tools, skills };
     }
   }
