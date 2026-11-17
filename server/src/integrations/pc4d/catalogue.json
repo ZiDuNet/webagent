@@ -1,0 +1,527 @@
+[
+  {
+    "name": "pc4d_screen_pedestal",
+    "title": "综合管理-台座信息",
+    "description": "查询当前项目钢筋、制梁、存梁台座的容量和实际占用量，以及盖梁、立柱绑扎区、制作区、存放区的容量和占用统计。返回大屏区域定位信息。",
+    "path": "/pc/api/beam-screen/sys/pedestal",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "台座"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_capacity",
+    "title": "生产管理-产能分析",
+    "description": "查询当前项目最近七天制梁平均产量、每日完成量和生产区域台座上的构件、工序及空间位置。可按公路梁、下部结构、铁路梁和构件类型筛选。",
+    "path": "/pc/api/beam-screen/prod/output",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "生产"],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "data_type": {"type": "string", "description": "业务类别编码，1公路梁、2下部结构、3铁路梁；可用逗号组合，如1,3。不填按公路梁和铁路梁统计。", "pattern": "^[123](,[123])*$", "maxLength": 20},
+        "type": {"type": "string", "description": "构件类型编码，可用逗号组合；5盖梁、6立柱。不填沿用业务接口默认-1,1,2,3,4。", "pattern": "^(-1|[1-6])(,(-1|[1-6]))*$", "maxLength": 40}
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_formwork",
+    "title": "智能模板",
+    "description": "读取当前项目智能模板关联的台座、梁名称、设备名称、模板开关状态、最近开启时间及模型位置。只读取设备遥测和事件，不执行模板开合控制。",
+    "path": "/pc/api/beam-screen/formwork",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "设备监测"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_steam",
+    "title": "智能养护",
+    "description": "查询当前项目梁场养护台座、所养护的梁、生产线、温度、湿度及空间位置。温湿度来自业务平台关联设备的当前遥测，不发送养护控制指令。",
+    "path": "/pc/api/beam-screen/steam",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "养护"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_steam_fixed",
+    "title": "智能养护-固定蒸养室",
+    "description": "查询当前项目固定蒸养室、所在台座区域、室内梁清单、当前温湿度及空间位置，用于查看固定蒸养室的养护情况。",
+    "path": "/pc/api/beam-screen/steam/fixed",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "养护"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_tension",
+    "title": "公路-张拉情况",
+    "description": "查询当前项目公路梁张拉总构件数、孔束数、合格与不合格孔束数，以及正在张拉的梁和台座卡片。统计包含业务平台已接入的先张拉、后张拉数据。",
+    "path": "/pc/api/beam-screen/tension/case",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "张拉"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_grout",
+    "title": "压浆情况",
+    "description": "查询当前项目公路梁压浆构件数、孔束数、合格与不合格孔束数，以及正在压浆的梁、台座和作业时间卡片。",
+    "path": "/pc/api/beam-screen/grout/case",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "压浆"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_tension_details",
+    "title": "张拉详情",
+    "description": "分页查询当前项目公路梁张拉构件清单，包括梁名称、梁类型、张拉日期和浇筑日期；包含先张拉、后张拉分类。可按构件名称关键词筛选。",
+    "path": "/pc/api/beam-screen/tension/detail",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "张拉"],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "page": {"type": "integer", "description": "页码，从1开始。", "minimum": 1, "maximum": 100000, "default": 1},
+        "count": {"type": "integer", "description": "每页条数，默认20，最多100。", "minimum": 1, "maximum": 100, "default": 20},
+        "name": {"type": "string", "description": "构件名称关键词，支持中文、字母、数字、空格及常用构件编号符号。", "maxLength": 128, "pattern": "^[A-Za-z0-9一-鿿 _().#（）—/-]*$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_grout_details",
+    "title": "压浆详情",
+    "description": "分页查询当前项目公路梁压浆构件清单，包括梁名称、压浆日期、浇筑日期和记录总数。可按构件名称关键词筛选。",
+    "path": "/pc/api/beam-screen/grout/detail",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "压浆"],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "page": {"type": "integer", "description": "页码，从1开始。", "minimum": 1, "maximum": 100000, "default": 1},
+        "count": {"type": "integer", "description": "每页条数，默认20，最多100。", "minimum": 1, "maximum": 100, "default": 20},
+        "name": {"type": "string", "description": "构件名称关键词，支持中文、字母、数字、空格及常用构件编号符号。", "maxLength": 128, "pattern": "^[A-Za-z0-9一-鿿 _().#（）—/-]*$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_beam_curing",
+    "title": "智能养护",
+    "description": "查询当前项目指定梁的养护详情：桥梁名称、养护生产线和位置、开始和结束时间、持续秒数及当前温湿度。梁ID应来自当前项目的查询结果。",
+    "path": "/pc/api/beam-screen/maintain/info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "养护"],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "beamID": {"type": "integer", "description": "当前项目内的梁ID。", "minimum": 1},
+        "isEnd": {"type": "boolean", "description": "true查询已结束的历史养护；false查询当前养护，默认false。", "default": false}
+      },
+      "required": ["beamID"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_railway_tension",
+    "title": "铁路张拉卡片",
+    "description": "查询当前项目铁路梁正在张拉的台座卡片，包含梁ID、梁名称、张拉记录ID、开始和结束时间以及台座空间位置。",
+    "path": "/pc/api/beam-screen/railway/tension/case",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "铁路梁", "张拉"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_railway_grout",
+    "title": "铁路压浆卡片",
+    "description": "查询当前项目铁路梁正在压浆的台座卡片，包含梁ID、梁名称、压浆记录ID、开始和结束时间以及台座空间位置。",
+    "path": "/pc/api/beam-screen/railway/grout/case",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "铁路梁", "压浆"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_railway_tension_details",
+    "title": "铁路张拉详情",
+    "description": "分页查询当前项目铁路梁张拉清单，包括梁名称、张拉日期、浇筑日期和总数。可按构件名称关键词筛选。",
+    "path": "/pc/api/beam-screen/railway/tension/detail",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "铁路梁", "张拉"],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "page": {"type": "integer", "description": "页码，从1开始。", "minimum": 1, "maximum": 100000, "default": 1},
+        "count": {"type": "integer", "description": "每页条数，默认20，最多100。", "minimum": 1, "maximum": 100, "default": 20},
+        "name": {"type": "string", "description": "构件名称关键词，支持中文、字母、数字、空格及常用构件编号符号。", "maxLength": 128, "pattern": "^[A-Za-z0-9一-鿿 _().#（）—/-]*$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_railway_grout_details",
+    "title": "铁路压浆详情",
+    "description": "分页查询当前项目铁路梁压浆清单，包括梁名称、压浆日期、浇筑日期和总数。可按构件名称关键词筛选。",
+    "path": "/pc/api/beam-screen/railway/grout/detail",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "铁路梁", "压浆"],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "page": {"type": "integer", "description": "页码，从1开始。", "minimum": 1, "maximum": 100000, "default": 1},
+        "count": {"type": "integer", "description": "每页条数，默认20，最多100。", "minimum": 1, "maximum": 100, "default": 20},
+        "name": {"type": "string", "description": "构件名称关键词，支持中文、字母、数字、空格及常用构件编号符号。", "maxLength": 128, "pattern": "^[A-Za-z0-9一-鿿 _().#（）—/-]*$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_substructure_areas",
+    "title": "下部结构-产区情况",
+    "description": "查询当前项目下部结构产区已占用台座上的盖梁、立柱等构件，包含构件ID与名称、台座类型、所属桥梁和当前工序。",
+    "path": "/pc/api/beam-screen/substructure/area-list",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "下部结构"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_factory",
+    "title": "综合管理-工厂概况",
+    "description": "查询当前项目工厂的介绍文字、工厂图片和经纬度，用于了解当前管片工厂或梁场的基本概况。",
+    "path": "/pc/api/screen/sys/simple-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "项目概况"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_segment_production",
+    "title": "综合管理-生产信息",
+    "description": "查询当前项目管片在各生产工序类别上的数量分布，如钢筋、浇筑、抹面等；返回业务系统定义的工序名称和构件数量。",
+    "path": "/pc/api/screen/sys/prod-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "生产"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_yards",
+    "title": "综合管理-堆场信息",
+    "description": "查询当前项目管片堆场总容量、实际占用以及各堆场名称和实际库存；实际库存按管片环型的每环片数换算为环数。",
+    "path": "/pc/api/screen/sys/yard-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "堆场"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_segment_progress",
+    "title": "综合管理-生产&发货进度",
+    "description": "查询当前项目管片总环数、浇筑材料量、累计完成和发货环数，以及最近十二个月生产、发货月度序列。",
+    "path": "/pc/api/screen/sys/element-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "生产", "发货"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_segment_areas",
+    "title": "综合管理-区域统计",
+    "description": "查询当前项目管片生产区、蒸养区、水养区、堆场的总设施数、容量、实际占用及大屏区域位置，比较各区域的使用情况。",
+    "path": "/pc/api/screen/sys/area-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "区域统计"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_cameras",
+    "title": "综合管理-摄像头数据",
+    "description": "查询当前项目大屏关联的摄像头名称、设备标识及空间关联信息，用于了解摄像头分布；此工具不获取视频播放凭据或执行摄像头控制。",
+    "path": "/pc/api/screen/sys/camera",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "设备监测"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_engineering_completion",
+    "title": "生产管理-项目完成情况",
+    "description": "查询当前项目内各工程的钢筋笼完成环数、管片完成环数和发货环数，并返回工程ID与名称。工程ID可用于后续水养工程统计。",
+    "path": "/pc/api/screen/prod/engineer-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "生产"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_recent_tasks",
+    "title": "生产管理-近期任务完成情况",
+    "description": "查询当前项目近期钢筋笼、管片和发货任务，包含所属工程、任务日期、完成量与总量以及完成状态；日期范围由业务接口固定为近期任务。",
+    "path": "/pc/api/screen/prod/task-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "生产", "任务"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_mould_usage",
+    "title": "生产管理-模具使用情况",
+    "description": "查询当前项目启用模具的总数和正在占用的数量，了解管片模具整体使用情况。需要查看每套模具对应构件和工序时使用模具占用详情工具。",
+    "path": "/pc/api/screen/prod/mould-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "模具"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_recent_production",
+    "title": "生产管理-生产&发货情况",
+    "description": "查询当前项目最近一周管片生产和发货的逐日数量序列，用于趋势比较、统计图表及生产发货分析。",
+    "path": "/pc/api/screen/prod/details-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "生产", "发货"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_mould_details",
+    "title": "生产管理-模具占用情况",
+    "description": "查询当前项目每套启用管片模具的名称、所占用构件、环型、当前工序和RFID关联空间位置，用于定位模具及其生产状态。",
+    "path": "/pc/api/screen/prod/mould-detail",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "模具"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_engineering_progress",
+    "title": "生产管理-生产进度",
+    "description": "查询当前项目内各工程计划管片总量、已生产环数、已发货环数和累计进度，返回工程ID及名称，用于按工程比较生产交付进度。",
+    "path": "/pc/api/screen/prod/engineer-schedule",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "生产"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_pool_summary",
+    "title": "水养管理-水养池管片量统计",
+    "description": "查询当前项目水养池总容量、实际水养量、今日入池和出池、近七天入池统计，以及分工程的水养数量。接口字段In14沿用业务命名，源码实际按最近七天计算。",
+    "path": "/pc/api/screen/poll/poll-count",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "水养"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_pool_overdue",
+    "title": "水养管理-水养超期预警",
+    "description": "查询当前项目指定水养池内按入池时间排序的最多二十条管片养护记录，包含工程名称、环序号、入池日期和已养护天数。业务接口名称为超期预警，但源码未按超期阈值再次过滤。",
+    "path": "/pc/api/screen/poll/overtime",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "水养", "预警"],
+    "parameters": {
+      "type": "object",
+      "properties": {"poolID": {"type": "integer", "description": "当前项目水养池ID，可从水养池卡片查询结果中取得。", "minimum": 1}},
+      "required": ["poolID"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_pool_details",
+    "title": "水养管理-水养池详情",
+    "description": "查询当前项目指定水养池的容量、实际养护量、关联环型、温度、pH和空间位置。水养池ID应来自本项目水养池卡片结果。",
+    "path": "/pc/api/screen/poll/poll-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "水养"],
+    "parameters": {
+      "type": "object",
+      "properties": {"poolID": {"type": "integer", "description": "当前项目水养池ID。", "minimum": 1}},
+      "required": ["poolID"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_pool_cards",
+    "title": "水养管理-水养池卡片数据",
+    "description": "查询当前项目所有启用水养池的ID、名称、容量、实际水养量、温度、pH及位置，为水养池对比和详情查询提供池ID。",
+    "path": "/pc/api/screen/poll/poll-card",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "水养"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_pool_engineering",
+    "title": "水养管理-项目统计",
+    "description": "查询当前项目内指定工程按管片规格拆分的实际水养量、今日入池量、今日出池量和近七天入池量。engineID是本项目工程ID，不是项目PID或企业ID。",
+    "path": "/pc/api/screen/poll/engine-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "水养"],
+    "parameters": {
+      "type": "object",
+      "properties": {"engineID": {"type": "integer", "description": "当前项目内的工程ID，可从生产管理的工程完成情况或生产进度结果取得。", "minimum": 1}},
+      "required": ["engineID"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_curing_summary",
+    "title": "蒸养管理-蒸养窑管片量统计",
+    "description": "查询当前项目蒸养窑总容量、实际养护量、分窑占用及最近十二个月蒸养数量。可按当前项目生产线ID筛选蒸养窑。",
+    "path": "/pc/api/screen/curing/curing-count",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "蒸养"],
+    "parameters": {
+      "type": "object",
+      "properties": {"LineID": {"type": "integer", "description": "当前项目生产线ID；不填查询全部生产线。", "minimum": 1}},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_curing_overdue",
+    "title": "蒸养管理-蒸养超期预警",
+    "description": "查询当前项目蒸养中的最多二十条管片记录，按入窑时间从早到晚排序，包含构件编号、工程、蒸养窑和已蒸养小时数。业务接口未按超期阈值再次过滤。",
+    "path": "/pc/api/screen/curing/overtime",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "蒸养", "预警"],
+    "parameters": {
+      "type": "object",
+      "properties": {"LineID": {"type": "integer", "description": "当前项目生产线ID；不填查询全部生产线。", "minimum": 1}},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_curing_devices",
+    "title": "蒸养管理-蒸养窑设备运行情况",
+    "description": "查询当前项目蒸养监测设备的工作与离线数量，以及工作蒸养窑的温度；工作状态由设备最近遥测时间判定。可按生产线筛选。",
+    "path": "/pc/api/screen/curing/device",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "蒸养", "设备监测"],
+    "parameters": {
+      "type": "object",
+      "properties": {"LineID": {"type": "integer", "description": "当前项目生产线ID；不填查询全部生产线。", "minimum": 1}},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_curing_details",
+    "title": "蒸养管理-蒸养窑&设备详情",
+    "description": "查询当前项目蒸养窑容量、实际管片数、设备状态、当前温湿度及约二十四小时温湿度曲线。可按生产线筛选；曲线数据可能较大。",
+    "path": "/pc/api/screen/curing/detail",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "蒸养", "设备监测"],
+    "parameters": {
+      "type": "object",
+      "properties": {"LineID": {"type": "integer", "description": "当前项目生产线ID；不填查询全部生产线。", "minimum": 1}},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_beam_plan_types",
+    "title": "太华-梁类型计划分析",
+    "description": "查询当前项目按梁类型汇总的本月计划制梁、计划架梁、实际完成数量，以及制梁和架梁的提前、滞后数量。适用于已配置制架梁计划的梁场。",
+    "path": "/pc/api/screen/beam-template/statistics",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "计划"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_beam_warnings",
+    "title": "太华-月度制架梁预警",
+    "description": "读取当前项目未按计划制梁、存梁时间过长及制梁延期影响架梁计划的预警，包含梁ID、名称、桥梁及已填写的原因说明。只查询，不修改预警原因。",
+    "path": "/pc/api/screen/beam/month-warning",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "计划", "预警"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_beam_warning_details",
+    "title": "太华-月度制架梁预警弹窗",
+    "description": "分页读取当前项目梁的制梁、架梁计划起止时间、实际起止时间、状态及原因说明。可按梁ID、精确梁名称或桥梁ID筛选，用于比较计划与实际进度。",
+    "path": "/pc/api/screen/beam/warning-list",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "计划", "预警"],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "page": {"type": "integer", "description": "页码，从1开始，默认1。", "minimum": 1, "maximum": 100000, "default": 1},
+        "count": {"type": "integer", "description": "每页条数，默认20，最多100。", "minimum": 1, "maximum": 100, "default": 20},
+        "BeamID": {"type": "integer", "description": "当前项目的梁ID。", "minimum": 1},
+        "BeamName": {"type": "string", "description": "精确匹配的梁名称。", "maxLength": 128},
+        "SegmentID": {"type": "integer", "description": "当前项目的桥梁ID。", "minimum": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_beam_lines",
+    "title": "太华-生产线生产进度",
+    "description": "查询当前项目按业务大屏20m、30m区域配置展示的生产线、台座、所在梁和当前工序。该接口存在项目专用分组，空结果不表示整个项目没有生产。",
+    "path": "/pc/api/screen/th-Lines",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "生产线"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_bridges",
+    "title": "太华-桥梁制架梁数量",
+    "description": "查询当前项目各桥梁ID、桥梁名称、梁总数、计划制梁结束时间和计划架梁开始时间，用于桥梁级计划概览。时间字段以业务返回为准。",
+    "path": "/pc/api/screen/th-segment-list",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "桥梁", "计划"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_enterprise_relation",
+    "title": "项目关联企业信息",
+    "description": "查询当前项目关联的企业标识；未关联时返回业务约定值。只读取当前项目关联信息，不查询该企业的其他项目数据。",
+    "path": "/pc/api/screen/enterprise/rel-project",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "项目概况"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_transport_progress",
+    "title": "运梁管理-桥梁整体进度",
+    "description": "查询当前项目各桥梁梁总数、未生产、制梁中、已制梁、存梁、可架设和已架设数量及架设状态，用于运架梁总体进度分析。",
+    "path": "/pc/api/screen/transportation/beam-progress",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "运架梁"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_transport_vehicles",
+    "title": "运梁管理-架桥机运梁车设备列表",
+    "description": "查询当前项目架桥机和运梁车的ID、编号、空载或运梁状态、关联梁和桥梁、车辆定位、设备遥测、距离与预计时长。只查询，不调度或控制车辆。",
+    "path": "/pc/api/screen/transportation/vehicle-list",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "运架梁", "设备监测"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_transport_history",
+    "title": "运梁管理-历史运梁信息",
+    "description": "查询当前项目指定运梁车最近十条运梁记录，包含梁名称、桥梁、起止桥墩、制梁结束和架梁结束时间。车辆ID应从本项目运梁车设备列表取得。",
+    "path": "/pc/api/screen/transportation/vehicle-history-list",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "运架梁"],
+    "parameters": {
+      "type": "object",
+      "properties": {"id": {"type": "integer", "description": "当前项目运梁车ID，可从运梁车设备列表结果取得；不是梁ID。", "minimum": 1}},
+      "required": ["id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pc4d_screen_erection_history",
+    "title": "运梁管理-近期架梁记录",
+    "description": "读取当前项目按架梁开始时间排序的最近十条梁记录，包含梁ID与名称、所属桥梁、起止桥墩和架梁结束时间。未结束时间不应解释为已架设完成。",
+    "path": "/pc/api/screen/transportation/erect-history-list",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "运架梁"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_project",
+    "title": "运梁管理-项目信息",
+    "description": "查询当前项目名称、项目模型概况、项目锚点与空间信息及制梁区域位置，用于大屏项目个性化标识和项目概况。",
+    "path": "/pc/api/screen/transportation/project-info",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "梁场", "项目概况"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "pc4d_screen_segment_lines",
+    "title": "管片-综合管理-生产线生产统计",
+    "description": "查询当前项目管片各生产线的ID、名称、生产中管片数、蒸养中管片数、工序数、蒸养窑数量与最大容量，以及大屏位置配置。生产线ID可用于蒸养类工具筛选。",
+    "path": "/pc/api/screen/production-line/list",
+    "channels": ["screen"],
+    "tags": ["大屏数据", "管片", "生产线"],
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  }
+]

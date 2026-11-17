@@ -32,9 +32,13 @@ export class PiRuntime {
   }
   async shutdown() { this.backgroundAbort.abort(); await Promise.allSettled([...this.background]); }
   assistants(user: Identity) {
+    // 接入 Token / PC4D 渠道已经把可用助手收窄到明确白名单；此时不再用
+    // allowed_roles 二次过滤，避免管理员改角色后把已绑定 Token 直接挡成 403。
+    const fixedByToken = Boolean(user.assistant_id) || Boolean(user.allowed_assistant_ids?.length);
     return this.store.assistants()
       .filter((assistant) => assistant.enabled !== false)
-      .filter((assistant) => (!user.assistant_id || Number(assistant.id) === Number(user.assistant_id)) && ((Array.isArray(assistant.allowed_roles) ? assistant.allowed_roles : ["*"]).includes("*") || (Array.isArray(assistant.allowed_roles) ? assistant.allowed_roles : ["*"]).includes(user.role)));
+      .filter((assistant) => (!user.assistant_id || Number(assistant.id) === Number(user.assistant_id)) && (!user.allowed_assistant_ids || user.allowed_assistant_ids.includes(Number(assistant.id))) && (fixedByToken || (Array.isArray(assistant.allowed_roles) ? assistant.allowed_roles : ["*"]).includes("*") || (Array.isArray(assistant.allowed_roles) ? assistant.allowed_roles : ["*"]).includes(user.role)))
+      .sort((left, right) => Number(Number(right.id) === user.default_assistant_id) - Number(Number(left.id) === user.default_assistant_id));
   }
   assistant(user: Identity, id?: number) {
     if (user.assistant_id && id && id !== user.assistant_id) throw new AppError("当前接入 Token 已绑定助手，不能切换", 403);
@@ -282,8 +286,17 @@ export class PiRuntime {
       if (event.type === "auto_retry_start") emit("retry", { attempt: event.attempt, delay_ms: event.delayMs, message: "供应商请求异常，PI 正在退避重试" });
       if (event.type === "compaction_start") emit("run.phase", { phase: "compaction", title: "正在整理上下文", description: "保留原始聊天记录，生成模型下一次请求使用的摘要" });
       if (event.type === "compaction_end") {
-        this.store.insert("compaction_events", { session_id: sessionId, trigger: event.reason, before_tokens: event.result?.tokensBefore || 0, after_tokens: event.result ? estimate(manager.buildSessionContext().messages) : 0, summary_model: settings.compaction_model_id ? this.store.model(settings.compaction_model_id)?.name || "" : model.name, ok: Boolean(event.result), error: event.errorMessage || "" });
+        const afterTokens = event.result ? estimate(manager.buildSessionContext().messages) : 0;
+        this.store.insert("compaction_events", { session_id: sessionId, trigger: event.reason, before_tokens: event.result?.tokensBefore || 0, after_tokens: afterTokens, summary_model: settings.compaction_model_id ? this.store.model(settings.compaction_model_id)?.name || "" : model.name, ok: Boolean(event.result), error: event.errorMessage || "" });
         if (event.result) this.store.run("UPDATE sessions SET summary=?,last_compacted_at=?,compaction_count=compaction_count+1 WHERE id=?", [event.result.summary, now(), sessionId]);
+        emit("run.phase", {
+          phase: "compaction_done",
+          title: event.result ? "上下文已压缩" : "上下文压缩未完成",
+          description: event.result ? "历史聊天记录仍保留，仅替换模型下一次请求使用的上下文摘要" : event.errorMessage || "压缩失败，已保留原上下文",
+          ok: Boolean(event.result),
+          ...(event.result ? { context: { context_tokens: afterTokens } } : {}),
+          compaction: { before_tokens: event.result?.tokensBefore || 0, after_tokens: afterTokens }
+        });
       }
       if (event.type === "entry_appended") this.save(manager, sessionId);
     });
@@ -300,9 +313,7 @@ export class PiRuntime {
     if (!model?.enabled || !model.provider_enabled || !["chat", "vision"].includes(model.model_kind)) throw new AppError("没有可用对话模型；请管理员先配置，系统不会伪造回复", 422);
     this.providers.connection(model.provider_id);
     const dayStart = new Date(new Date().setUTCHours(0, 0, 0, 0)).toISOString();
-    const used = user.access_token_id
-      ? this.store.one("SELECT coalesce(sum(lc.total_tokens),0) AS n FROM llm_calls lc JOIN sessions s ON s.id=lc.session_id WHERE s.owner_key=? AND lc.created_at>=?", [user.owner_key, dayStart])!.n
-      : this.store.one("SELECT coalesce(sum(total_tokens),0) AS n FROM llm_calls WHERE username=? AND created_at>=?", [user.username, dayStart])!.n;
+    const used = this.store.one("SELECT coalesce(sum(lc.total_tokens),0) AS n FROM llm_calls lc JOIN sessions s ON s.id=lc.session_id WHERE s.owner_key=? AND lc.created_at>=?", [user.owner_key, dayStart])!.n;
     if (settings.user_daily_token_limit && used >= settings.user_daily_token_limit) throw new AppError("已达到今日模型用量限额", 429);
     if (user.daily_token_limit && used >= user.daily_token_limit) throw new AppError("已达到当前接入 Token 的今日用量限额", 429);
     const text = continuation?.text || input.message?.trim() || [...input.messages || []].reverse().find((item) => item.role === "user")?.content;
@@ -425,7 +436,7 @@ export class PiRuntime {
     if (!cancelled) {
       if (selected.some((value: string) => !valid.has(value))) throw new AppError("回答包含无效选项", 422);
       if (data.selection === "single" && selected.length > 1) throw new AppError("该问题只能选择一个选项", 422);
-      if (data.required && !selected.length && !freeText) throw new AppError("请选择一个选项或填写补充内容", 422);
+      if (!selected.length && !freeText) throw new AppError("请选择一个选项或填写补充内容", 422);
       if (freeText && data.allow_free_text === false) throw new AppError("该问题不允许自由文本回答", 422);
     }
     return { ...current, cancelled, selected, freeText };

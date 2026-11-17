@@ -107,7 +107,8 @@ export default function AssistantsPage() {
     const id = values.id || draft?.id;
     try {
       // 显式带上徽标：既保证上传后一定写入，也保证「移除」会用 null 覆盖旧值。
-      await controlRequest(`/admin/assistants${id ? `/${id}` : ""}`, { ...values, welcome_logo: logoPath ?? null }, id ? "PUT" : "POST");
+      const allowedRoles = Array.isArray(values.allowed_roles) && values.allowed_roles.length ? values.allowed_roles : ["*"];
+      await controlRequest(`/admin/assistants${id ? `/${id}` : ""}`, { ...values, allowed_roles: allowedRoles, welcome_logo: logoPath ?? null }, id ? "PUT" : "POST");
       setDraft(null);
       await resource.refresh();
     } catch (failure) {
@@ -208,7 +209,7 @@ export default function AssistantsPage() {
         <Form form={form} layout="vertical" onFinish={save}>
           <div className="control-grid">
             <Form.Item name="name" label="助手名称" rules={[{ required: true }]}><Input maxLength={100} /></Form.Item>
-            <Form.Item name="allowed_roles" label="可用业务角色" extra="* 表示所有当前业务账号；仍受用户自身权限约束。">
+            <Form.Item name="allowed_roles" label="可见业务角色（多助手模式）" extra="接入 Token 已固定助手时忽略此项，通道助手由连接器自动维护（如 pc4d_screen / pc4d_user）。仅在 Token 未绑定助手、需要按角色筛选可用助手时生效；留空等同 *。">
               <Select mode="tags" options={["*", "admin", "viewer", "operator", "auditor"].map((value) => ({ value }))} />
             </Form.Item>
           </div>
@@ -283,11 +284,11 @@ export default function AssistantsPage() {
           </div>
 
           <Divider>语音与朗读覆盖</Divider>
-          <p className="control-muted">所有槽位留空都继承「运行设置 → 语音与朗读」。语音输入是普通 STT，右上角语音通话才使用实时 STT/TTS。</p>
+          <p className="control-muted">所有槽位留空都继承「运行设置 → 语音与朗读」。输入框默认走文件 STT；只有「输入框识别策略」明确选择实时才在录音中回填，右上角语音通话始终使用实时 STT/TTS。</p>
           <div className="control-grid">
             {voiceModel("asr_model_id", "文件 STT", ["asr"], "停止录音后识别并填入输入框。")}
-            {voiceModel("asr_realtime_model_id", "实时 STT（输入框）", ["asr_realtime"], "录音时逐步回填输入框，不自动发送。")}
-            <Form.Item name="voice_input_mode" label="输入框识别策略" extra="留空继承全局；自动模式优先实时，失败回退文件。">
+            {voiceModel("asr_realtime_model_id", "实时 STT（输入框）", ["asr_realtime"], "仅自动策略缺少文件 STT 时兜底，或明确选择实时识别时使用。")}
+            <Form.Item name="voice_input_mode" label="输入框识别策略" extra="留空继承全局；自动模式优先文件 STT，文件不可用时回退实时。">
               <Select allowClear placeholder="继承全局" options={[{ value: "auto", label: "自动" }, { value: "realtime", label: "仅实时" }, { value: "file", label: "仅文件" }]} />
             </Form.Item>
             {inherited("voice_auto_send", "识别后自动发送", "留空继承全局；默认关闭，识别结果只回填输入框。")}

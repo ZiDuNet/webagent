@@ -8,6 +8,7 @@ import { pcmFromWav } from "../src/speech.js";
 import { drainSpeechText, isLikelyEcho, speakableText } from "../src/speech-text.js";
 import { fixture, mockServer, sse } from "./helpers.js";
 import type { Row } from "../src/types.js";
+import { voiceCredential } from "../src/voice.js";
 
 test("speech text drains complete sentences and caps long unpunctuated fragments", () => {
   const first = drainSpeechText("第一句。第二", 20);
@@ -24,6 +25,39 @@ test("speech text drains complete sentences and caps long unpunctuated fragments
   const soft = drainSpeechText("前半段内容，后半段内容，第三段内容继续", 16);
   assert.ok(soft.chunks.every((chunk) => chunk.length <= 16));
   assert.ok(soft.chunks[0].endsWith("，"));
+});
+
+test("voice websocket accepts a business bearer carried in a subprotocol", async () => {
+  const request = { headers: { "sec-websocket-protocol": "webagent.voice, webagent.token.pc4d_short-lived" } } as unknown as Parameters<typeof voiceCredential>[0];
+  assert.equal(voiceCredential(request), "pc4d_short-lived");
+  assert.equal(voiceCredential({ headers: {} } as unknown as Parameters<typeof voiceCredential>[0]), "");
+
+  const service = await fixture();
+  try {
+    const session = await service.session();
+    await service.app.listen({ host: "127.0.0.1", port: 0 });
+    const address = service.app.server.address() as { port: number };
+    const url = `ws://127.0.0.1:${address.port}/api/agent/voice/dictate?session_id=${session.id}`;
+    const encoded = Buffer.from(service.credential("user1")).toString("base64url");
+    const authorized = new WebSocket(url, ["webagent.voice", `webagent.token.${encoded}`]);
+    const messages: Row[] = [];
+    authorized.on("message", (raw) => messages.push(JSON.parse(raw.toString())));
+    await new Promise<void>((resolve, reject) => { authorized.once("open", resolve); authorized.once("error", reject); });
+    try {
+      assert.equal(authorized.protocol, "webagent.voice");
+      await waitFor(messages, (message) => message.type === "connected");
+    } finally {
+      authorized.terminate();
+    }
+
+    const anonymous = new WebSocket(url, ["webagent.voice"]);
+    const rejected: Row[] = [];
+    anonymous.on("message", (raw) => rejected.push(JSON.parse(raw.toString())));
+    await new Promise<void>((resolve) => anonymous.once("close", () => resolve()));
+    assert.equal(rejected[0]?.type, "error");
+  } finally {
+    await service.close();
+  }
 });
 
 test("speech text excludes markdown tables, code, HTML and URLs", () => {

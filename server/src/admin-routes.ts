@@ -24,7 +24,7 @@ const name = z.string().trim().min(1).max(100);
 const providerSchema = z.object({ name, provider_type: z.literal("openai_compatible").default("openai_compatible"), base_url: z.string().max(1000), api_key: z.string().max(5000).optional(), clear_api_key: z.boolean().optional(), extra_headers: z.record(z.string(), z.string()).default({}), enabled: z.boolean().default(true), timeout_seconds: z.number().min(3).max(180).default(90) });
 const modelSchema = z.object({ provider_id: z.number().int().positive(), name, model_id: z.string().trim().min(1).max(200), model_kind: z.enum(kinds).default("chat"), enabled: z.boolean().default(true), is_default: z.boolean().default(false), sort_order: z.number().int().min(0).max(10000).default(100), capabilities: z.array(z.enum(["text", "image"])).default(["text"]), supports_tools: z.boolean().default(true), context_window: z.number().int().min(0).max(10000000).default(0), max_output_tokens: z.number().int().min(0).max(1000000).default(0), temperature: z.number().min(0).max(2).default(0.3), top_p: z.number().min(0).max(1).default(1), input_price_per_1m: z.number().min(0).max(100000).default(0), output_price_per_1m: z.number().min(0).max(100000).default(0), supports_reasoning: z.boolean().default(false), reasoning_style: z.literal("effort").default("effort"), reasoning_efforts: z.array(z.enum(["off", "none", "minimal", "low", "medium", "high", "xhigh"])).default([]), default_reasoning_effort: z.string().max(10).default(""), supports_reasoning_summary: z.boolean().default(true), supports_transcription: z.boolean().default(false), metadata_source: z.string().max(40).default("manual"), extra_params: z.record(z.string(), z.unknown()).default({}) });
 const assistantSchema = z.object({
-  name, description: z.string().max(500).default(""), system_prompt: z.string().max(20000).default(""), model_row_id: z.number().int().positive().nullable().optional(), allow_model_switch: z.boolean().default(true), tool_names: z.array(z.string()).max(500).default([]), skill_slugs: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/)).max(500).default([]), max_steps: z.number().int().nonnegative().default(0), max_tool_calls: z.number().int().nonnegative().default(0), max_run_seconds: z.number().int().min(0).max(3600).default(0), context_max_tokens: z.number().int().nonnegative().default(0), memory_enabled: z.boolean().default(true), allowed_roles: z.array(z.string()).default(["*"]),
+  name, description: z.string().max(500).default(""), system_prompt: z.string().max(20000).default(""), model_row_id: z.number().int().positive().nullable().optional(), allow_model_switch: z.boolean().default(true), tool_names: z.array(z.string()).max(500).default([]), skill_slugs: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/)).max(500).default([]), max_steps: z.number().int().nonnegative().default(0), max_tool_calls: z.number().int().nonnegative().default(0), max_run_seconds: z.number().int().min(0).max(3600).default(0), context_max_tokens: z.number().int().nonnegative().default(0), memory_enabled: z.boolean().default(true), allowed_roles: z.array(z.string().max(60)).max(50).default(["*"]).transform((roles) => (roles.length ? roles : ["*"])),
   asr_model_id: z.number().int().positive().nullable().default(null),
   asr_realtime_model_id: z.number().int().positive().nullable().default(null),
   tts_model_id: z.number().int().positive().nullable().default(null),
@@ -48,6 +48,7 @@ const skillSchema = z.object({ name, slug: z.string().regex(/^[a-z0-9][a-z0-9-]{
 const accessTokenSchema = z.object({
   name: z.string().trim().min(1).max(80),
   assistant_id: z.number().int().positive(),
+  channel: z.enum(["chat", "screen", "web", "miniprogram"]).default("chat"),
   enabled: z.boolean().default(true),
   expires_at: z.string().datetime().nullable().optional(),
   allowed_origins: z.array(z.string().url().max(500)).max(20).default([]),
@@ -123,7 +124,16 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     store.audit(auth.admin(request).username, "modelsdev.refresh", "models.dev", { count });
     return { ok: true, models: count, status: await providers.catalogueStatus() };
   });
-  const publicAccessToken = (row: Row) => { const { token_hash, ...safe } = row; return safe; };
+  const revealToken = (row: Row) => {
+    const cipher = String(row.token_cipher || "");
+    if (!cipher) return "";
+    try { return decrypt(cipher); } catch { return ""; }
+  };
+  const publicAccessToken = (row: Row) => {
+    const { token_hash, token_cipher, ...safe } = row;
+    const value = revealToken(row);
+    return { ...safe, token: value, token_available: Boolean(value) };
+  };
   const accessTokenValues = (input: Row, previous?: Row) => {
     const values = accessTokenSchema.parse({ ...previous, ...input });
     if (!store.assistant(values.assistant_id)) throw new AppError("Token 绑定的助手不存在", 422);
@@ -137,10 +147,10 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
   app.post(`${api}/admin/access-tokens`, async (request, reply) => {
     const values = accessTokenValues(request.body as Row);
     const raw = `wa_${generateToken()}`;
-    const current = store.insert("access_tokens", { ...values, expires_at: values.expires_at || null, token_hash: digest(raw), token_prefix: raw.slice(0, 12), created_by: auth.admin(request).username });
+    const current = store.insert("access_tokens", { ...values, expires_at: values.expires_at || null, token_hash: digest(raw), token_prefix: raw.slice(0, 12), token_cipher: encrypt(raw), created_by: auth.admin(request).username });
     store.audit(auth.admin(request).username, "access_token.create", String(current.id), { name: current.name, assistant_id: current.assistant_id });
     reply.code(201);
-    return { token: raw, access_token: publicAccessToken(current), notice: "Token 只显示这一次，请立即保存。" };
+    return { token: raw, access_token: publicAccessToken(current), notice: "Token 已加密保存，可随时在接入与安全页查看和复制。" };
   });
   for (const method of ["PUT"] as const) app.route({ method, url: `${api}/admin/access-tokens/:id`, handler: async (request) => {
     const id = Number((request.params as Row).id);
@@ -157,12 +167,12 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     if (!previous) throw new AppError("接入 Token 不存在", 404);
     const raw = `wa_${generateToken()}`;
     store.transaction(() => {
-      store.update("access_tokens", id, { token_hash: digest(raw), token_prefix: raw.slice(0, 12) });
+      store.update("access_tokens", id, { token_hash: digest(raw), token_prefix: raw.slice(0, 12), token_cipher: encrypt(raw) });
       store.run("DELETE FROM access_sessions WHERE access_token_id=?", [id]);
     });
     store.audit(auth.admin(request).username, "access_token.rotate", String(id));
     reply.code(201);
-    return { token: raw, notice: "旧 Token 已立即失效，新 Token 只显示这一次。" };
+    return { token: raw, notice: "旧 Token 已立即失效，新 Token 已加密保存，可随时查看。" };
   });
   app.delete(`${api}/admin/access-tokens/:id`, async (request) => {
     const id = Number((request.params as Row).id);
@@ -175,7 +185,11 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     store.audit(auth.admin(request).username, "access_token.delete", String(id), { name: row.name });
     return { ok: true };
   });
-  const publicControlToken = (row: Row) => { const { token_hash, ...safe } = row; return safe; };
+  const publicControlToken = (row: Row) => {
+    const { token_hash, token_cipher, ...safe } = row;
+    const value = revealToken(row);
+    return { ...safe, token: value, token_available: Boolean(value) };
+  };
   const controlTokenValues = (input: Row, previous?: Row) => {
     const values = controlTokenSchema.parse({ ...previous, ...input });
     if (values.expires_at && new Date(values.expires_at).getTime() <= Date.now()) throw new AppError("过期时间必须晚于当前时间", 422);
@@ -186,10 +200,10 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     const values = controlTokenValues(request.body as Row);
     const raw = `wac_${generateToken()}`;
     const admin = auth.admin(request);
-    const current = store.insert("control_tokens", { ...values, expires_at: values.expires_at || null, token_hash: digest(raw), token_prefix: raw.slice(0, 12), created_by: admin.username });
+    const current = store.insert("control_tokens", { ...values, expires_at: values.expires_at || null, token_hash: digest(raw), token_prefix: raw.slice(0, 12), token_cipher: encrypt(raw), created_by: admin.username });
     store.audit(admin.username, "control_token.create", String(current.id), { name: current.name });
     reply.code(201);
-    return { token: raw, control_token: publicControlToken(current), notice: "管理 Token 只显示这一次，请立即保存。" };
+    return { token: raw, control_token: publicControlToken(current), notice: "管理 Token 已加密保存，可随时在接入与安全页查看和复制。" };
   });
   app.put(`${api}/admin/control-tokens/:id`, async (request) => {
     const id = Number((request.params as Row).id);
@@ -206,10 +220,10 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     if (!previous) throw new AppError("管理 Token 不存在", 404);
     const admin = auth.admin(request);
     const raw = `wac_${generateToken()}`;
-    store.update("control_tokens", id, { token_hash: digest(raw), token_prefix: raw.slice(0, 12) });
+    store.update("control_tokens", id, { token_hash: digest(raw), token_prefix: raw.slice(0, 12), token_cipher: encrypt(raw) });
     store.audit(admin.username, "control_token.rotate", String(id));
     reply.code(201);
-    return { token: raw, notice: "旧管理 Token 已立即失效，新 Token 只显示这一次。" };
+    return { token: raw, notice: "旧管理 Token 已立即失效，新 Token 已加密保存，可随时查看。" };
   });
   app.delete(`${api}/admin/control-tokens/:id`, async (request) => {
     const id = Number((request.params as Row).id);
@@ -279,12 +293,12 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     try {
       if (model.model_kind === "decision") { const result = await decision.score(model, "查询今天需要处理的业务记录", [{ id: "record_query", description: "查询业务记录和处理状态" }]); return { ok: true, ...result, message: "决策接口返回了有效评分" }; }
       if (["tts", "tts_realtime"].includes(model.model_kind)) {
-        const result = await speech.synthesize(model, body.text || "你好，这是一条 WebAgent 语音合成测试。");
+        const result = await speech.synthesize(model, body.text || "你好，这是一条 WebAgent 语音合成测试。", {}, undefined, { username: "管理员 · 模型测试" });
         const wav = result.mime_type === "audio/pcm" ? pcmToWav(result.bytes, Number((result as Row).sample_rate || 24000)) : result.bytes;
         const mime = result.mime_type === "audio/pcm" ? "audio/wav" : result.mime_type;
         return { ok: true, audio: { data_url: `data:${mime};base64,${wav.toString("base64")}`, mime_type: mime }, protocol: result.protocol, sample_rate: (result as Row).sample_rate, latency_ms: Date.now() - started };
       }
-      if (model.model_kind.startsWith("asr")) { if (!body.audio_data_url) throw new AppError("STT 测试请录音或上传音频，不使用静音冒充成功", 422); return { ok: true, ...await speech.transcribe(model, body.audio_data_url) }; }
+      if (model.model_kind.startsWith("asr")) { if (!body.audio_data_url) throw new AppError("STT 测试请录音或上传音频，不使用静音冒充成功", 422); return { ok: true, ...await speech.transcribe(model, body.audio_data_url, "zh", undefined, { username: "管理员 · 模型测试" }) }; }
       if (model.model_kind === "image_generation") { const provider = providers.connection(model.provider_id); const extras = Object.fromEntries(Object.entries(model.extra_params).filter(([key]) => ["size", "quality", "style", "background", "output_format", "output_compression", "response_format", "moderation"].includes(key))); const payload = await requestJson(`${provider.base_url}/images/generations`, { method: "POST", headers: { ...providerHeaders(provider), "Content-Type": "application/json" }, body: JSON.stringify({ size: "1024x1024", ...extras, model: model.model_id, prompt: body.prompt || "A blue square on a white background", n: 1 }), signal: AbortSignal.timeout(provider.timeout_seconds * 1000) }); const image = payload.data?.[0]; if (!image) throw new AppError("生图接口未返回图片", 502); return { ok: true, image: image.b64_json ? { data_url: `data:image/${extras.output_format === "jpeg" ? "jpeg" : extras.output_format === "webp" ? "webp" : "png"};base64,${image.b64_json}` } : { url: image.url }, latency_ms: Date.now() - started }; }
       if (model.model_kind === "embedding") {
         const provider = providers.connection(model.provider_id);
@@ -306,7 +320,7 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
       const result = await providers.complete(model, [{ role: "user", content: body.message || "Hi" }], "test"); if (!result.content) throw new AppError("模型返回空回复", 502); return { ok: true, reply: result.content, latency_ms: Date.now() - started, usage: result.usage };
     } catch (error) { return { ok: false, message: error instanceof Error ? error.message : "模型测试失败", latency_ms: Date.now() - started }; }
   });
-  app.post(`${api}/admin/models/:id/transcribe`, async (request) => { const model = store.model(Number((request.params as Row).id)); if (!model) throw new AppError("模型不存在", 404); const body = request.body as Row; return { ok: true, ...await speech.transcribe(model, body.audio_data_url, body.language) }; });
+  app.post(`${api}/admin/models/:id/transcribe`, async (request) => { const model = store.model(Number((request.params as Row).id)); if (!model) throw new AppError("模型不存在", 404); const body = request.body as Row; return { ok: true, ...await speech.transcribe(model, body.audio_data_url, body.language, undefined, { username: "管理员 · 模型测试" }) }; });
   app.get(`${api}/admin/assistants`, async () => ({ items: store.assistants() }));
   const brandStillUsed = (relative: string) => String(store.settings().welcome_logo || "") === relative || store.assistants().some((item) => String(item.welcome_logo || "") === relative);
   /** 换 Logo 或删助手时清掉不再被引用的文件，避免品牌图片越攒越多。 */
@@ -457,15 +471,28 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     const where: string[] = [];
     const values: any[] = [];
     if (query.username) { where.push("s.username=?"); values.push(String(query.username)); }
+    if (query.owner_key) { where.push("s.owner_key=?"); values.push(String(query.owner_key)); }
+    if (query.namespace) { where.push("s.namespace=?"); values.push(String(query.namespace)); }
     if (query.q) { where.push("(s.title LIKE ? OR s.username LIKE ?)"); values.push(`%${query.q}%`, `%${query.q}%`); }
     const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const items = store.all(`SELECT s.* FROM sessions s ${clause} ORDER BY s.updated_at DESC LIMIT ? OFFSET ?`, [...values, limit, offset]).map((session) => ({ ...session, assistant_name: String(store.assistant(Number(session.assistant_id))?.name || ""), message_count: store.conversations.count(String(session.id)) }));
-    return { items, total: store.one(`SELECT count(*) AS n FROM sessions s ${clause}`, values)!.n, all_total: store.one("SELECT count(*) AS n FROM sessions")!.n, filtered: items.length, limit, offset };
+    return {
+      items,
+      total: store.one(`SELECT count(*) AS n FROM sessions s ${clause}`, values)!.n,
+      all_total: store.one("SELECT count(*) AS n FROM sessions")!.n,
+      users: store.all("SELECT owner_key,namespace,username,count(*) AS sessions,sum(total_tokens) AS total_tokens FROM sessions GROUP BY owner_key,namespace,username ORDER BY sessions DESC LIMIT 300"),
+      filtered: items.length, limit, offset,
+    };
   });
   app.get(`${api}/admin/sessions/:id`, async (request) => { const id = (request.params as Row).id; const session = store.one("SELECT * FROM sessions WHERE id=?", [id]); if (!session) throw new AppError("会话不存在", 404); return { session, messages: store.settings().admin_session_content ? store.conversations.messages(id) : [], llm_calls: store.all("SELECT * FROM llm_calls WHERE session_id=? ORDER BY id", [id]), compactions: store.all("SELECT * FROM compaction_events WHERE session_id=? ORDER BY id", [id]), runs: store.all("SELECT * FROM runs WHERE session_id=? ORDER BY started_at DESC", [id]) }; });
   app.get(`${api}/admin/sessions/:id/export`, async (request, reply) => { const id = (request.params as Row).id; if (!store.settings().admin_session_content) throw new AppError("管理员查看会话内容已关闭", 403); if (!store.one("SELECT id FROM sessions WHERE id=?", [id])) throw new AppError("会话不存在", 404); reply.header("Content-Disposition", `attachment; filename="session-${id.replace(/[^a-zA-Z0-9_-]/g, "")}.json"`); return { session: store.one("SELECT * FROM sessions WHERE id=?", [id]), messages: store.conversations.messages(id) }; });
   app.get(`${api}/admin/audit`, async () => ({ items: store.all("SELECT * FROM audit_log ORDER BY id DESC LIMIT 300") }));
-  app.get(`${api}/admin/usage/summary`, async () => ({ totals: store.one("SELECT count(*) AS calls,coalesce(sum(total_tokens),0) AS total_tokens,coalesce(sum(cost_usd),0) AS cost_usd,coalesce(avg(latency_ms),0) AS avg_latency_ms FROM llm_calls"), by_user: store.all("SELECT username,count(*) AS calls,sum(total_tokens) AS total_tokens,sum(cost_usd) AS cost_usd FROM llm_calls GROUP BY username"), calls: store.all("SELECT * FROM llm_calls ORDER BY id DESC LIMIT 200") }));
+  app.get(`${api}/admin/usage/summary`, async () => ({
+    totals: store.one("SELECT count(*) AS calls,coalesce(sum(total_tokens),0) AS total_tokens,coalesce(sum(cost_usd),0) AS cost_usd,coalesce(avg(latency_ms),0) AS avg_latency_ms FROM llm_calls"),
+    by_user: store.all("SELECT username,count(*) AS calls,sum(total_tokens) AS total_tokens,sum(cost_usd) AS cost_usd FROM llm_calls GROUP BY username"),
+    by_purpose: store.all("SELECT purpose,count(*) AS calls,sum(total_tokens) AS total_tokens,avg(latency_ms) AS avg_latency_ms FROM llm_calls GROUP BY purpose ORDER BY calls DESC"),
+    calls: store.all("SELECT * FROM llm_calls ORDER BY id DESC LIMIT 300"),
+  }));
   const fileSize = (target: string) => {
     const resolved = target.startsWith("/") ? target : path.join(store.dataDir, target);
     try {

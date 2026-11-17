@@ -18,6 +18,8 @@ export interface Identity {
   access_token_name?: string;
   /** Token 绑定的助手；存在时不可切换。 */
   assistant_id?: number;
+  allowed_assistant_ids?: number[];
+  default_assistant_id?: number;
   /** Token 级每日 Token 配额；0 表示继承全局。 */
   daily_token_limit?: number;
   /** 接入模式：business 由业务系统适配器/登录提供，token 为匿名接入。 */

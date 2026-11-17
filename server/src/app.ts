@@ -34,7 +34,7 @@ export async function createWebAgent(options: AppOptions = {}) {
     const controlBearer = request.url.startsWith("/api/control") && !request.url.startsWith("/api/control/auth/login") && /^Bearer\s+/i.test(String(request.headers.authorization || ""));
     if (!controlBearer && !["GET", "HEAD", "OPTIONS"].includes(request.method) && request.headers.origin) {
       let origin: URL; try { origin = new URL(request.headers.origin); } catch { throw new AppError("无效来源", 403); }
-      const allowed = (process.env.WEBAGENT_UI_ORIGINS || "").split(",").filter(Boolean);
+      const allowed = (process.env.WEBAGENT_UI_ORIGINS || "").split(",").map((value) => value.trim()).filter(Boolean);
       if (origin.host !== request.headers.host && !allowed.includes(origin.origin)) throw new AppError("跨站写入请求被拒绝，请使用同源 API 代理", 403);
     }
   });

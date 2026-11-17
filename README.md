@@ -78,7 +78,7 @@ docker compose up -d --build
 | 领域 | 当前实现 |
 | --- | --- |
 | 模型 | 对话 / 视觉 / STT / TTS / 生图 / 决策 / Embedding / Rerank 统一接入；多供应商、多连接、模型列表与元信息同步、分类真实测试 |
-| 语音 | OpenAI STT / TTS、Chat Audio、DashScope ASR / TTS、实时 ASR WebSocket 适配；TTS 按句 / 长度增量送入，长段落不等待整段完成；普通识别默认只回填输入框，右上角提供 TTS 朗读与实时通话；未配置时禁用对应按钮 |
+| 语音 | OpenAI STT / TTS、Chat Audio、DashScope ASR / TTS、实时 ASR WebSocket 适配；输入框默认使用文件 STT，只有显式选择实时策略才建立实时听写；通话 TTS 在 LLM 输出过程中逐句合成，不等待整段完成；未配置对应模型时前端隐藏语音按钮 |
 | 助手 | 默认助手、角色范围、绑定模型、允许切换、工具白名单、`skill_slugs` Skill 范围与预算；语音、TTS、推理强度、执行模式和运行预算均可助手级覆盖，留空继承全局 |
 | 工具 | 开发注册原生函数、后台 HTTP API、MCP Streamable HTTP / SSE / stdio、表单与 JSON 导入；PI 本机执行工具默认关闭，可由部署者解锁后逐项管理 |
 | 权限 | 继承当前业务身份；工具选择不等于授权；写入审批后重新鉴权；四态可见 / 可选策略 |
@@ -145,7 +145,7 @@ npm run build
 git diff --check
 ```
 
-测试连接真实 PI SDK 和本地 Mock 上游，覆盖权限、审批、问答卡、断线续跑、上下文、工具筛选、语音、助手级配置覆盖、文件会话迁移、管理端 Token 与发布适配。当前自动回归为后端 57、SDK 4、Chat 28，共 89 项。**Mock 协议测试通过不代表所有真实供应商账号、地域、音色与模型权限都已验收。**
+测试连接真实 PI SDK 和本地 Mock 上游，覆盖权限、审批、问答卡、断线续跑、上下文、工具筛选、语音、助手级配置覆盖、文件会话迁移、管理端 Token 与发布适配。当前后端自动回归 80 项；业务前端另有 31 项单元测试和 14 项真实 Chromium 交互测试。**Mock 协议测试通过不代表所有真实供应商账号、地域、音色与模型权限都已验收。**
 
 PI 官方 Bash / PowerShell、文件读写与 CodeMode 在管理端列出，默认 `WEBAGENT_LOCAL_TOOLS=off` 时锁定关闭。部署者显式设为 `WEBAGENT_LOCAL_TOOLS=admin` 后，管理员仍须在工具页逐项启用；这不是沙箱，只适合受信任的单租户部署。框架默认不提供服务器端任意代码执行或截图服务。stdio MCP 同样可能在后端启动本机进程，默认关闭，仅在部署者明确信任服务并设置 `WEBAGENT_ALLOW_STDIO=1` 后可用；网络服务优先使用 Streamable HTTP 或 SSE。
 
@@ -177,5 +177,6 @@ PI 官方 Bash / PowerShell、文件读写与 CodeMode 在管理端列出，默�
 - [模型、供应商、STT / TTS 与决策](docs/MODELS.md)
 - [会话、压缩、记忆与运行机制](docs/RUNTIME.md)
 - [验收范围与已知限制](docs/REVIEW.md)
+- [PC4D 三端业务接入、工具权限与共享会话](docs/PC4D.md)
 
 完整截图及旧界面截图的版本说明在 [截图目录](docs/images/README.md)，不将旧 HTML 页面冒充为此分支的新界面。

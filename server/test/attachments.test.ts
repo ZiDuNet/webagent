@@ -4,12 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Store } from "../src/store.js";
-import { attachmentDataUrl, externalizePiImages, hasInlinePiImages, hydratePiImages, saveAttachments } from "../src/attachments.js";
+import { attachmentDataUrl, copySessionAttachments, externalizePiImages, hasInlinePiImages, hydratePiImages, readSessionUpload, saveAttachments } from "../src/attachments.js";
 import { fixture, mockServer } from "./helpers.js";
 import type { Row } from "../src/types.js";
 
-// 有效的 64×64 PNG；PI 会校验并可能缩放图片，截断或过小的图会退化成文字提示而不是 image part。
-const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAY0lEQVR4nO3PQQ3AIADAQEADYpGIrIngcVnSU9DOfe74s6UDXjWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgfVZYAdSW/MMSAAAAAElFTkSuQmCC", "base64");
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAY0lEQVR4nO3PQQ3AIADAQEADYpGIrIngcVnSU9DOfe74s6UDXjWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgfVZYAdSW/MMSAAAAAElFTkSuQmCC", "base64");
 const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
 
 function temporaryStore() {
@@ -32,8 +31,6 @@ test("聊天图片落到 uploads/<sessionId>，会话 JSON 只保留相对路径
     const raw = fs.readFileSync(path.join(dir, "sessions", "session-a.json"), "utf8");
     assert.equal(raw.includes("base64"), false);
     assert.ok(raw.includes("uploads/session-a/"));
-
-    // 其他会话不能借用路径读取附件。
     assert.equal(attachmentDataUrl(dir, "session-b", saved[0]), undefined);
 
     assert.equal(store.removeSession("session-a"), true);
@@ -110,6 +107,102 @@ test("PI canonical entries 中的图片按内容哈希落盘且可重复保存",
   }
 });
 
+test("分叉复制图片时拒绝其他会话路径、目录穿越和符号链接", () => {
+  const { dir, store } = temporaryStore();
+  try {
+    const [own] = saveAttachments(dir, "source", [{ name: "own.png", mime_type: "image/png", data_url: dataUrl }]);
+    const [foreign] = saveAttachments(dir, "foreign", [{ name: "foreign.png", mime_type: "image/png", data_url: dataUrl }]);
+    assert.throws(() => copySessionAttachments(dir, "source", "fork", [foreign]), /图片附件不可用/);
+    assert.throws(() => copySessionAttachments(dir, "source", "fork", [{ ...own, path: "uploads/source/../../runtime/agent.db" }]), /图片附件不可用/);
+    fs.symlinkSync(path.join(dir, foreign.path), path.join(dir, "uploads", "source", "linked.png"));
+    assert.throws(() => copySessionAttachments(dir, "source", "fork", [{ ...own, path: "uploads/source/linked.png" }]), /图片附件不可用/);
+    fs.symlinkSync(path.join(dir, "uploads", "foreign"), path.join(dir, "uploads", "aliased"), "dir");
+    assert.throws(() => copySessionAttachments(dir, "aliased", "fork", [{ ...own, path: `uploads/aliased/${path.basename(foreign.path)}` }]), /图片附件不可用/);
+    assert.equal(fs.existsSync(path.join(dir, "uploads", "fork")), false);
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("分叉拥有独立图片，删除原会话后历史预览与PI图片上下文仍然可用", async () => {
+  const upstream = await mockServer();
+  const service = await fixture(upstream.baseUrl);
+  const headers = { authorization: `Bearer ${service.credential()}` };
+  try {
+    const original = await service.session();
+    const sent = await service.app.inject({
+      method: "POST",
+      url: "/api/agent/chat",
+      headers,
+      payload: { session_id: original.id, message: "带图片的原会话", attachments: [{ name: "现场.png", mime_type: "image/png", data_url: dataUrl }] },
+    });
+    assert.equal(sent.statusCode, 200, sent.body);
+    const originalMessage = service.store.conversations.messages(original.id).find((item) => item.role === "user")!;
+    const forked = await service.app.inject({
+      method: "POST",
+      url: `/api/agent/sessions/${original.id}/fork`,
+      headers,
+      payload: { until_message_id: originalMessage.id },
+    });
+    assert.equal(forked.statusCode, 201, forked.body);
+    const forkId = forked.json().session.id;
+    const forkMessage = service.store.conversations.messages(forkId)[0];
+    assert.equal(forkMessage.content, originalMessage.content);
+    assert.equal(forkMessage.attachments[0].name, "现场.png");
+    assert.equal(forkMessage.attachments[0].mime_type, "image/png");
+    assert.equal(forkMessage.attachments[0].size, png.length);
+    assert.notEqual(forkMessage.attachments[0].path, originalMessage.attachments[0].path);
+    assert.ok(forkMessage.attachments[0].path.startsWith(`uploads/${forkId}/`));
+    assert.equal(forkMessage.attachments[0].data_url, undefined);
+
+    const removed = await service.app.inject({ method: "DELETE", url: `/api/agent/sessions/${original.id}`, headers });
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.equal(fs.existsSync(path.join(service.dir, "uploads", original.id)), false);
+    const preview = await service.app.inject({
+      method: "GET",
+      url: `/api/agent/sessions/${forkId}/attachments/${path.basename(forkMessage.attachments[0].path)}`,
+      headers,
+    });
+    assert.equal(preview.statusCode, 200, preview.body);
+    assert.deepEqual(preview.rawPayload, png);
+
+    const before = upstream.requests.length;
+    const continued = await service.app.inject({ method: "POST", url: "/api/agent/chat", headers, payload: { session_id: forkId, message: "继续分析这张图" } });
+    assert.equal(continued.statusCode, 200, continued.body);
+    assert.equal(continued.json().status, "ok");
+    assert.ok(upstream.requests.slice(before).some((request) => JSON.stringify(request.messages).includes(png.toString("base64"))));
+    const entries = service.store.conversations.piEntries(forkId);
+    const images = entries.flatMap((entry) => Array.isArray(entry.message?.content) ? entry.message.content.filter((part: Row) => part.type === "image") : []);
+    assert.ok(images.length > 0);
+    assert.ok(images.every((image) => String(image.webagent_path).startsWith(`uploads/${forkId}/`) && image.data === undefined));
+    hydratePiImages(service.dir, forkId, entries);
+    assert.ok(entries.some((entry) => Array.isArray(entry.message?.content) && entry.message.content.some((part: Row) => part.type === "image" && part.data === png.toString("base64"))));
+    const raw = fs.readFileSync(path.join(service.dir, "sessions", `${forkId}.json`), "utf8");
+    assert.equal(raw.includes(`uploads/${original.id}/`), false);
+    assert.equal(raw.includes(png.toString("base64")), false);
+  } finally {
+    await service.close();
+    await upstream.close();
+  }
+});
+
+test("图片预览与PI上下文均拒绝跨会话符号链接及伪装的会话目录", () => {
+  const { dir, store } = temporaryStore();
+  try {
+    saveAttachments(dir, "source", [{ name: "own.png", mime_type: "image/png", data_url: dataUrl }]);
+    const [foreign] = saveAttachments(dir, "foreign", [{ name: "foreign.png", mime_type: "image/png", data_url: dataUrl }]);
+    fs.symlinkSync(path.join(dir, foreign.path), path.join(dir, "uploads/source/linked.png"));
+    fs.symlinkSync(path.join(dir, "uploads/foreign"), path.join(dir, "uploads/aliased"), "dir");
+    assert.equal(readSessionUpload(dir, "source", "linked.png"), undefined);
+    assert.equal(readSessionUpload(dir, "aliased", path.basename(foreign.path)), undefined);
+    assert.equal(attachmentDataUrl(dir, "source", { path: "uploads/source/linked.png", mime_type: "image/png" }), undefined);
+    const entries = [{ message: { content: [{ type: "image", mimeType: "image/png", webagent_path: "uploads/source/linked.png" }] } }];
+    hydratePiImages(dir, "source", entries);
+    assert.deepEqual(entries[0].message.content, []);
+  } finally { store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("真实聊天请求把图片写入 uploads，PI 上下文与会话 JSON 都不再内联 Base64", async () => {
   const upstream = await mockServer();
   const service = await fixture(upstream.baseUrl);
@@ -131,7 +224,6 @@ test("真实聊天请求把图片写入 uploads，PI 上下文与会话 JSON 都
     assert.equal(hasInlinePiImages(entries), false);
     assert.ok(entries.some((entry) => Array.isArray(entry.message?.content) && entry.message.content.some((part: Row) => part.type === "image" && part.webagent_path)));
 
-    // 第二轮从磁盘还原图片上下文：会话 JSON 仍然不内联 Base64，但模型请求里必须真的有图。
     const second = await service.app.inject({
       method: "POST",
       url: "/api/agent/chat",
@@ -171,9 +263,10 @@ test("附件预览接口只对会话所有者开放，缺失文件返回 404", a
     assert.equal(preview.statusCode, 200, preview.body);
     assert.equal(preview.headers["content-type"], "image/png");
     assert.match(String(preview.headers["cache-control"]), /private/);
+    assert.match(String(preview.headers["cache-control"]), /no-store/);
+    assert.equal(preview.headers["x-content-type-options"], "nosniff");
     assert.deepEqual(preview.rawPayload, png);
 
-    // 其他用户拿同一个文件名也不能读到别人的会话图片。
     const stranger = await service.app.inject({
       method: "GET",
       url: `/api/agent/sessions/${session.id}/attachments/${file}`,
@@ -194,28 +287,6 @@ test("附件预览接口只对会话所有者开放，缺失文件返回 404", a
       headers: { authorization: `Bearer ${service.credential()}` },
     });
     assert.equal(traversal.statusCode, 404);
-  } finally {
-    await service.close();
-    await upstream.close();
-  }
-});
-
-test("手动压缩空会话是幂等的成功结果，不再是 409", async () => {
-  const upstream = await mockServer();
-  const service = await fixture(upstream.baseUrl);
-  try {
-    const session = await service.session();
-    const response = await service.app.inject({
-      method: "POST",
-      url: `/api/agent/sessions/${session.id}/compact`,
-      headers: { authorization: `Bearer ${service.credential()}` },
-      payload: {},
-    });
-    assert.equal(response.statusCode, 200, response.body);
-    const body = response.json();
-    assert.equal(body.ok, true);
-    assert.equal(body.skipped, true);
-    assert.match(body.message, /无需压缩/);
   } finally {
     await service.close();
     await upstream.close();

@@ -27,6 +27,7 @@ export class Runs {
     const user = presetUser || await this.auth.identity(credential);
     const current = this.runtime.questionSession(user, questionId);
     if (input.cancel) {
+      this.store.assertIdle(current.session.id);
       return { task: undefined, result: await this.runtime.answerQuestion(user, credential, questionId, input, new AbortController().signal, () => {}) };
     }
     this.runtime.validateAnswer(user, questionId, input);
@@ -77,6 +78,7 @@ export class Runs {
     const run = this.owned(id, user); const live = this.live.get(id);
     let cursor = Math.max(0, Number(after) || 0);
     reply.hijack();
+    for (const [header, value] of Object.entries(reply.getHeaders())) if (value !== undefined) reply.raw.setHeader(header, value);
     reply.raw.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "X-Run-Id": id, Connection: "keep-alive" });
     const send = (event: RunEvent) => {
       if (event.id <= cursor || reply.raw.destroyed) return;

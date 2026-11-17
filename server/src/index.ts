@@ -1,7 +1,9 @@
 import { createWebAgent } from "./app.js";
 import { config } from "./config.js";
 
-const { app } = await createWebAgent();
+const { app } = process.env.WEBAGENT_PC4D_ENABLED === "1"
+  ? await (await import("./integrations/pc4d/index.js")).createPc4dAgent()
+  : await createWebAgent();
 // A single failed background promise (for example an intentionally aborted
 // realtime speech stream) must not take the whole API process down.
 process.on("unhandledRejection", (reason) => {

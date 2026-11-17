@@ -36,6 +36,7 @@ export default function AccessTokensPage() {
   const [adminSaving, setAdminSaving] = useState(false);
   const [adminIssued, setAdminIssued] = useState<{ token: string; name: string } | null>(null);
   const [copyState, setCopyState] = useState("");
+  const [revealed, setRevealed] = useState<{ name: string; token: string } | null>(null);
 
   const edit = (row: Row = {}) => {
     setDraft(row);
@@ -43,6 +44,7 @@ export default function AccessTokensPage() {
     form.resetFields();
     form.setFieldsValue({
       ...row,
+      channel: row.channel || "chat",
       enabled: row.enabled ?? true,
       rate_limit_per_minute: row.rate_limit_per_minute ?? 60,
       daily_token_limit: row.daily_token_limit ?? 0,
@@ -57,9 +59,10 @@ export default function AccessTokensPage() {
     setError("");
     try {
       const payload = {
-        name: values.name,
-        assistant_id: values.assistant_id,
-        enabled: values.enabled,
+      name: values.name,
+      assistant_id: values.assistant_id,
+      channel: values.channel || "chat",
+      enabled: values.enabled,
         expires_at: isoOrNull(values.expires_local),
         allowed_origins: String(values.allowed_origins_text || "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean),
         rate_limit_per_minute: values.rate_limit_per_minute || 0,
@@ -101,6 +104,17 @@ export default function AccessTokensPage() {
       setCopyState(scope === "access" ? "access" : "admin");
     } catch {
       setCopyState("");
+    }
+  };
+  const copyRowToken = async (token: string | undefined, key: string) => {
+    if (!token) return;
+    try {
+      await navigator.clipboard.writeText(token);
+      setCopyState(key);
+      setNotice("Token 已复制到剪贴板。");
+    } catch {
+      setCopyState("");
+      setError("复制失败，请点击「查看」后手动复制。");
     }
   };
 
@@ -171,6 +185,13 @@ export default function AccessTokensPage() {
         description="接入 Token 代表一个可限制范围的前端接入身份，不携带业务权限；工具仍按业务身份或公开工具权限执行。同一浏览器通过 Cookie 视为同一匿名访客，不同浏览器隔离。"
         style={{ marginBottom: 20 }}
       />
+      <Alert
+        type="info"
+        showIcon
+        title="PC4D 三端也通过接入 Token 绑定助手"
+        description="「使用渠道」为 PC4D 大屏 / Web / 小程序时，业务端用 pid（Web 与小程序再带业务 access_token）换取 2 小时短期凭据；浏览器拿不到 wa_ 原文。每个渠道取最近更新的启用 Token，Token 再决定助手、工具和权限。"
+        style={{ marginBottom: 20 }}
+      />
       <PageState {...resource}>
         <Table
           rowKey="id"
@@ -179,14 +200,35 @@ export default function AccessTokensPage() {
           columns={[
             {
               title: "Token",
-              width: 240,
-              render: (_, row) => (
-                <div>
-                  <strong>{row.name}</strong>
-                  <div className="control-muted"><code>{row.token_prefix}…</code>{row.last_used_at ? ` · 最近使用 ${new Date(row.last_used_at).toLocaleString("zh-CN")}` : " · 尚未使用"}</div>
-                  <div className="control-muted">{row.sessions_count || 0} 个匿名会话</div>
-                </div>
-              ),
+              width: 270,
+              render: (_, row) => {
+                const value = String(row.token || "");
+                return (
+                  <div>
+                    <strong>{row.name}</strong>
+                    <div className="control-muted">
+                      <code>{value ? `${value.slice(0, 12)}…` : `${row.token_prefix}…`}</code>
+                      {row.last_used_at ? ` · 最近使用 ${new Date(row.last_used_at).toLocaleString("zh-CN")}` : " · 尚未使用"}
+                    </div>
+                    <div className="control-muted">
+                      {row.sessions_count || 0} 个匿名会话
+                      {value ? (
+                        <Button type="link" size="small" style={{ padding: "0 0 0 8px" }} onClick={() => setRevealed({ name: row.name, token: value })}>查看完整 Token</Button>
+                      ) : (
+                        <span> · 原文不可用，轮换后可查看</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              },
+            },
+            {
+              title: "使用渠道",
+              width: 130,
+              render: (_, row) => {
+                const labels: Record<string, string> = { chat: "独立 Chat", screen: "PC4D 大屏", web: "PC4D Web", miniprogram: "PC4D 小程序" };
+                return <Tag color={row.channel && row.channel !== "chat" ? "blue" : "default"}>{labels[row.channel] || "独立 Chat"}</Tag>;
+              },
             },
             { title: "绑定助手", dataIndex: "assistant_name", width: 160, render: (value) => value || "助手已删除" },
             {
@@ -202,9 +244,12 @@ export default function AccessTokensPage() {
             { title: "允许来源", width: 190, render: (_, row) => row.allowed_origins?.length ? <Tooltip title={row.allowed_origins.join("\n")}><span>{row.allowed_origins.length} 个 Origin</span></Tooltip> : <span className="control-muted">不限制 Origin</span> },
             {
               title: "操作",
-              width: 210,
+              width: 300,
               fixed: "right",
               render: (_, row) => <Space>
+                <Tooltip title={row.token ? "复制完整 Token" : "旧 Token 未保存原文，请先轮换"}>
+                  <Button size="small" type="text" icon={<Copy size={14} />} disabled={!row.token} onClick={() => void copyRowToken(String(row.token || ""), `access-${row.id}`)}>{copyState === `access-${row.id}` ? "已复制" : "复制"}</Button>
+                </Tooltip>
                 <Button size="small" type="text" icon={<Pencil size={14} />} onClick={() => edit(row)}>编辑</Button>
                 <Popconfirm title="轮换后旧 Token 立即失效，确定继续？" onConfirm={() => void rotate(row)}><Button size="small" type="text" icon={<RefreshCw size={14} />}>轮换</Button></Popconfirm>
                 <Popconfirm title="删除这个接入 Token？" description="匿名会话和接入会话记录会一起清理。" onConfirm={async () => { try { await controlRequest(`${API}/${row.id}`, undefined, "DELETE"); setNotice("接入 Token 已删除。"); await resource.refresh(); } catch (failure) { setError(apiErrorMessage(failure)); } }}><Button size="small" type="text" danger icon={<Trash2 size={14} />} aria-label="删除接入 Token" /></Popconfirm>
@@ -242,13 +287,24 @@ export default function AccessTokensPage() {
             columns={[
               {
                 title: "Token",
-                width: 260,
-                render: (_, row) => (
-                  <div>
-                    <strong>{row.name}</strong>
-                    <div className="control-muted"><code>{row.token_prefix}…</code>{row.last_used_at ? ` · 最近使用 ${new Date(row.last_used_at).toLocaleString("zh-CN")}` : " · 尚未使用"}</div>
-                  </div>
-                ),
+                width: 280,
+                render: (_, row) => {
+                  const value = String(row.token || "");
+                  return (
+                    <div>
+                      <strong>{row.name}</strong>
+                      <div className="control-muted">
+                        <code>{value ? `${value.slice(0, 12)}…` : `${row.token_prefix}…`}</code>
+                        {row.last_used_at ? ` · 最近使用 ${new Date(row.last_used_at).toLocaleString("zh-CN")}` : " · 尚未使用"}
+                      </div>
+                      {value ? (
+                        <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setRevealed({ name: row.name, token: value })}>查看完整 Token</Button>
+                      ) : (
+                        <span className="control-muted">原文不可用，轮换后可查看</span>
+                      )}
+                    </div>
+                  );
+                },
               },
               {
                 title: "状态",
@@ -262,9 +318,12 @@ export default function AccessTokensPage() {
               { title: "创建人", dataIndex: "created_by", width: 180, render: (value) => <span className="control-muted">{value || "—"}</span> },
               {
                 title: "操作",
-                width: 200,
+                width: 290,
                 fixed: "right",
                 render: (_, row) => <Space>
+                  <Tooltip title={row.token ? "复制完整管理 Token" : "旧 Token 未保存原文，请先轮换"}>
+                    <Button size="small" type="text" icon={<Copy size={14} />} disabled={!row.token} onClick={() => void copyRowToken(String(row.token || ""), `admin-${row.id}`)}>{copyState === `admin-${row.id}` ? "已复制" : "复制"}</Button>
+                  </Tooltip>
                   <Button size="small" type="text" icon={<Pencil size={14} />} onClick={() => editAdmin(row)}>编辑</Button>
                   <Popconfirm title="轮换后旧管理 Token 立即失效，确定继续？" onConfirm={() => void rotateAdmin(row)}><Button size="small" type="text" icon={<RefreshCw size={14} />}>轮换</Button></Popconfirm>
                   <Popconfirm title="删除这个管理 Token？" onConfirm={async () => { try { await controlRequest(`/admin/control-tokens/${row.id}`, undefined, "DELETE"); setNotice("管理 Token 已删除。"); await adminResource.refresh(); } catch (failure) { setAdminError(apiErrorMessage(failure)); } }}><Button size="small" type="text" danger icon={<Trash2 size={14} />} aria-label="删除管理 Token" /></Popconfirm>
@@ -289,6 +348,14 @@ export default function AccessTokensPage() {
         <Form form={form} layout="vertical" onFinish={save}>
           <div className="control-grid">
             <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input placeholder="例如：大屏公开助手" /></Form.Item>
+            <Form.Item name="channel" label="使用渠道" extra="PC4D 渠道由服务端选择对应 Token；同一渠道只启用一个 Token 最清晰。">
+              <Select options={[
+                { value: "chat", label: "独立 Chat / 第三方前端" },
+                { value: "screen", label: "PC4D 大屏" },
+                { value: "web", label: "PC4D Web" },
+                { value: "miniprogram", label: "PC4D 小程序" },
+              ]} />
+            </Form.Item>
             <Form.Item name="assistant_id" label="绑定助手" rules={[{ required: true }]}>
               <Select options={(resource.data?.assistants || []).map((assistant) => ({ value: assistant.id, label: assistant.name }))} placeholder="选择唯一助手" />
             </Form.Item>
@@ -316,7 +383,7 @@ export default function AccessTokensPage() {
         keyboard={false}
         footer={<Space><Button onClick={() => void copyToken(issued?.token, "access")} icon={<Copy size={14} />}>{copyState === "access" ? "已复制" : "复制"}</Button><Button type="primary" onClick={() => setIssued(null)}>我已保存</Button></Space>}
       >
-        <Alert type="warning" showIcon title="原始 Token 只显示这一次" description="数据库只保存哈希。关闭后不能再次查看，只能轮换生成新 Token。" style={{ marginBottom: 16 }} />
+        <Alert type="info" showIcon title="Token 已加密保存" description="列表中的「查看 / 复制」可随时取回原文。请避免通过公开渠道传播；一旦泄露请立即轮换。" style={{ marginBottom: 16 }} />
         <p className="control-muted">接入方式：打开 <code>/chat/?token=...</code>，或前端向 <code>/api/agent/auth/exchange</code> 发送 <code>Authorization: Bearer &lt;token&gt;</code> 换取浏览器会话 Cookie。</p>
         <Input.TextArea value={issued?.token || ""} readOnly rows={3} spellCheck={false} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
       </Modal>
@@ -354,9 +421,19 @@ export default function AccessTokensPage() {
         keyboard={false}
         footer={<Space><Button onClick={() => void copyToken(adminIssued?.token, "admin")} icon={<Copy size={14} />}>{copyState === "admin" ? "已复制" : "复制"}</Button><Button type="primary" onClick={() => setAdminIssued(null)}>我已保存</Button></Space>}
       >
-        <Alert type="warning" showIcon title="原始 Token 只显示这一次" description="数据库只保存哈希。关闭后不能再次查看，只能轮换生成新 Token。" style={{ marginBottom: 16 }} />
+        <Alert type="info" showIcon title="管理 Token 已加密保存" description="列表中的「查看 / 复制」可随时取回原文。它等同于管理员密码，请勿放入前端源码或公开仓库。" style={{ marginBottom: 16 }} />
         <p className="control-muted">使用方式：打开管理端登录页，点击「使用管理 Token 连接」，填写 API 地址与 Token。同源部署地址留空；独立后端填写 <code>https://your-host/api/control</code>。</p>
         <Input.TextArea value={adminIssued?.token || ""} readOnly rows={3} spellCheck={false} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
+      </Modal>
+
+      <Modal
+        open={Boolean(revealed)}
+        title={`Token：${revealed?.name || ""}`}
+        onCancel={() => setRevealed(null)}
+        footer={<Space><Button icon={<Copy size={14} />} onClick={() => void copyRowToken(revealed?.token, "revealed")}>{copyState === "revealed" ? "已复制" : "复制"}</Button><Button type="primary" onClick={() => setRevealed(null)}>关闭</Button></Space>}
+      >
+        <Alert type="warning" showIcon title="请勿在公开渠道传播" description="Token 以加密形式保存在运行库，只有管理员可以查看。泄露后请立即轮换。" style={{ marginBottom: 16 }} />
+        <Input.TextArea value={revealed?.token || ""} readOnly rows={3} spellCheck={false} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
       </Modal>
     </>
   );

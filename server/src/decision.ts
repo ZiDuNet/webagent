@@ -19,14 +19,25 @@ export function parseScores(payload: Row, expected: string[]) {
 }
 export function decisionConnection(model: Row, provider: Row) {
   const options = model.extra_params?._decision || {};
-  const aliyun = model.model_id === "decision-model-preview" && safeAliyun(provider.base_url);
+  const aliyun = model.model_id === "decision-model-preview" && aliyunHost(provider.base_url);
   const protocol = aliyun ? "decisions" : options.protocol || "chat_completions";
   if (!["decisions", "chat_completions"].includes(protocol)) throw new AppError("不支持的决策协议", 422);
-  const fallback = protocol === "chat_completions" ? `${provider.base_url}/chat/completions` : aliyun ? `${provider.base_url}/systemone` : new URL(provider.base_url).hostname === "openrouter.ai" ? "/api/alpha/decisions" : "";
+  const fallback = protocol === "chat_completions" ? `${provider.base_url}/chat/completions` : aliyun ? aliyunDecisionEndpoint(provider.base_url) : new URL(provider.base_url).hostname === "openrouter.ai" ? "/api/alpha/decisions" : "";
   if (!fallback && !options.endpoint) throw new AppError("请配置决策端点", 422);
   return { protocol, endpoint: sameOriginEndpoint(provider, options.endpoint || "", fallback) };
 }
-const safeAliyun = (value: string) => { const url = new URL(value); return url.hostname.endsWith(".aliyuncs.com") && url.pathname.replace(/\/$/, "").endsWith("/compatible-mode/v1"); };
+const aliyunHost = (value: string) => { try { return new URL(value).hostname.endsWith(".aliyuncs.com"); } catch { return false; } };
+/**
+ * 阿里云 MaaS 决策模型只暴露 `.../compatible-mode/v1/systemone`。
+ * 管理端经常只填域名（例如 `https://xxx.maas.aliyuncs.com`），这里统一补齐固定路径，
+ * 避免把决策请求错误地发到 `/chat/completions` 后返回 404。
+ */
+function aliyunDecisionEndpoint(value: string) {
+  const base = new URL(value);
+  const path = base.pathname.replace(/\/+$/, "");
+  const prefix = path.endsWith("/compatible-mode/v1") ? path : `${path}/compatible-mode/v1`.replace(/\/{2,}/g, "/");
+  return new URL(`${prefix}/systemone`, base.origin).href;
+}
 export class Decision {
   constructor(private store: Store, private providers: Providers) {}
   async score(model: Row, state: string, candidates: Row[], options: { sessionId?: string; username?: string; signal?: AbortSignal } = {}) {

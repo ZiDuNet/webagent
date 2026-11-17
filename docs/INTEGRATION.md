@@ -294,14 +294,16 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 3. 同源部署留空 API 地址；跨域部署填写 `https://your-host/api/control`。
 4. 跨域时把管理端所在 Origin 加入 Token 白名单；留空时浏览器只允许同源使用。
 
-管理 Token 只能调用 `/api/control`，不能调用 `/api/agent`，也不能替代业务 Token。原始 Token 只显示一次，数据库只保存哈希；轮换后旧 Token 立即失效。生产环境必须使用 HTTPS，不要把 Token 放进 URL、日志、截图或前端构建变量。
+管理 Token 只能调用 `/api/control`，不能调用 `/api/agent`，也不能替代业务 Token。框架 Token（接入 Token `wa_…` 与管理 Token `wac_…`）同时保存哈希与用 `WEBAGENT_SECRET_KEY` 派生的 AES-GCM 密文，因此管理员可在「接入与安全」再次查看并复制原文；旧版本创建的记录没有密文，会提示先轮换。轮换后旧 Token 立即失效。生产环境必须使用 HTTPS，不要把 Token 放进 URL、日志、截图或前端构建变量。
+
+> 这里的管理 / 接入 Token 都是**框架自身**的凭据，不是业务系统签发的 `access_token`。业务 Token 仅在请求期间用于解析身份或转发给受信任业务工具，不写入框架数据库；大屏渠道交换出的 `pc4d_…` 是携带 `pid`、项目名、渠道 Token ID 的短期凭据，不含 `wa_…` 原文。接入 Token 的「使用渠道」为 `screen` / `web` / `miniprogram` 时由对应 PC4D 端自动选取；`chat` 用于独立 Chat 或第三方前端。
 
 管理端 API：
 
 | API | 作用 |
 | --- | --- |
-| `GET /api/control/admin/control-tokens` | 列出管理 Token（不含哈希） |
-| `POST /api/control/admin/control-tokens` | 创建并只返回一次原始 Token |
+| `GET /api/control/admin/control-tokens` | 列出管理 Token（含解密后的原文，不含哈希 / 密文） |
+| `POST /api/control/admin/control-tokens` | 创建并返回原始 Token（之后仍可在列表中查看） |
 | `PUT /api/control/admin/control-tokens/:id` | 修改名称、启用状态、过期时间和来源 |
 | `POST /api/control/admin/control-tokens/:id/rotate` | 轮换 Token，旧值立即失效 |
 | `DELETE /api/control/admin/control-tokens/:id` | 删除 Token |
@@ -325,8 +327,8 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 | `POST /api/agent/approvals/:id/approve` / `reject` | 用户确认 / 拒绝 |
 | `POST /api/agent/questions/:id/answer` | 回答 `ask_user` 交互问题；支持选项、补充文本和取消 |
 | `WS /api/agent/voice/stream?session_id=...` | 当前会话绑定的实时语音通话；ASR / TTS 未配置或会话运行中时拒绝 |
-| `POST /api/agent/transcribe` | 普通文件 STT；识别结果由前端回填输入框，默认不自动发送 |
-| `WS /api/agent/voice/dictate?session_id=...` | 输入框实时听写；partial / final 回填，不创建额外会话 |
+| `POST /api/agent/transcribe` | 普通文件 STT；`auto` 策略下优先文件模型、失败再回退实时模型；识别结果由前端回填输入框，默认不自动发送 |
+| `WS /api/agent/voice/dictate?session_id=...` | 输入框实时听写；只有策略明确设为 `realtime` 时使用，partial / final 回填，不创建额外会话 |
 | `POST /api/agent/audio/speech` | 普通 TTS 合成；正式 Chat 已在右上角提供朗读入口，业务前端也可复用 |
 | `POST /api/agent/sessions/:id/compact` | 手动压缩（幂等，跳过时返回 `skipped: true`） |
 | `GET /api/agent/brand/:file` | 空态品牌徽标（公开静态资源，文件名带内容哈希） |
@@ -335,6 +337,8 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 | `DELETE /api/agent/sessions/:id/messages/:messageId` | 删除该消息及后续消息 |
 
 主要 SSE 名称：`run.started`、`run.phase`、`decision.completed`、`step.started`、`thinking.delta`、`text.delta`、`answer.completed`、`tool.args.delta`、`tool.started`、`tool.finished`、`tool.approval_required`、`question.required`、`retry`、`usage`、`session.title`、`run.completed`、`run.failed`。
+
+语音能力按助手配置继承全局：输入框语音默认走文件 STT，只有 `voice_input_mode=realtime` 才建立实时听写；右上角实时语音通话固定使用 `voice_asr_model_id` / `voice_tts_model_id`，TTS 在 LLM 输出过程中按句合成，不等待整段回答结束。未配置对应模型时前端不渲染语音按钮。实时通话的 WebSocket 使用 `webagent.voice` 子协议，并通过 `webagent.token.<base64url>` 携带短期接入凭据；浏览器不会拿到渠道 Token 原文。
 
 `answer.completed` 表示回答正文已经生成完毕，可以结束 Markdown / HTML 渲染、展示复制等只读操作，也可以开始 TTS；此时后台可能仍在自动压缩上下文，`run.completed` 尚未到达，因此下一轮输入应继续禁用。`run.completed` 才表示整个运行（含压缩、落库和辅助任务）结束。
 

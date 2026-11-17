@@ -128,6 +128,8 @@ export class Auth {
         this.setVisitorCookie(reply, visitor);
         return this.accessContext(access, visitor, bearer);
       }
+      const identity = await this.identity(bearer);
+      return { identity: { ...identity, auth_mode: "business" }, credential: bearer, mode: "business" };
     }
     const sessionCredential = request.cookies[ACCESS_COOKIE] || "";
     if (sessionCredential) {
@@ -155,6 +157,8 @@ export class Auth {
         this.touch(access);
         return this.accessContext(access, visitor, bearer);
       }
+      const identity = await this.identity(bearer);
+      return { identity: { ...identity, auth_mode: "business" }, credential: bearer, mode: "business" };
     }
     const accessSession = cookies[ACCESS_COOKIE] || "";
     if (accessSession) {

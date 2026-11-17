@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Collapse, Descriptions, Drawer, Input, InputNumber, Modal, Popconfirm, Space, Table, Tabs, Tag } from "antd";
+import { Alert, Button, Collapse, Descriptions, Drawer, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tabs, Tag } from "antd";
 import { Database, Download, Eraser, Search, Trash2 } from "lucide-react";
 import { apiErrorMessage, controlRequest } from "../api/pagepilot";
 import { PageHeading, PageState, ResourceActions, useResource, type Row } from "./shared";
@@ -9,14 +9,15 @@ interface SessionDetail extends Row { session: Row; runs: Row[]; messages: Row[]
 export default function SessionsPage() {
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
+  const [owner, setOwner] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   useEffect(() => {
     const timer = setTimeout(() => { setQuery(search.trim()); setPage(1); }, 300);
     return () => clearTimeout(timer);
   }, [search]);
-  const sessionsPath = `/admin/sessions?limit=${pageSize}&offset=${(page - 1) * pageSize}${query ? `&q=${encodeURIComponent(query)}` : ""}`;
-  const resource = useResource<{ items: Row[]; total: number; all_total: number }>(sessionsPath);
+  const sessionsPath = `/admin/sessions?limit=${pageSize}&offset=${(page - 1) * pageSize}${query ? `&q=${encodeURIComponent(query)}` : ""}${owner ? `&owner_key=${encodeURIComponent(owner)}` : ""}`;
+  const resource = useResource<{ items: Row[]; total: number; all_total: number; users: Row[] }>(sessionsPath);
   const storage = useResource<Row>("/admin/storage");
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [diagnostic, setDiagnostic] = useState<Row | null>(null);
@@ -50,10 +51,13 @@ export default function SessionsPage() {
     {error && <Alert title={error} type="error" showIcon style={{ marginBottom: 16 }} />}
     {notice && <Alert title={notice} type="success" showIcon closable onClose={() => setNotice("")} style={{ marginBottom: 16 }} />}
     <section className="control-card" style={{ marginBottom: 20 }}><div className="control-actions" style={{ justifyContent: "space-between", marginBottom: 12 }}><h2 style={{ margin: 0 }}><Database size={16} /> 存储与保留</h2><Space><Button size="small" onClick={() => void storage.refresh()}>刷新容量</Button><Popconfirm title="压缩 SQLite？" description="会回收已删除会话的空闲页；运行中的任务存在时服务端会拒绝执行。" onConfirm={() => void vacuum()}><Button size="small" icon={<Eraser size={14} />} loading={vacuuming}>压缩数据库</Button></Popconfirm></Space></div>{storage.loading ? <span className="control-muted">正在读取存储…</span> : storage.data && <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[{ key: "sessions", label: "会话", children: storage.data.sessions }, { key: "messages", label: "消息", children: storage.data.messages }, { key: "runs", label: "运行事件", children: storage.data.run_events }, { key: "db", label: "Agent DB", children: `${(storage.data.agent_db_bytes / 1024 / 1024).toFixed(2)} MB` }, { key: "wal", label: "WAL", children: `${(storage.data.agent_wal_bytes / 1024 / 1024).toFixed(2)} MB` }, { key: "calls", label: "模型调用", children: storage.data.llm_calls }, { key: "questions", label: "待回答", children: storage.data.questions }, { key: "oldest", label: "最早会话", children: storage.data.oldest_session ? new Date(storage.data.oldest_session).toLocaleDateString("zh-CN") : "无" }]} />}</section>
-    <Input prefix={<Search size={15} />} placeholder="按用户、会话标题搜索" aria-label="搜索会话" value={search} onChange={(event) => setSearch(event.target.value)} style={{ maxWidth: 380, marginBottom: 20 }} />
+    <Space style={{ marginBottom: 20 }} wrap>
+      <Input prefix={<Search size={15} />} placeholder="按用户、会话标题搜索" aria-label="搜索会话" value={search} onChange={(event) => setSearch(event.target.value)} style={{ width: 340 }} />
+      <Select allowClear showSearch placeholder="按业务用户 / PID 范围筛选" style={{ width: 360 }} value={owner || undefined} onChange={(value) => { setOwner(value || ""); setPage(1); }} options={(resource.data?.users || []).map((row: Row) => ({ value: row.owner_key, label: `${row.username || row.owner_key}${row.namespace ? ` · ${row.namespace}` : ""}（${row.sessions}）` }))} />
+    </Space>
     <PageState {...resource}><Table rowKey="id" dataSource={resource.data?.items} pagination={{ current: page, pageSize, total: resource.data?.total || 0, showSizeChanger: true, pageSizeOptions: ["10", "20", "50", "100"], showTotal: (total, range) => `${range[0]}–${range[1]} / 共 ${total} 个会话（全部 ${resource.data?.all_total ?? total}）`, onChange: (next, size) => { if (size !== pageSize) { setPageSize(size); setPage(1); } else setPage(next); } }} scroll={{ x: 900 }} columns={[
       { title: "会话", dataIndex: "title", render: (title, row) => <Button type="link" loading={inspecting && detail?.session.id === row.id} onClick={() => void inspect(row.id)}>{title}</Button> },
-      { title: "业务用户", dataIndex: "username" }, { title: "助手", dataIndex: "assistant_name" },
+      { title: "业务用户", dataIndex: "username" }, { title: "范围", dataIndex: "namespace", width: 170, render: (value) => value ? <Tag>{value}</Tag> : <span className="control-muted">—</span> }, { title: "助手", dataIndex: "assistant_name" },
       { title: "消息", dataIndex: "message_count" }, { title: "Token", dataIndex: "total_tokens" },
       { title: "状态", dataIndex: "last_status", render: (value) => <Tag>{value || "未运行"}</Tag> },
       { title: "更新时间", dataIndex: "updated_at", render: (value) => new Date(value).toLocaleString("zh-CN") },

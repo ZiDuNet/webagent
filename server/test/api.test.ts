@@ -51,6 +51,12 @@ test("access tokens exchange into browser sessions, bind to one assistant, and e
     assert.match(token, /^wa_/);
     assert.equal(created.body.includes("token_hash"), false);
     assert.equal(created.json().access_token.assistant_id, assistant.id);
+    const listed = await service.app.inject({ url: "/api/control/admin/access-tokens", headers: { cookie } });
+    const listedToken = listed.json().items.find((item: Row) => item.id === created.json().access_token.id);
+    assert.equal(listedToken.token, token);
+    assert.equal(listedToken.token_available, true);
+    assert.equal(listed.body.includes("token_hash"), false);
+    assert.equal(listed.body.includes("token_cipher"), false);
 
     const me = await service.app.inject({ url: "/api/agent/me", headers: { authorization: `Bearer ${token}` } });
     assert.equal(me.statusCode, 200, me.body);
@@ -260,6 +266,16 @@ test("decision scoring changes the primary model's authorized tool loadout and e
     service.store.setSettings({ admin_session_content: false }); assert.equal(service.runs.diagnostics(run.id).events.some((event) => event.name === "decision.diagnostics"), false);
     assert.throws(() => parseScores({ scores: { one: 1.2 } }, ["one"]), /0–1/);
     assert.equal(decisionConnection({ model_id: "decision-model-preview" }, { base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" }).endpoint, "https://dashscope.aliyuncs.com/compatible-mode/v1/systemone");
+    assert.deepEqual(
+      decisionConnection(
+        { model_id: "decision-model-preview", extra_params: { _decision: { protocol: "chat_completions" } } },
+        { base_url: "https://llm-example.cn-beijing.maas.aliyuncs.com" },
+      ),
+      {
+        protocol: "decisions",
+        endpoint: "https://llm-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/systemone",
+      },
+    );
   } finally { await service.close(); await upstream.close(); }
 });
 test("tool execution rechecks current tool policy, assistant scope, and risk after discovery", async () => {
@@ -359,6 +375,11 @@ test("ask_user creates a user-owned interactive question, pauses the run, and re
     assert.equal(service.store.conversations.latestAssistant(session.id)!.metadata.question.id, first.question.id);
     await assert.rejects(service.runs.answer(service.credential("user2"), first.question.id, { values: ["all"] }), /不存在/);
     await assert.rejects(service.runs.answer(credential, first.question.id, { values: ["invalid"] }), /无效选项/);
+    await assert.rejects(service.runs.answer(credential, first.question.id, {}), /请选择/);
+    assert.equal(service.store.one("SELECT status FROM questions WHERE id=?", [first.question.id])!.status, "pending");
+    service.store.insert("runs", { id: "question-busy", session_id: session.id, owner_key: session.owner_key, status: "running", started_at: new Date().toISOString() });
+    await assert.rejects(service.runs.answer(credential, first.question.id, { cancel: true }), /正在执行/);
+    service.store.run("DELETE FROM runs WHERE id='question-busy'");
     const answered = await (await service.runs.answer(credential, first.question.id, { values: ["abnormal"], free_text: "只看异常" })).task;
     assert.equal(answered.status, "ok");
     assert.match(answered.answer, /继续/);

@@ -136,6 +136,37 @@ test("assistant overrides reject a model of the wrong kind", async () => {
   }
 });
 
+test("voice input auto resolves to file STT first and only falls back to realtime when file is unavailable", async () => {
+  const upstream = await mockServer();
+  const service = await fixture(upstream.baseUrl);
+  try {
+    const providerId = service.model!.provider_id;
+    const file = service.store.config.insertModel({ provider_id: providerId, name: "文件 STT", model_id: "whisper-file", model_kind: "asr" });
+    const realtime = service.store.config.insertModel({ provider_id: providerId, name: "实时 STT", model_id: "asr-realtime", model_kind: "asr_realtime" });
+    service.store.setSettings({ voice_input_mode: "auto", asr_model_id: file.id, asr_realtime_model_id: realtime.id });
+    const status = () => service.app.inject({ url: "/api/agent/status", headers: { authorization: `Bearer ${service.credential()}` } });
+
+    const both = await status();
+    assert.equal(both.statusCode, 200, both.body);
+    assert.equal(both.json().voice_input_mode, "file");
+    assert.equal(both.json().asr.model_id, file.id);
+
+    service.store.setSettings({ asr_model_id: null });
+    const realtimeOnly = await status();
+    assert.equal(realtimeOnly.statusCode, 200, realtimeOnly.body);
+    assert.equal(realtimeOnly.json().voice_input_mode, "realtime");
+    assert.equal(realtimeOnly.json().asr_realtime.model_id, realtime.id);
+
+    service.store.setSettings({ voice_input_mode: "file", asr_model_id: null });
+    const explicitFile = await status();
+    assert.equal(explicitFile.statusCode, 200, explicitFile.body);
+    assert.equal(explicitFile.json().voice_input_mode, "file");
+  } finally {
+    await service.close();
+    await upstream.close();
+  }
+});
+
 test("deleting a model only checks model-binding assistant columns", async () => {
   const upstream = await mockServer();
   const service = await fixture(upstream.baseUrl);

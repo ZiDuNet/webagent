@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS publication_versions (id INTEGER PRIMARY KEY AUTOINCR
 CREATE UNIQUE INDEX IF NOT EXISTS idx_publications_remote_code ON publications(remote_base_url, code) WHERE code != '';
 CREATE TABLE IF NOT EXISTS control_users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS control_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES control_users(id) ON DELETE CASCADE, expires_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS control_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, token_prefix TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, expires_at TEXT, allowed_origins TEXT NOT NULL DEFAULT '[]', created_by TEXT NOT NULL DEFAULT '', last_used_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS control_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, token_prefix TEXT NOT NULL DEFAULT '', token_cipher TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, expires_at TEXT, allowed_origins TEXT NOT NULL DEFAULT '[]', created_by TEXT NOT NULL DEFAULT '', last_used_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_control_tokens_hash ON control_tokens(token_hash);
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, user_id INTEGER, owner_key TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'running', started_at TEXT NOT NULL, completed_at TEXT);
 CREATE TABLE IF NOT EXISTS run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, name TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_run_events ON run_events(run_id,id);
 CREATE TABLE IF NOT EXISTS approvals_v2 (id TEXT PRIMARY KEY, user_id INTEGER, owner_key TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'pending', data TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS questions (id TEXT PRIMARY KEY, user_id INTEGER, owner_key TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'pending', data TEXT NOT NULL, expires_at TEXT NOT NULL, answered_at TEXT, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id,status);
-CREATE TABLE IF NOT EXISTS access_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, token_prefix TEXT NOT NULL DEFAULT '', assistant_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, expires_at TEXT, allowed_origins TEXT NOT NULL DEFAULT '[]', rate_limit_per_minute INTEGER NOT NULL DEFAULT 0, daily_token_limit INTEGER NOT NULL DEFAULT 0, session_retention_days INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL DEFAULT '', last_used_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS access_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, token_prefix TEXT NOT NULL DEFAULT '', token_cipher TEXT NOT NULL DEFAULT '', assistant_id INTEGER NOT NULL, channel TEXT NOT NULL DEFAULT 'chat', enabled INTEGER NOT NULL DEFAULT 1, expires_at TEXT, allowed_origins TEXT NOT NULL DEFAULT '[]', rate_limit_per_minute INTEGER NOT NULL DEFAULT 0, daily_token_limit INTEGER NOT NULL DEFAULT 0, session_retention_days INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL DEFAULT '', last_used_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_access_tokens_assistant ON access_tokens(assistant_id);
 CREATE TABLE IF NOT EXISTS access_sessions (session_hash TEXT PRIMARY KEY, access_token_id INTEGER NOT NULL REFERENCES access_tokens(id) ON DELETE CASCADE, visitor_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_access_sessions_token ON access_sessions(access_token_id,expires_at);
@@ -120,6 +120,12 @@ export class Store {
     // 必须在导出并删除配置表之前解除 access_tokens 对 assistants 的外键，
     // 否则 SQLite 会因 FK 检查拒绝 DROP TABLE。
     this.migrateAccessTokenForeignKeys();
+    // 旧库补列：Token 原文以密文保存，管理端可再次查看与复制。
+    for (const table of ["access_tokens", "control_tokens"]) {
+      if (!this.columns(table).includes("token_cipher")) this.agent.exec(`ALTER TABLE ${table} ADD COLUMN token_cipher TEXT NOT NULL DEFAULT ''`);
+    }
+    if (!this.columns("access_tokens").includes("channel")) this.agent.exec("ALTER TABLE access_tokens ADD COLUMN channel TEXT NOT NULL DEFAULT 'chat'");
+    this.agent.exec("CREATE INDEX IF NOT EXISTS idx_access_tokens_channel ON access_tokens(channel,enabled)");
     this.importLegacyConfig();
     for (const table of ["sessions", "memories", "publications", "runs", "approvals_v2", "questions"]) {
       const columns = new Set(this.columns(table));

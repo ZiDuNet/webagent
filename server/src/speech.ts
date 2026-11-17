@@ -85,7 +85,7 @@ function wsEndpoint(provider: Row, model: Row, options: Row, pathname = "/api-ws
 }
 export class Speech {
   constructor(private providers: Providers) {}
-  async transcribe(model: Row, dataUrl: string, language = "zh", signal?: AbortSignal) {
+  async transcribe(model: Row, dataUrl: string, language = "zh", signal?: AbortSignal, context: { sessionId?: string; username?: string } = {}) {
     if (!model.enabled || !["asr", "asr_realtime"].includes(model.model_kind)) throw new AppError("STT 模型未启用或类型不正确", 422);
     const provider = this.providers.connection(model.provider_id);
     const options = asrConfig(model, provider);
@@ -94,30 +94,35 @@ export class Speech {
     const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const started = Date.now();
     if (options.protocol === "realtime") {
-      const pcm = pcmFromWav(input.bytes);
-      requestSignal.throwIfAborted();
-      const target = new URL(options.endpoint); target.searchParams.set("model", model.model_id);
-      const text = await new Promise<string>((resolve, reject) => {
-        const socket = new WebSocket(target, { headers: { ...providerHeaders(provider), "OpenAI-Beta": "realtime=v1" }, handshakeTimeout: 10000, maxPayload: 1024 * 1024, followRedirects: false });
-        let transcript = ""; let complete = false;
-        const finish = (error?: Error) => { if (complete) return; complete = true; requestSignal.removeEventListener("abort", aborted); socket.close(); error ? reject(error) : resolve(transcript); };
-        const aborted = () => { socket.terminate(); finish(new AppError("实时语音识别超时或取消", 504)); };
-        requestSignal.addEventListener("abort", aborted, { once: true });
-        socket.on("open", () => socket.send(JSON.stringify({ event_id: "wa-session", type: "session.update", session: { modalities: ["text"], input_audio_format: "pcm", sample_rate: 16000, turn_detection: null, input_audio_transcription: { language } } })));
-        socket.on("message", (raw) => {
-          try {
-            const event = JSON.parse(raw.toString());
-            if (event.type === "error" || event.error) return finish(new AppError(String(event.error?.message || event.message || "语音服务返回错误").replaceAll(provider.api_key || "\u0000", "[隐藏]"), 502));
-            if (event.type === "session.updated") { for (let offset = 0; offset < pcm.length; offset += 3200) socket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: pcm.subarray(offset, offset + 3200).toString("base64") })); socket.send(JSON.stringify({ type: "input_audio_buffer.commit" })); socket.send(JSON.stringify({ type: "session.finish" })); }
-            if (event.type === "conversation.item.input_audio_transcription.completed") transcript += event.transcript || "";
-            if (event.type === "session.finished") finish();
-          } catch { finish(new AppError("实时语音服务返回无效数据", 502)); }
+      try {
+        const pcm = pcmFromWav(input.bytes);
+        requestSignal.throwIfAborted();
+        const target = new URL(options.endpoint); target.searchParams.set("model", model.model_id);
+        const text = await new Promise<string>((resolve, reject) => {
+          const socket = new WebSocket(target, { headers: { ...providerHeaders(provider), "OpenAI-Beta": "realtime=v1" }, handshakeTimeout: 10000, maxPayload: 1024 * 1024, followRedirects: false });
+          let transcript = ""; let complete = false;
+          const finish = (error?: Error) => { if (complete) return; complete = true; requestSignal.removeEventListener("abort", aborted); socket.close(); error ? reject(error) : resolve(transcript); };
+          const aborted = () => { socket.terminate(); finish(new AppError("实时语音识别超时或取消", 504)); };
+          requestSignal.addEventListener("abort", aborted, { once: true });
+          socket.on("open", () => socket.send(JSON.stringify({ event_id: "wa-session", type: "session.update", session: { modalities: ["text"], input_audio_format: "pcm", sample_rate: 16000, turn_detection: null, input_audio_transcription: { language } } })));
+          socket.on("message", (raw) => {
+            try {
+              const event = JSON.parse(raw.toString());
+              if (event.type === "error" || event.error) return finish(new AppError(String(event.error?.message || event.message || "语音服务返回错误").replaceAll(provider.api_key || "\u0000", "[隐藏]"), 502));
+              if (event.type === "session.updated") { for (let offset = 0; offset < pcm.length; offset += 3200) socket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: pcm.subarray(offset, offset + 3200).toString("base64") })); socket.send(JSON.stringify({ type: "input_audio_buffer.commit" })); socket.send(JSON.stringify({ type: "session.finish" })); }
+              if (event.type === "conversation.item.input_audio_transcription.completed") transcript += event.transcript || "";
+              if (event.type === "session.finished") finish();
+            } catch { finish(new AppError("实时语音服务返回无效数据", 502)); }
+          });
+          socket.on("error", () => finish(new AppError("实时语音 WebSocket 连接失败，请核对端点、模型地域与权限", 502)));
+          socket.on("close", () => finish(transcript ? undefined : new AppError("实时语音服务提前断开，未返回识别结果", 502)));
         });
-        socket.on("error", () => finish(new AppError("实时语音 WebSocket 连接失败，请核对端点、模型地域与权限", 502)));
-        socket.on("close", () => finish(transcript ? undefined : new AppError("实时语音服务提前断开，未返回识别结果", 502)));
-      });
-      this.providers.record(model, "asr", {}, "", "", Date.now() - started);
-      return { text: text.trim(), protocol: "realtime", latency_ms: Date.now() - started };
+        this.providers.record(model, "asr", {}, context.sessionId, context.username, Date.now() - started);
+        return { text: text.trim(), protocol: "realtime", latency_ms: Date.now() - started };
+      } catch (error) {
+        this.providers.record(model, "asr", {}, context.sessionId, context.username, Date.now() - started, "error", error instanceof Error ? error.message : "语音识别失败");
+        throw error;
+      }
     }
     const headers = providerHeaders(provider);
     let body: BodyInit;
@@ -131,46 +136,66 @@ export class Speech {
       if (options.protocol === "chat_audio") body = JSON.stringify({ model: model.model_id, messages: [{ role: "user", content: [{ type: "input_audio", input_audio: options.data_format === "data_uri" ? { data: dataUri } : { data: wav.toString("base64"), format: "wav" } }] }], asr_options: { language }, stream: false });
       else body = JSON.stringify({ model: model.model_id, input: { messages: [{ role: "user", content: [/qwen-audio-3\./i.test(model.model_id) ? { type: "input_audio", input_audio: { data: dataUri } } : { audio: dataUri }] }] }, parameters: /qwen-audio-3\./i.test(model.model_id) ? { format: "wav", sample_rate: 16000 } : { asr_options: { language } } });
     }
-    const payload = await requestJson(options.endpoint, { method: "POST", headers, body, signal: requestSignal });
+    let payload: Row;
+    try {
+      payload = await requestJson(options.endpoint, { method: "POST", headers, body, signal: requestSignal });
+    } catch (error) {
+      this.providers.record(model, "asr", {}, context.sessionId, context.username, Date.now() - started, "error", error instanceof Error ? error.message : "语音识别失败");
+      throw error;
+    }
     const value = payload.text || payload.choices?.[0]?.message?.content || payload.output?.choices?.[0]?.message?.content || payload.output?.text || "";
     const text = typeof value === "string" ? value : Array.isArray(value) ? value.map((part) => part.text || "").join("") : "";
-    this.providers.record(model, "asr", payload.usage, "", "", Date.now() - started);
+    this.providers.record(model, "asr", payload.usage, context.sessionId, context.username, Date.now() - started);
     return { text: text.trim(), protocol: options.protocol, latency_ms: Date.now() - started };
   }
-  async synthesize(model: Row, text: string, overrides: Row = {}, signal?: AbortSignal) {
+  async synthesize(model: Row, text: string, overrides: Row = {}, signal?: AbortSignal, context: { sessionId?: string; username?: string } = {}) {
     if (typeof text !== "string" || !text.trim() || text.length > 4000) throw new AppError("TTS 文本需要 1–4000 字符", 422);
+    const started = Date.now();
+    const purpose = model.model_kind === "tts_realtime" ? "tts_realtime" : "tts";
     const provider = this.providers.connection(model.provider_id);
     const options = { ...ttsConfig(model, provider), ...Object.fromEntries(Object.entries(overrides).filter(([key]) => ["voice", "response_format", "speed"].includes(key))) };
     if (options.protocol === "realtime") {
-      const audio = await this.synthesizeRealtime(model, text, overrides, signal);
-      return audio;
+      try {
+        const audio = await this.synthesizeRealtime(model, text, overrides, signal);
+        this.providers.record(model, purpose, {}, context.sessionId, context.username, Date.now() - started);
+        return audio;
+      } catch (error) {
+        this.providers.record(model, purpose, {}, context.sessionId, context.username, Date.now() - started, "error", error instanceof Error ? error.message : "语音合成失败");
+        throw error;
+      }
     }
     const formats: Row = { mp3: "audio/mpeg", wav: "audio/wav", opus: "audio/ogg", aac: "audio/aac", flac: "audio/flac", pcm: "audio/pcm" };
     if (!formats[options.response_format] || !Number.isFinite(Number(options.speed)) || Number(options.speed) < 0.25 || Number(options.speed) > 4) throw new AppError("TTS 格式或语速无效", 422);
     if (options.protocol === "dashscope" && !options.oldQwen && (text.length > 600 || options.response_format !== "wav" || Number(options.speed) !== 1)) throw new AppError("Qwen3 TTS 单次最多 600 字符，仅支持 WAV、语速 1", 422);
     const payload = options.protocol === "openai" ? { model: model.model_id, input: text, voice: options.voice, response_format: options.response_format, speed: options.speed } : { model: model.model_id, input: { text, voice: options.voice, ...(options.oldQwen ? { format: options.response_format, rate: options.speed } : { language_type: "Auto" }) } };
-    const response = await fetch(options.endpoint, { method: "POST", headers: { ...providerHeaders(provider), "Content-Type": "application/json", Accept: options.protocol === "openai" ? "audio/*" : "application/json" }, body: JSON.stringify(payload), signal: signal || AbortSignal.timeout(provider.timeout_seconds * 1000), redirect: "error" });
-    let bytes = await limitedResponse(response, 10 * 1024 * 1024);
-    if (!response.ok) throw new AppError(`语音服务 HTTP ${response.status}`, 502);
-    if (options.protocol === "dashscope") {
-      const data = JSON.parse(bytes.toString()); const audio = data.output?.audio;
-      if (!audio) throw new AppError("DashScope 未返回 output.audio", 502);
-      if (audio.data) bytes = Buffer.from(audio.data, "base64");
-      else {
-        const url = new URL(audio.url); const origin = new URL(provider.base_url).origin;
-        if (url.protocol === "http:") url.protocol = "https:";
-        // DashScope may return a regional host with an optional region suffix,
-        // e.g. dashscope-result-bj.oss-cn-beijing.aliyuncs.com or the older
-        // dashscope-result.oss-cn-beijing.aliyuncs.com form.
-        const trustedOss = /^dashscope-result(?:-[a-z0-9-]+)?\.oss-[a-z0-9-]+\.aliyuncs\.com$/i.test(url.hostname);
-        if (url.origin !== origin && (!trustedOss || url.username || url.password)) throw new AppError("音频结果下载地址未经信任", 502);
-        const download = await fetch(url, { redirect: "error", signal: signal || AbortSignal.timeout(30000) });
-        if (!download.ok) throw new AppError("音频结果下载失败", 502);
-        bytes = await limitedResponse(download, 10 * 1024 * 1024);
-      }
-    } else if (!/^(audio\/|application\/octet-stream)/.test(response.headers.get("content-type") || "")) throw new AppError("TTS 返回内容不是音频", 502);
-    if (!bytes.length || bytes.length > 10 * 1024 * 1024) throw new AppError("TTS 音频为空或超限", 502);
-    return { bytes, mime_type: formats[options.response_format], protocol: options.protocol };
+    try {
+      const response = await fetch(options.endpoint, { method: "POST", headers: { ...providerHeaders(provider), "Content-Type": "application/json", Accept: options.protocol === "openai" ? "audio/*" : "application/json" }, body: JSON.stringify(payload), signal: signal || AbortSignal.timeout(provider.timeout_seconds * 1000), redirect: "error" });
+      let bytes = await limitedResponse(response, 10 * 1024 * 1024);
+      if (!response.ok) throw new AppError(`语音服务 HTTP ${response.status}`, 502);
+      if (options.protocol === "dashscope") {
+        const data = JSON.parse(bytes.toString()); const audio = data.output?.audio;
+        if (!audio) throw new AppError("DashScope 未返回 output.audio", 502);
+        if (audio.data) bytes = Buffer.from(audio.data, "base64");
+        else {
+          const url = new URL(audio.url); const origin = new URL(provider.base_url).origin;
+          if (url.protocol === "http:") url.protocol = "https:";
+          // DashScope may return a regional host with an optional region suffix,
+          // e.g. dashscope-result-bj.oss-cn-beijing.aliyuncs.com or the older
+          // dashscope-result.oss-cn-beijing.aliyuncs.com form.
+          const trustedOss = /^dashscope-result(?:-[a-z0-9-]+)?\.oss-[a-z0-9-]+\.aliyuncs\.com$/i.test(url.hostname);
+          if (url.origin !== origin && (!trustedOss || url.username || url.password)) throw new AppError("音频结果下载地址未经信任", 502);
+          const download = await fetch(url, { redirect: "error", signal: signal || AbortSignal.timeout(30000) });
+          if (!download.ok) throw new AppError("音频结果下载失败", 502);
+          bytes = await limitedResponse(download, 10 * 1024 * 1024);
+        }
+      } else if (!/^(audio\/|application\/octet-stream)/.test(response.headers.get("content-type") || "")) throw new AppError("TTS 返回内容不是音频", 502);
+      if (!bytes.length || bytes.length > 10 * 1024 * 1024) throw new AppError("TTS 音频为空或超限", 502);
+      this.providers.record(model, purpose, {}, context.sessionId, context.username, Date.now() - started);
+      return { bytes, mime_type: formats[options.response_format], protocol: options.protocol };
+    } catch (error) {
+      this.providers.record(model, purpose, {}, context.sessionId, context.username, Date.now() - started, "error", error instanceof Error ? error.message : "语音合成失败");
+      throw error;
+    }
   }
   async openAsrRealtime(model: Row, language: string, onPartial: (text: string) => void, signal: AbortSignal) {
     const provider = this.providers.connection(model.provider_id);

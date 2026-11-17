@@ -10,10 +10,10 @@ import { Speech } from "./speech.js";
 import { Publications } from "./publications.js";
 import { SkillLibrary } from "./skill-library.js";
 import { speakableText } from "./speech-text.js";
-import { readSessionUpload } from "./attachments.js";
 import { brandUrl, readBrandLogo } from "./brand.js";
 import { AppError, type Row } from "./types.js";
 import { effectiveAssistantConfig } from "./assistant-config.js";
+import { copySessionAttachments, readSessionUpload } from "./attachments.js";
 
 const prefix = "/api/agent";
 const chatSchema = z.object({ message: z.string().max(20000).optional(), messages: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(20000) })).max(40).optional(), session_id: z.string().max(100).optional(), assistant_id: z.number().int().positive().optional(), model_row_id: z.number().int().positive().optional(), enabled_tools: z.array(z.string().max(64)).max(500).optional(), reasoning_effort: z.enum(["off", "none", "minimal", "low", "medium", "high", "xhigh"]).nullish().transform((value) => value ?? undefined), approval_mode: z.enum(["confirm", "full_access"]).optional(), attachments: z.array(z.object({ name: z.string().max(160), mime_type: z.enum(["image/png", "image/jpeg", "image/webp", "image/gif"]), data_url: z.string().max(8000000) })).max(4).optional() });
@@ -32,9 +32,21 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
     const { pagepilot_token, memory_extraction_prompt, ...publicSettings } = settings;
     const fileAsr = speechStatus(effective.asr_model_id, ["asr"]);
     const realtimeAsr = speechStatus(effective.asr_realtime_model_id, ["asr_realtime"]);
-    const fileTts = speechStatus(effective.tts_model_id, ["tts"]);
-    const voiceAsr = speechStatus(effective.voice_asr_model_id, ["asr_realtime"]);
-    const voiceTts = speechStatus(effective.voice_tts_model_id, ["tts_realtime"]);
+    const fileTts = speechStatus(effective.tts_model_id, ["tts", "tts_realtime"]);
+    const voiceAsr = speechStatus(effective.voice_asr_model_id, ["asr_realtime", "asr"]);
+    const voiceTts = speechStatus(effective.voice_tts_model_id, ["tts_realtime", "tts"]);
+    // 输入框语音默认走文件 STT：auto 在文件模型可用时解析为 file；只有实时模型可用时
+    // 才回退 realtime，避免前端按 auto 直接建立实时 WebSocket。显式选择 realtime/file
+    // 时保持原语义，不替用户跨模式回退。
+    const voiceInputMode = effective.voice_input_mode === "realtime"
+      ? "realtime"
+      : effective.voice_input_mode === "file"
+        ? "file"
+        : fileAsr.configured
+          ? "file"
+          : realtimeAsr.configured
+            ? "realtime"
+            : "file";
     const ownerKey = agent.identity.owner_key;
     const memoryCount = Number(store.one("SELECT COUNT(*) AS total FROM memories WHERE owner_key=? AND enabled=1", [ownerKey])?.total || 0);
     const memoryPending = Number(store.one("SELECT COUNT(*) AS total FROM memories WHERE owner_key=? AND enabled=0 AND kind='extracted'", [ownerKey])?.total || 0);
@@ -53,10 +65,10 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
       memory: { enabled: Boolean(settings.memory_enabled && (assistant.memory_enabled ?? true)), auto_extract: Boolean(settings.memory_auto_extract), auto_confirm: Boolean(settings.memory_auto_confirm), count: memoryCount, pending: memoryPending },
       asr: fileAsr,
       asr_realtime: realtimeAsr,
-      tts: fileTts,
+      tts: fileTts.configured ? fileTts : voiceTts,
       voice_asr: voiceAsr,
       voice_tts: voiceTts,
-      voice_input_mode: effective.voice_input_mode,
+      voice_input_mode: voiceInputMode,
       voice_auto_send: effective.voice_auto_send,
       tts_auto_read: effective.tts_auto_read,
       tts_max_read_chars: effective.tts_max_read_chars,
@@ -92,6 +104,16 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
     return { items };
   });
   app.get(`${prefix}/sessions`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); return { items: store.all("SELECT * FROM sessions WHERE owner_key=? ORDER BY updated_at DESC LIMIT 200", [user.owner_key]).map((session) => ({ ...session, assistant_name: String(store.assistant(Number(session.assistant_id))?.name || "") })) }; });
+  app.delete(`${prefix}/sessions`, async (request, reply) => {
+    const { identity: user } = await auth.agent(request, reply);
+    let deleted = 0;
+    let skipped = 0;
+    for (const row of store.all("SELECT id FROM sessions WHERE owner_key=?", [user.owner_key])) {
+      if (!store.removeSession(String(row.id))) skipped += 1;
+      else deleted += 1;
+    }
+    return { ok: true, deleted, skipped };
+  });
   app.post(`${prefix}/sessions`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const body = z.object({ title: z.string().max(120).optional(), assistant_id: z.number().int().positive().optional() }).parse(request.body || {}); reply.code(201); return { session: runtime.createSession(user, body) }; });
   app.patch(`${prefix}/sessions/:id`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; store.ownedSession(id, user); store.assertIdle(id); const body = z.object({ title: z.string().trim().min(1).max(120).optional(), assistant_id: z.number().int().positive().optional() }).parse(request.body); if (body.assistant_id) { runtime.assistant(user, body.assistant_id); store.invalidateContext(id); } return { session: store.update("sessions", id, body) }; });
   app.delete(`${prefix}/sessions/:id`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = (request.params as Row).id; store.ownedSession(id, user); store.assertIdle(id); store.removeSession(id); return { ok: true }; });
@@ -104,7 +126,8 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
     if (!upload) throw new AppError("附件不存在", 404);
     return reply
       .type(upload.mime_type)
-      .header("Cache-Control", "private, max-age=31536000, immutable")
+      .header("Cache-Control", "private, no-store")
+      .header("X-Content-Type-Options", "nosniff")
       .header("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(String(file))}`)
       .send(upload.bytes);
   });
@@ -120,7 +143,8 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
         if (body.until_message_id && message.id > body.until_message_id) break;
         const { id, metadata, created_at, ...copy } = message;
         const { approval, question, ...safeMetadata } = metadata;
-        store.conversations.insert(created.id, { ...copy, metadata: { ...safeMetadata, approval_status: approval ? "forked" : undefined, question_status: question ? "forked" : undefined } });
+        const attachments = copySessionAttachments(store.dataDir, source.id, created.id, message.attachments || []);
+        store.conversations.insert(created.id, { ...copy, attachments, metadata: { ...safeMetadata, approval_status: approval ? "forked" : undefined, question_status: question ? "forked" : undefined } });
       }
       const session = store.update("sessions", created.id, { last_model_id: source.last_model_id, last_model_name: source.last_model_name })!;
       reply.code(201);
@@ -143,24 +167,25 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
   app.post(`${prefix}/memories`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const body = z.object({ content: z.string().min(1).max(2000), kind: z.string().max(20).default("fact") }).parse(request.body); reply.code(201); return { memory: store.insert("memories", { ...body, ...store.ownerColumns(user) }) }; });
   app.patch(`${prefix}/memories/:id`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const id = Number((request.params as Row).id); if (!store.one("SELECT id FROM memories WHERE id=? AND owner_key=?", [id, user.owner_key])) throw new AppError("记忆不存在", 404); const body = z.object({ content: z.string().min(1).max(2000).optional(), enabled: z.boolean().optional() }).parse(request.body); return { memory: store.update("memories", id, body) }; });
   app.delete(`${prefix}/memories/:id`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); store.run("DELETE FROM memories WHERE id=? AND owner_key=?", [Number((request.params as Row).id), user.owner_key]); return { ok: true }; });
-  app.get(`${prefix}/usage/me`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); return { totals: user.access_token_id ? store.one("SELECT coalesce(sum(lc.total_tokens),0) AS total_tokens,coalesce(sum(lc.cost_usd),0) AS cost_usd FROM llm_calls lc JOIN sessions s ON s.id=lc.session_id WHERE s.owner_key=?", [user.owner_key]) : store.one("SELECT coalesce(sum(total_tokens),0) AS total_tokens,coalesce(sum(cost_usd),0) AS cost_usd FROM llm_calls WHERE username=?", [user.username]), calls: store.all("SELECT * FROM llm_calls WHERE username=? ORDER BY id DESC LIMIT 100", [user.username]) }; });
+  app.get(`${prefix}/usage/me`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); return { totals: store.one("SELECT coalesce(sum(lc.total_tokens),0) AS total_tokens,coalesce(sum(lc.cost_usd),0) AS cost_usd FROM llm_calls lc JOIN sessions s ON s.id=lc.session_id WHERE s.owner_key=?", [user.owner_key]), calls: store.all("SELECT lc.* FROM llm_calls lc JOIN sessions s ON s.id=lc.session_id WHERE s.owner_key=? ORDER BY lc.id DESC LIMIT 100", [user.owner_key]) }; });
   app.post(`${prefix}/transcribe`, async (request, reply) => {
     const { identity: user } = await auth.agent(request, reply);
     const settings = store.settings();
-    const body = z.object({ audio_data_url: z.string().max(18000000), language: z.string().max(20).default("zh"), assistant_id: z.number().int().positive().optional() }).parse(request.body);
+    const body = z.object({ audio_data_url: z.string().max(18000000), language: z.string().max(20).default("zh"), assistant_id: z.number().int().positive().optional(), session_id: z.string().max(100).optional() }).parse(request.body);
+    if (body.session_id) store.ownedSession(body.session_id, user);
     const assistant = runtime.assistant(user, body.assistant_id);
     const effective = effectiveAssistantConfig(assistant, settings);
     const candidatesByMode = effective.voice_input_mode === "realtime"
       ? [effective.asr_realtime_model_id]
       : effective.voice_input_mode === "file"
         ? [effective.asr_model_id]
-        : [effective.asr_realtime_model_id, effective.asr_model_id];
+        : [effective.asr_model_id, effective.asr_realtime_model_id];
     const models = [...new Set(candidatesByMode.filter((id): id is number => Number.isInteger(id) && Number(id) > 0))];
     const candidates = models.map((id) => store.model(id)).filter((model): model is Row => Boolean(model?.enabled && model.provider_enabled && ["asr", "asr_realtime"].includes(model.model_kind)));
     if (!candidates.length) throw new AppError("管理员尚未配置可用 STT 模型", 422);
     let lastError: unknown;
     for (const model of candidates) {
-      try { return { ...await speech.transcribe(model, body.audio_data_url, body.language), model_id: model.id, model_name: model.name }; }
+      try { return { ...await speech.transcribe(model, body.audio_data_url, body.language, undefined, { sessionId: body.session_id, username: user.username }), model_id: model.id, model_name: model.name }; }
       catch (error) { lastError = error; }
     }
     throw lastError instanceof Error ? lastError : new AppError("语音识别失败", 502);
@@ -173,12 +198,13 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
     const body = request.body as Row;
     const assistant = runtime.assistant(user, Number(body.assistant_id) || undefined);
     const effective = effectiveAssistantConfig(assistant, settings);
-    const model = store.model(effective.tts_model_id || 0);
+    const model = store.model(effective.tts_model_id || effective.voice_tts_model_id || 0);
     if (!model) throw new AppError("管理员尚未配置非实时 TTS 模型", 422);
     const maxChars = Math.min(4000, Math.max(1, Number(effective.tts_max_read_chars || 1200)));
     const text = speakableText(String(body.text || body.input || "")).slice(0, maxChars);
     if (!text.trim()) throw new AppError("没有可朗读的正文；代码、HTML、表格和链接不会被朗读", 422);
-    const result = await speech.synthesize(model, text, body, controller.signal);
+    if (body.session_id) store.ownedSession(String(body.session_id), user);
+    const result = await speech.synthesize(model, text, body, controller.signal, { sessionId: body.session_id ? String(body.session_id) : undefined, username: user.username });
     return reply.type(result.mime_type).header("Cache-Control", "no-store").send(result.bytes);
   });
   app.get(`${prefix}/pagepilot/status`, async (request, reply) => { await auth.agent(request, reply); return publications.status(); });

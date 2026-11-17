@@ -13,6 +13,24 @@ import { effectiveAssistantConfig } from "./assistant-config.js";
 
 const PATH = "/api/agent/voice/stream";
 const DICTATION_PATH = "/api/agent/voice/dictate";
+const VOICE_PROTOCOL = "webagent.voice";
+const TOKEN_PROTOCOL_PREFIX = "webagent.token.";
+
+export function voiceCredential(request: IncomingMessage): string {
+  const protocols = String(request.headers["sec-websocket-protocol"] || "")
+    .split(",")
+    .map((value) => value.trim());
+  const carried = protocols.find((value) => value.startsWith(TOKEN_PROTOCOL_PREFIX));
+  if (!carried) return "";
+  const encoded = carried.slice(TOKEN_PROTOCOL_PREFIX.length);
+  // 浏览器可自定义的子协议必须是 token 字符；客户端把凭据做 base64url 编码，避免特殊字符导致握手失败。
+  try {
+    const decoded = Buffer.from(encoded, "base64url").toString("utf8");
+    return /^[\x20-\x7e]{1,8192}$/.test(decoded) ? decoded : encoded;
+  } catch {
+    return encoded;
+  }
+}
 
 class Dictation {
   private closed = false;
@@ -56,11 +74,26 @@ class Dictation {
   }
   async commit() {
     if (!this.stream) throw new AppError("实时语音识别尚未就绪", 409);
-    const transcript = (await this.stream.finish()).trim();
-    this.stream.close();
+    const stream = this.stream;
     this.stream = undefined;
-    this.bytes = 0;
-    this.partial = "";
+    let transcript = "";
+    let timer: NodeJS.Timeout | undefined;
+    const finishing = stream.finish();
+    // 超时后 finish() 仍可能因为 socket 被关闭而拒绝；提前挂上处理器避免进程级未捕获异常。
+    void finishing.catch(() => {});
+    try {
+      transcript = (await Promise.race([
+        finishing,
+        new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), 8000); }),
+      ])).trim();
+    } catch {
+      transcript = "";
+    } finally {
+      if (timer) clearTimeout(timer);
+      stream.close();
+      this.bytes = 0;
+      this.partial = "";
+    }
     if (!transcript) this.send({ type: "asr.empty" });
     else this.send({ type: "asr.final", text: transcript });
   }
@@ -82,8 +115,9 @@ class SpeechQueue {
   private pending = "";
   private closed = false;
   private spoke = false;
+  private realtimeSampleRate = 24000;
   private cancelSynthesis?: AbortController;
-  constructor(private speech: Speech, private model: Row, private send: (message: Row) => void, private realtime: boolean, private cancellable = false) {}
+  constructor(private speech: Speech, private model: Row, private send: (message: Row) => void, private realtime: boolean, private cancellable = false, private context: { sessionId?: string; username?: string } = {}) {}
   prewarm() {
     if (!this.realtime || this.closed) return;
     void this.ensureRealtime().catch(() => {});
@@ -101,7 +135,8 @@ class SpeechQueue {
       this.pending += filtered.slice(common);
     }
     this.emitted = filtered;
-    const drained = drainSpeechText(this.pending);
+    // 实时通话需要更短的句子才能尽快出首包；文件合成可以攒长一点，减少请求次数。
+    const drained = drainSpeechText(this.pending, this.realtime ? 36 : 100);
     this.pending = drained.rest;
     if (!drained.chunks.length) return;
     this.sentences.push(...drained.chunks);
@@ -121,12 +156,14 @@ class SpeechQueue {
     if (this.closed) throw new AppError("语音合成已取消", 499);
     if (this.realtimeSession) return this.realtimeSession;
     if (!this.realtimePromise) this.realtimePromise = this.speech.openTtsRealtime(this.model, (bytes) => {
-      this.send({ type: "tts.audio", audio: bytes.toString("base64"), format: "pcm", sample_rate: 24000 });
+      this.send({ type: "tts.audio", audio: bytes.toString("base64"), format: "pcm", sample_rate: this.realtimeSampleRate });
     }, this.realtimeController.signal).catch((error) => {
       this.realtimePromise = undefined;
       throw error;
     });
-    this.realtimeSession = await this.realtimePromise;
+    const session = await this.realtimePromise;
+    this.realtimeSampleRate = Number((session as Row).sample_rate) || 24000;
+    this.realtimeSession = session;
     return this.realtimeSession;
   }
   private flushAudio() {
@@ -138,7 +175,7 @@ class SpeechQueue {
         for (let offset = 0; offset < sentence.length; offset += 600) {
           const part = sentence.slice(offset, offset + 600);
           this.cancelSynthesis ??= new AbortController();
-          const result = await this.speech.synthesize(this.model, part, {}, this.cancelSynthesis.signal);
+          const result = await this.speech.synthesize(this.model, part, {}, this.cancelSynthesis.signal, this.context);
           if (this.closed) return;
           this.send({ type: "tts.audio", audio: result.bytes.toString("base64"), mime_type: result.mime_type, format: result.mime_type === "audio/pcm" ? "pcm" : "file", sample_rate: (result as Row).sample_rate });
         }
@@ -290,7 +327,7 @@ class VoiceCall {
         this.asrController = undefined;
       } else {
         const wav = pcmToWav(Buffer.concat(this.asrBuffer), 16000);
-        const result = await this.speech.transcribe(this.config.asr, `data:audio/wav;base64,${wav.toString("base64")}`, "zh");
+        const result = await this.speech.transcribe(this.config.asr, `data:audio/wav;base64,${wav.toString("base64")}`, "zh", undefined, { sessionId: this.sessionId, username: this.user.username });
         transcript = result.text;
       }
     } catch (error) {
@@ -330,7 +367,7 @@ class VoiceCall {
     const turn = ++this.turn;
     this.tts?.close();
     const ttsRealtime = this.config.tts.model_kind === "tts_realtime" || String(this.config.tts.extra_params?._tts?.protocol || "") === "realtime";
-    const tts = new SpeechQueue(this.speech, this.config.tts, (message) => { if (turn === this.turn) this.send(message); }, ttsRealtime, true);
+    const tts = new SpeechQueue(this.speech, this.config.tts, (message) => { if (turn === this.turn) this.send(message); }, ttsRealtime, true, { sessionId: this.sessionId, username: this.user.username });
     this.tts = tts;
     tts.prewarm();
     this.send({ type: "status", state: "thinking", label: "正在思考" });
@@ -409,7 +446,11 @@ class VoiceCall {
 
 export function voiceRoutes(app: FastifyInstance, context: { store: Store; auth: Auth; speech: Speech; runs: Runs; runtime: PiRuntime }) {
   const { store, auth, speech, runs, runtime } = context;
-  const server = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
+  const server = new WebSocketServer({
+    noServer: true,
+    maxPayload: 2 * 1024 * 1024,
+    handleProtocols: (protocols) => (protocols.has(VOICE_PROTOCOL) ? VOICE_PROTOCOL : false),
+  });
   const calls = new Set<VoiceCall>();
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     let url: URL;
@@ -422,8 +463,13 @@ export function voiceRoutes(app: FastifyInstance, context: { store: Store; auth:
     let call: VoiceCall | undefined;
     let dictation: Dictation | undefined;
     try {
+      // 浏览器 WebSocket 无法自定义 Authorization；业务接入方（如 PC4D 大屏）用子协议携带短期凭据。
+      const carried = voiceCredential(request);
+      const headers = carried
+        ? { ...request.headers, authorization: `Bearer ${carried}` }
+        : request.headers;
       const agent = await auth.agentFromNode(
-        request.headers as Record<string, string | string[] | undefined>,
+        headers as Record<string, string | string[] | undefined>,
         parseCookies(String(request.headers.cookie || "")),
       );
       const user = agent.identity;
