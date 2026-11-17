@@ -69,9 +69,11 @@ npm run dev:chat
 npm run init:env
 docker compose config --quiet
 docker compose up -d --build
+# 或使用封装脚本（自动校验 .env）
+npm run docker:up
 ```
 
-管理端默认 `http://localhost:8081/admin/`，Chat 默认 `http://localhost:8080/chat/`，Node 后端只在内部网络暴露。三个服务分别构建，数据保存在命名卷。远程部署须配置公开前端 URL、HTTPS、独立管理密码，并接入业务身份适配器或签发接入 Token，详见 [部署说明](docs/DEPLOYMENT.md)。
+单镜像 `webagent-pi:local` 内置后端、管理端与 Chat，统一由 Node 后端托管在 `http://localhost:8000`：管理端 `/admin/`，Chat `/chat/`（`/react/` 会重定向到 `/chat/`）。数据保存在命名卷 `pi-data`。远程部署须配置公开前端 URL、HTTPS、独立管理密码，并接入业务身份适配器或签发接入 Token，详见 [部署说明](docs/DEPLOYMENT.md)。
 
 ## 主要能力
 

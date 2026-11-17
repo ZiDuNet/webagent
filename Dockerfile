@@ -17,12 +17,15 @@ COPY chat/ chat/
 COPY scripts/ scripts/
 RUN npm run typecheck && npm test && npm run build
 
-FROM node:24-bookworm-slim AS backend
+# 单镜像：Node 后端统一托管 /api/agent、/api/control、/admin/ 与 /chat/
+FROM node:24-bookworm-slim AS app
 ENV NODE_ENV=production \
     HOME=/tmp \
     WEBAGENT_BIND_HOST=0.0.0.0 \
     WEBAGENT_PORT=8000 \
-    WEBAGENT_DATA_DIR=/app/data
+    WEBAGENT_DATA_DIR=/app/data \
+    WEBAGENT_SERVE_ADMIN=1 \
+    WEBAGENT_SERVE_CHAT=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -41,13 +44,3 @@ USER node
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 CMD node -e "fetch('http://127.0.0.1:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "server/dist/index.js"]
-
-FROM nginxinc/nginx-unprivileged:1.28-alpine AS admin
-COPY deploy/admin.nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /app/admin/dist/ /usr/share/nginx/html/admin/
-EXPOSE 8080
-
-FROM nginxinc/nginx-unprivileged:1.28-alpine AS chat
-COPY deploy/chat.nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /app/chat/dist/ /usr/share/nginx/html/chat/
-EXPOSE 8080

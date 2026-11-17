@@ -16,6 +16,9 @@
     "dev:admin": "npm run build -w sdk && npm run dev -w admin",
     "init:env": "node scripts/init-env.mjs",
     "migrate": "npm run migrate -w server",
-    "core:upgrade": "node scripts/upgrade-pi.mjs"
+    "core:upgrade": "node scripts/upgrade-pi.mjs",
+    "docker:up": "bash scripts/docker-build.sh up",
+    "docker:down": "bash scripts/docker-build.sh down",
+    "docker:logs": "bash scripts/docker-build.sh logs"
   }
 }

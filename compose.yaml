@@ -1,11 +1,15 @@
 name: webagent-pi
 
 services:
-  backend:
-    image: webagent-pi-backend:local
+  app:
+    image: webagent-pi:local
     build:
       context: .
-      target: backend
+      target: app
+      args:
+        VITE_CHAT_URL: ${WEBAGENT_CHAT_URL:-/chat/}
+        VITE_ADMIN_URL: ${WEBAGENT_ADMIN_URL:-/admin/}
+        VITE_BUSINESS_URL: ${WEBAGENT_BUSINESS_URL:-}
     init: true
     restart: unless-stopped
     read_only: true
@@ -32,70 +36,16 @@ services:
       WEBAGENT_PC4D_PUBLIC_URL: ${WEBAGENT_PC4D_PUBLIC_URL:-}
       WEBAGENT_PC4D_TOKEN_HOURS: ${WEBAGENT_PC4D_TOKEN_HOURS:-2}
       WEBAGENT_PC4D_PERMISSION_CACHE_SECONDS: ${WEBAGENT_PC4D_PERMISSION_CACHE_SECONDS:-10}
-    expose: [8000]
+    ports:
+      - "${WEBAGENT_BIND_HOST:-0.0.0.0}:${WEBAGENT_PORT:-8000}:8000"
     volumes:
       - pi-data:/app/data
     stop_grace_period: 45s
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-
-  admin:
-    image: webagent-pi-admin:local
-    build:
-      context: .
-      target: admin
-      args:
-        VITE_CHAT_URL: ${WEBAGENT_CHAT_URL:-http://localhost:${WEBAGENT_CHAT_PORT:-8080}/chat/}
-    init: true
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    tmpfs:
-      - /tmp:rw,nosuid,nodev,size=67108864,mode=1777
-    ports:
-      - "${WEBAGENT_BIND_HOST:-127.0.0.1}:${WEBAGENT_ADMIN_PORT:-8081}:8080"
-    depends_on:
-      backend:
-        condition: service_healthy
     healthcheck:
-      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health]
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
-      retries: 5
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-
-  chat:
-    image: webagent-pi-chat:local
-    build:
-      context: .
-      target: chat
-      args:
-        VITE_ADMIN_URL: ${WEBAGENT_ADMIN_URL:-http://localhost:${WEBAGENT_ADMIN_PORT:-8081}/admin/}
-        VITE_BUSINESS_URL: ${WEBAGENT_BUSINESS_URL:-}
-    init: true
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    tmpfs:
-      - /tmp:rw,nosuid,nodev,size=67108864,mode=1777
-    ports:
-      - "${WEBAGENT_BIND_HOST:-127.0.0.1}:${WEBAGENT_CHAT_PORT:-8080}:8080"
-    depends_on:
-      backend:
-        condition: service_healthy
-    healthcheck:
-      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health]
-      interval: 15s
-      timeout: 5s
+      start_period: 30s
       retries: 5
     logging:
       driver: json-file
