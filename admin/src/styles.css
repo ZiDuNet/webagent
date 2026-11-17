@@ -39,3 +39,7 @@
 .ant-divider{font-size:12px;color:#8b98ab;margin:22px 0 14px}
 .control-muted{font-size:12px;color:#8b98ab}
 .ant-alert{border-radius:12px}
+
+.tool-option__main{display:flex;flex-direction:column;min-width:0;gap:2px}
+.tool-option__title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tool-option__desc{font-size:11px;line-height:1.4;color:#7d8a9e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px}

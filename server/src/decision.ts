@@ -3,9 +3,32 @@ import { Store } from "./store.js";
 import type { SkillEntry } from "./skill-library.js";
 import { AppError, type Emit, type Identity, type Row, type ToolSpec } from "./types.js";
 
-export function parseScores(payload: Row, expected: string[]) {
+/** 阿里云 MaaS 决策接口单次最多接受 16 个 questions。 */
+const DECISION_BATCH_LIMIT = 16;
+
+function decisionBatchSize(model: Row) {
+  const raw = model.extra_params?._decision?.batch_size;
+  if (raw === undefined || raw === null || raw === "") return DECISION_BATCH_LIMIT;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > DECISION_BATCH_LIMIT) throw new AppError("决策批大小必须是 1–16 的整数", 422);
+  return value;
+}
+
+function decisionAnswerRows(payload: Row) {
   let rows = payload.answers || payload.scores || payload.results;
   if (Array.isArray(rows)) rows = Object.fromEntries(rows.map((row: Row) => [row.id || row.name, row]));
+  return rows && typeof rows === "object" ? rows : undefined;
+}
+
+function addUsage(total: Row, usage: unknown) {
+  if (!usage || typeof usage !== "object") return;
+  for (const [key, value] of Object.entries(usage as Row)) {
+    if (typeof value === "number" && Number.isFinite(value)) total[key] = Number(total[key] || 0) + value;
+  }
+}
+
+export function parseScores(payload: Row, expected: string[]) {
+  const rows = decisionAnswerRows(payload);
   if (!rows || typeof rows !== "object") throw new AppError("决策服务缺少评分", 502);
   const scores: Record<string, number> = {};
   for (const id of expected) {
@@ -52,11 +75,37 @@ export class Decision {
       const result = await this.providers.complete(model, [{ role: "system", content: this.store.settings().decision_prompt }, { role: "user", content: JSON.stringify(body) }], "decision", { ...options, signal });
       payload = JSON.parse(result.content.replace(/^```(?:json)?\s*|\s*```$/g, ""));
     } else {
-      body = { model: model.model_id, state, questions: Object.fromEntries(candidates.map((item) => [item.id, { type: "noul", instructions: item.description, criteria: { true: "适用", false: "不适用" } }])) };
+      const batchSize = decisionBatchSize(model);
+      const batchCount = Math.ceil(candidates.length / batchSize);
+      const batches: { request: Row; response: Row }[] = [];
+      const usage: Row = {};
+      let batchIndex = 0;
       try {
-        payload = await requestJson(connection.endpoint, { method: "POST", headers: { ...providerHeaders(provider), "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
-        this.providers.record(model, "decision", payload.usage, options.sessionId, options.username, Date.now() - started);
-      } catch (error) { this.providers.record(model, "decision", {}, options.sessionId, options.username, Date.now() - started, "error", "决策服务请求失败"); throw error; }
+        for (; batchIndex < batchCount; batchIndex++) {
+          const slice = candidates.slice(batchIndex * batchSize, (batchIndex + 1) * batchSize);
+          const request = { model: model.model_id, state, questions: Object.fromEntries(slice.map((item) => [item.id, { type: "noul", instructions: item.description, criteria: { true: "适用", false: "不适用" } }])) };
+          const response = await requestJson(connection.endpoint, { method: "POST", headers: { ...providerHeaders(provider), "Content-Type": "application/json" }, body: JSON.stringify(request), signal });
+          batches.push({ request, response });
+          addUsage(usage, response.usage);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.providers.record(model, "decision", usage, options.sessionId, options.username, Date.now() - started, "error", `决策服务请求失败（第 ${batchIndex + 1}/${batchCount} 批）：${message}`);
+        throw error;
+      }
+      this.providers.record(model, "decision", usage, options.sessionId, options.username, Date.now() - started);
+      const answers: Row = {};
+      for (const batch of batches) Object.assign(answers, decisionAnswerRows(batch.response) || {});
+      payload = { answers };
+      return {
+        scores: parseScores(payload, candidates.map((item) => item.id)),
+        request: { batches: batches.map((batch) => batch.request) },
+        response: { batches: batches.map((batch) => batch.response) },
+        protocol: connection.protocol,
+        latency_ms: Date.now() - started,
+        batch_size: batchSize,
+        batch_count: batchCount,
+      };
     }
     return { scores: parseScores(payload, candidates.map((item) => item.id)), request: body, response: payload, protocol: connection.protocol, latency_ms: Date.now() - started };
   }

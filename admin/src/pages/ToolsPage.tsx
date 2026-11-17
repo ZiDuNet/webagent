@@ -42,6 +42,8 @@ export default function ToolsPage() {
   const [tagFilter, setTagFilter] = useState("全部");
   const [tagDraft, setTagDraft] = useState<Row | null>(null);
   const [tagValues, setTagValues] = useState<string[]>([]);
+  const [metaDraft, setMetaDraft] = useState<Row | null>(null);
+  const [metaForm] = Form.useForm();
   const transport = Form.useWatch("transport", form);
   const allTools = useMemo(() => resource.data?.items || [], [resource.data]);
   const allTags = useMemo(() => [...new Set(allTools.flatMap((item) => Array.isArray(item.tags) ? item.tags : []).filter(Boolean))].sort((left, right) => left.localeCompare(right, "zh-CN")), [allTools]);
@@ -89,12 +91,26 @@ export default function ToolsPage() {
       setTagDraft(null); await resource.refresh();
     } catch (failure) { setError(apiErrorMessage(failure)); } finally { setSaving(false); }
   };
+  const editMetadata = (row: Row) => {
+    setMetaDraft(row);
+    setError("");
+    metaForm.setFieldsValue({ title: row.title || row.name || "", description: row.description || "" });
+  };
+  const saveMetadata = async (values: Row) => {
+    if (!metaDraft) return;
+    setSaving(true); setError("");
+    try {
+      await controlRequest(`/admin/tools/${encodeURIComponent(metaDraft.name)}/metadata`, { title: values.title || "", description: values.description || "" }, "PATCH");
+      setMetaDraft(null);
+      await resource.refresh();
+    } catch (failure) { setError(apiErrorMessage(failure)); } finally { setSaving(false); }
+  };
   const localLocked = allTools.some((item) => item.source === "pi" && item.locked);
 
   return <>
     <PageHeading title="工具与连接器" description="内置、PI 原生与业务连接器；开放不代表扩大业务权限。" actions={<ResourceActions refresh={refresh} />} />
     {notice && <Alert title={notice} type="success" showIcon closable onClose={() => setNotice("")} style={{ marginBottom: 16 }} />}
-    {error && draft === null && <Alert title={error} type="error" showIcon style={{ marginBottom: 16 }} />}
+    {error && draft === null && metaDraft === null && <Alert title={error} type="error" showIcon style={{ marginBottom: 16 }} />}
     <Tabs activeKey={tab} onChange={setTab} items={[
       { key: "catalog", label: `工具目录 · ${resource.data?.items.length || 0}`, children: <PageState {...resource}>
         <div className="control-actions" style={{ marginBottom: 18, flexWrap: "wrap" }}>
@@ -107,14 +123,14 @@ export default function ToolsPage() {
           <Tag.CheckableTag checked={tagFilter === "全部"} onChange={() => setTagFilter("全部")}>全部</Tag.CheckableTag>
           {allTags.map((tag) => <Tag.CheckableTag key={tag} checked={tagFilter === tag} onChange={() => setTagFilter(tag)}>{tag}</Tag.CheckableTag>)}
         </div>
-        <Table rowKey="name" dataSource={items} tableLayout="fixed" pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 1020 }} columns={[
+        <Table rowKey="name" dataSource={items} tableLayout="fixed" pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 1090 }} columns={[
           { title: "工具", dataIndex: "title", width: 260, render: (value, row) => <div><strong>{value || row.name}</strong><div className="control-muted">{row.name}</div><Tooltip title={row.description}><div className="control-muted" style={{ maxWidth: 265, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{row.description}</div></Tooltip><div style={{ marginTop: 5 }}>{(row.tags || []).map((tag: string) => <Tag key={tag} bordered={false}>{tag}</Tag>)}</div></div> },
           { title: "来源", dataIndex: "source", width: 120, render: (value, row) => <div><Tag color={value === "pi" ? "purple" : value === "mcp" ? "blue" : value === "http" ? "gold" : "green"}>{sourceLabel(value)}</Tag><div className="control-muted">{row.category}</div></div> },
           { title: "风险 / 权限", width: 140, render: (_, row) => <div><Tag color={row.risk === "read" ? "default" : "orange"}>{row.risk === "read" ? "只读" : row.risk === "delete" ? "删除" : "写入"}</Tag><div className="control-muted">{row.permission || "基础能力"}</div></div> },
           { title: "状态", width: 105, render: (_, row) => <Tooltip title={row.blocked_reason}><span>{row.locked ? <Tag icon={<LockKeyhole size={11} />}>部署禁用</Tag> : row.configured === false ? <Tag color="gold">待配置</Tag> : <Tag color={row.enabled ? "green" : "default"}>{row.enabled ? "已启用" : "已停用"}</Tag>}</span></Tooltip> },
           { title: "启用", dataIndex: "enabled", width: 80, render: (value, row) => <Tooltip title={row.locked ? row.blocked_reason : row.name === "tool_search" ? "与运行设置的 BM25 开关同步" : "停用后不再提供给模型，每次执行前也会重新检查"}><Switch aria-label={`启用 ${row.name}`} checked={Boolean(value)} disabled={row.locked} loading={updating.includes(row.name)} onChange={(enabled) => void updatePolicy(row, { enabled })} /></Tooltip> },
           { title: "用户使用策略", width: 205, render: (_, row) => row.policy_editable ? <Select aria-label={`${row.name} 用户策略`} style={{ width: 205 }} value={policy(row)} disabled={updating.includes(row.name)} options={policyOptions} onChange={(value) => void updatePolicy(row, policyValue(value))} /> : <span className="control-muted">{row.locked ? "不可开放" : "运行时内部能力"}</span> },
-          { title: "操作", width: 108, render: (_, row) => <Space size={0}><Button size="small" type="text" onClick={() => { setTagDraft(row); setTagValues(row.tags || []); }}>标签</Button><Button size="small" type="text" onClick={() => setJson({ name: row.name, source: row.source, input_schema: row.input_schema, description: row.description, blocked_reason: row.blocked_reason })}>定义</Button></Space> },
+          { title: "操作", width: 168, render: (_, row) => <Space size={0}><Button size="small" type="text" onClick={() => editMetadata(row)}>编辑</Button><Button size="small" type="text" onClick={() => { setTagDraft(row); setTagValues(row.tags || []); }}>标签</Button><Button size="small" type="text" onClick={() => setJson({ name: row.name, source: row.source, input_schema: row.input_schema, description: row.description, blocked_reason: row.blocked_reason })}>定义</Button></Space> },
         ]} />
       </PageState> },
       { key: "http", label: "HTTP API", children: <>
@@ -165,6 +181,17 @@ export default function ToolsPage() {
     <Modal open={tagDraft !== null} title={`编辑标签 · ${tagDraft?.title || tagDraft?.name || ""}`} onCancel={() => setTagDraft(null)} onOk={() => void saveTags()} confirmLoading={saving} okText="保存标签" cancelText="取消">
       <p className="control-muted">标签用于后台平铺筛选；不会改变工具权限，也不会自动注入模型上下文。来源标签会始终保留。</p>
       <Select mode="tags" value={tagValues} onChange={setTagValues} tokenSeparators={[",", "，"]} placeholder="输入标签后回车" options={allTags.map((tag) => ({ value: tag, label: tag }))} style={{ width: "100%" }} maxTagCount={12} />
+    </Modal>
+    <Modal open={metaDraft !== null} title={`编辑工具展示 · ${metaDraft?.name || ""}`} onCancel={() => setMetaDraft(null)} onOk={() => metaForm.submit()} confirmLoading={saving} okText="保存" cancelText="取消">
+      {error && <Alert title={error} type="error" showIcon style={{ marginBottom: 16 }} />}
+      <Form form={metaForm} layout="vertical" onFinish={saveMetadata}>
+        <Form.Item name="title" label="名称" tooltip="显示在管理端与模型工具列表中；工具 name 不变。留空恢复默认名称。">
+          <Input maxLength={80} showCount placeholder="留空恢复默认名称" />
+        </Form.Item>
+        <Form.Item name="description" label="描述" tooltip="管理端列表和模型看到的工具说明都会使用覆盖值。留空恢复默认描述。">
+          <Input.TextArea rows={5} maxLength={500} showCount placeholder="留空恢复默认描述" />
+        </Form.Item>
+      </Form>
     </Modal>
   </>;
 }

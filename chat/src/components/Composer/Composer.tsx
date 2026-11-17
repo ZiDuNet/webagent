@@ -378,7 +378,7 @@ export function Composer({
                 : voiceDisabledReason}
               aria-label="语音输入"
               aria-pressed={recording}
-              disabled={!voiceEnabled || voiceBusy || disabled || streaming}
+              disabled={!voiceEnabled || voiceBusy || streaming}
               onClick={onVoiceToggle}
             >
               {recording ? <span className="voice-wave" aria-hidden="true"><i /><i /><i /></span> : <Icon name="mic" size={16} />}

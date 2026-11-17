@@ -49,10 +49,10 @@ export default function SkillsPage() {
     if (!files?.length) return;
     setImporting(true); setError(""); setNotice("");
     try {
-      const allowed = /\.(md|txt|json|ya?ml|csv)$/i;
+      const forbidden = /\.(sh|bash|zsh)$/i;
       const entries = Array.from(files);
-      const rejected = entries.find((file) => !allowed.test(file.name));
-      if (rejected) throw new Error(`技能目录只允许文本文件，发现：${rejected.name}`);
+      const rejected = entries.find((file) => forbidden.test(file.name));
+      if (rejected) throw new Error(`技能目录不允许包含 shell 脚本，发现：${rejected.name}`);
       const payload = await Promise.all(entries.map(async (file) => ({
         path: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
         content: await file.text(),

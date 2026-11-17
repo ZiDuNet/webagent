@@ -238,7 +238,7 @@ export class Speech {
         const timeout = setTimeout(() => fail(new AppError("实时语音识别超时", 504)), 60000);
         try { return await finished; } finally { clearTimeout(timeout); signal.removeEventListener("abort", aborted); }
       },
-      close() { signal.removeEventListener("abort", aborted); if (socket.readyState === WebSocket.OPEN) socket.close(); },
+      close() { signal.removeEventListener("abort", aborted); if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.terminate(); },
     };
   }
   async openTtsRealtime(model: Row, onAudio: (bytes: Buffer) => void, signal: AbortSignal) {
@@ -251,6 +251,20 @@ export class Speech {
     let readyResolve!: () => void; let readyReject!: (error: Error) => void;
     const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
     let failure: Error | undefined; let closed = false; let finishResolve!: () => void; let finishReject!: (error: Error) => void;
+    // server_commit 模式下服务端会自行分段合成，但最后一段文本可能仍缓存在服务端。
+    // 必须先 commit 再等待所有 response.done，最后才能 session.finish；否则服务端
+    // 会在音频尚未返回时关闭会话，表现为“只读了一半就停住”。
+    let pendingResponses = 0; let completedResponses = 0; let commitRejected = false; let committing = false;
+    let appendedAt = 0; let doneAt = 0; let createdAt = 0;
+    const idleWaiters = new Set<() => void>();
+    const settleIdle = () => { if (pendingResponses > 0) return; for (const wake of idleWaiters) wake(); idleWaiters.clear(); };
+    const waitIdle = (timeout: number) => new Promise<boolean>((resolve) => {
+      if (pendingResponses <= 0) { resolve(true); return; }
+      let timer: NodeJS.Timeout;
+      const done = () => { clearTimeout(timer); idleWaiters.delete(done); resolve(true); };
+      timer = setTimeout(() => { idleWaiters.delete(done); resolve(false); }, timeout);
+      idleWaiters.add(done);
+    });
     const finished = new Promise<void>((resolve, reject) => { finishResolve = resolve; finishReject = reject; });
     // Same as realtime ASR: close() aborts while finish() may not be awaiting yet.
     void ready.catch(() => {}); void finished.catch(() => {});
@@ -261,8 +275,16 @@ export class Speech {
     socket.on("message", (raw) => {
       try {
         const event = JSON.parse(raw.toString());
-        if (event.type === "error" || event.error) return fail(new AppError(String(event.error?.message || event.message || "实时语音合成服务返回错误"), 502));
+        if (event.type === "error" || event.error) {
+          const message = String(event.error?.message || event.message || "实时语音合成服务返回错误");
+          // 文本已被服务端自动合成时再 commit 会报空缓冲区；收尾阶段这是正常情况。
+          if (committing && /empty|为空|no text|buffer/i.test(message)) { commitRejected = true; settleIdle(); return; }
+          return fail(new AppError(message, 502));
+        }
         if (event.type === "session.updated") readyResolve();
+        if (event.type === "input_text_buffer.committed") settleIdle();
+        if (event.type === "response.created") { pendingResponses += 1; createdAt = Date.now(); }
+        if (event.type === "response.done") { completedResponses += 1; doneAt = Math.max(doneAt, createdAt); pendingResponses = Math.max(0, pendingResponses - 1); settleIdle(); }
         if (event.type === "response.audio.delta" && typeof event.delta === "string") onAudio(Buffer.from(event.delta, "base64"));
         if (event.type === "session.finished") { closed = true; finishResolve(); socket.close(); }
       } catch { fail(new AppError("实时语音合成返回无效数据", 502)); }
@@ -274,14 +296,34 @@ export class Speech {
     return {
       format: "pcm" as const,
       sample_rate: options.sample_rate,
-      append(text: string) { if (failure) throw failure; if (text) socket.send(JSON.stringify({ event_id: `wa-${randomUUID()}`, type: "input_text_buffer.append", text })); },
+      append(text: string) { if (failure) throw failure; if (text) { appendedAt = Date.now(); socket.send(JSON.stringify({ event_id: `wa-${randomUUID()}`, type: "input_text_buffer.append", text })); } },
+      /** 让服务端立即合成缓存文本，并等待所有已创建的响应结束。 */
+      async drain(timeout = 60000) {
+        if (failure) throw failure;
+        // 最后一次 append 之后服务端已经自动合成并返回过 response.done，说明没有缓存文本，
+        // 此时再 commit 只会触发空缓冲区错误并白白等待，直接等待在途响应即可。
+        if (!appendedAt || appendedAt <= doneAt) { await waitIdle(timeout); if (failure) throw failure; return; }
+        committing = true;
+        const before = completedResponses;
+        try { socket.send(JSON.stringify({ event_id: `wa-${randomUUID()}`, type: "input_text_buffer.commit" })); } catch { committing = false; return; }
+        // 空缓冲区会返回 error（已在上方忽略）；否则等待 commit 触发的新响应。
+        const deadline = Date.now() + Math.min(timeout, 4000);
+        while (!failure && !commitRejected && completedResponses === before && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await waitIdle(timeout);
+        if (failure) throw failure;
+      },
       async finish() {
+        if (failure) throw failure;
+        // 先把服务端缓存文本合成完，再结束会话；否则尾部可能整段丢失。
+        await this.drain();
         if (failure) throw failure;
         socket.send(JSON.stringify({ event_id: `wa-${randomUUID()}`, type: "session.finish" }));
         const timeout = setTimeout(() => fail(new AppError("实时语音合成结束超时", 504)), 60000);
         try { await finished; } finally { clearTimeout(timeout); signal.removeEventListener("abort", aborted); }
       },
-      close() { signal.removeEventListener("abort", aborted); if (socket.readyState === WebSocket.OPEN) socket.close(); },
+      close() { signal.removeEventListener("abort", aborted); if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.terminate(); },
     };
   }
   async synthesizeRealtime(model: Row, text: string, overrides: Row = {}, signal?: AbortSignal) {

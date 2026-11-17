@@ -62,7 +62,8 @@ export interface ModelsRuntimeConfig {
   tts_model_id: number | null;
   voice_asr_model_id: number | null;
   voice_tts_model_id: number | null;
-  voice_input_mode: "auto" | "realtime" | "file";
+  /** auto 是旧配置兼容值，读取时后端会归一化为 auto_file。 */
+  voice_input_mode: "auto" | "auto_file" | "auto_realtime" | "realtime" | "file";
   voice_auto_send: boolean;
   tts_auto_read: boolean;
   tts_max_read_chars: number;

@@ -204,15 +204,31 @@ export default function App() {
     return result.session.id;
   };
 
+  const startNewChat = () => {
+    if (conversation.streaming) return;
+    setActiveSessionId(undefined);
+    setSelectedAssistantId(defaultAssistant?.id);
+    setAttachments([]);
+    setPendingPrompt(null);
+    setNavOpen(false);
+    setError(null);
+  };
+
   const perform = async (action: () => Promise<unknown>) => {
     setError(null);
     try { await action(); } catch (failure) { setError(apiErrorMessage(failure)); }
   };
 
   const send = async (text: string) => {
-    if (!activeSessionId) { setError("请先点击「新建对话」，再发送消息。"); return; }
     if (!models.length) { setError("管理员尚未配置可用对话模型。"); return; }
     if (attachments.length && !models.find((model) => String(model.id) === modelId)?.capabilities?.includes("image")) { setError("当前模型不支持图片，请切换支持图片的模型。"); return; }
+    // 空态直接发送：先建会话，等消息加载完成后再发送，避免加载结果覆盖乐观消息。
+    if (!activeSessionId) {
+      sessionLoadingSeenRef.current = false;
+      setPendingPrompt(text);
+      await perform(createSession);
+      return;
+    }
     // 先清空输入区，图片预览已经跟随消息进入对话流，避免流式期间附件仍然挂在输入框上。
     const pending = attachments;
     setAttachments([]);
@@ -225,9 +241,7 @@ export default function App() {
   const startPrompt = async (text: string) => {
     const message = text.trim();
     if (!message) return;
-    if (activeSessionId) { await perform(() => send(message)); return; }
-    sessionLoadingSeenRef.current = false;
-    await perform(async () => { await createSession(); setPendingPrompt(message); });
+    await perform(() => send(message));
   };
   useEffect(() => {
     if (!pendingPrompt || conversation.loading || conversation.streaming) return;
@@ -279,15 +293,31 @@ export default function App() {
       setError(apiErrorMessage(failure));
     }
   }, [assistantId, status?.tts?.configured, status?.tts_max_read_chars, stopSpeaking]);
-  const voiceInputMode = status?.voice_input_mode || "auto";
-  const voiceRealtime = Boolean(status?.asr_realtime?.configured && voiceInputMode !== "file");
-  const voiceFile = Boolean(status?.asr?.configured && voiceInputMode !== "realtime");
-  const voiceInputAvailable = Boolean(activeSessionId && (voiceRealtime || voiceFile));
+  // 服务端已把偏好解析成实际通道；caps 只决定按钮是否显示，不再要求先有会话。
+  const voiceCapabilities = status?.voice_input_capabilities ?? {
+    file: Boolean(status?.asr?.configured),
+    realtime: Boolean(status?.asr_realtime?.configured),
+  };
+  const voiceInputAvailable = Boolean(voiceCapabilities.file || voiceCapabilities.realtime);
+  const voiceInputMode: "file" | "realtime" = status?.voice_input_mode === "realtime"
+    ? "realtime"
+    : status?.voice_input_mode === "file"
+      ? "file"
+      : voiceCapabilities.file ? "file" : "realtime";
+  // 显式 realtime/file 不做跨模式回退；对应模型缺失时按钮仍显示，但给出明确原因。
+  const voiceInputReady = voiceInputMode === "realtime" ? voiceCapabilities.realtime : voiceCapabilities.file;
+  const voiceRealtime = voiceInputMode === "realtime";
   const voice = useVoiceInput((text) => {
     // 自动发送时只把文字交给会话，不再回填输入框，避免同一句话显示两遍。
-    if (status?.voice_auto_send === true) { setVoiceReset((value) => value + 1); void send(text); return; }
+    if (status?.voice_auto_send === true) {
+      setVoiceReset((value) => value + 1);
+      // 空态没有会话时复用快捷入口的建会话 + 发送流程，避免重复发送或直接报错。
+      if (activeSessionId) void send(text);
+      else void startPrompt(text);
+      return;
+    }
     setVoiceInsert({ text, nonce: Date.now() });
-  }, Boolean((voiceRealtime || voiceFile) && activeSessionId), activeSessionId, {
+  }, voiceInputReady, activeSessionId, {
     realtime: voiceRealtime,
     assistantId,
   });
@@ -482,7 +512,7 @@ export default function App() {
           </select>
           <small>{fixedAssistantId ? "接入 Token 已固定此助手，不能切换" : activeAssistant?.description || "新建会话将使用此助手"}</small>
         </label>
-        <button type="button" className="new-chat" disabled={loading || conversation.streaming || !assistants.length} onClick={() => void perform(createSession)}><Icon name="plus" size={14} />新建对话</button>
+        <button type="button" className="new-chat" disabled={loading || conversation.streaming || !assistants.length} onClick={startNewChat}><Icon name="plus" size={14} />新建对话</button>
         <label className="sidebar-search"><Icon name="search" size={13} /><input placeholder="搜索会话" aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} /></label>
         <div className="sidebar__scroll"><SessionList sessions={sessions.filter((session) => session.title.includes(sessionQuery)).map((session) => ({ id: session.id, title: session.title, meta: session.assistant_name }))} activeId={activeSessionId} onSelect={chooseSession} onFork={(id) => void perform(() => fork(id))} onRename={(id, title) => void perform(async () => { await agentJson(`/api/agent/sessions/${encodeURIComponent(id)}`, { title }, "PATCH"); await refreshSessions(); })} onDelete={(id) => void perform(async () => { await agentRequest(`/api/agent/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }); const next = await refreshSessions(); if (id === activeSessionId) setActiveSessionId(next[0]?.id); })} /></div>
         <div className="sidebar__footer"><div className="account"><span className="account__avatar"><Icon name="user" size={15} /></span><span className="account__text"><strong>{user.display_name || user.username}</strong><small>{authMode === "token" ? "匿名接入 Token" : user.role || "当前业务账号"}</small></span>{authMode === "token" && <button type="button" className="account__button" aria-label="退出登录" title="退出匿名接入会话" onClick={() => void perform(async () => { if (authMode === "token") await agentRequest("/api/agent/auth/logout", { method: "POST" }); setUser(null); setActiveSessionId(undefined); setPublishedOpen(false); setPublishing(null); })}><Icon name="external" size={15} /></button>}</div></div>
@@ -528,12 +558,24 @@ export default function App() {
               showReasoning
               selectedReasoning={reasoning}
               onReasoningChange={setReasoning}
-              voiceEnabled={voiceInputAvailable}
-              voiceDisabledReason={!activeSessionId ? "请先新建或选择一个会话" : voiceInputMode === "realtime" ? status?.asr_realtime?.reason || "管理员尚未配置实时语音识别模型" : status?.asr?.reason || status?.asr_realtime?.reason || "管理员尚未配置可用语音识别模型"}
+              voiceEnabled={voiceInputReady}
+              voiceDisabledReason={!voiceInputAvailable
+                ? "管理员尚未配置可用语音识别模型"
+                : voiceRealtime
+                  ? status?.asr_realtime?.reason || "管理员尚未配置实时语音识别模型"
+                  : status?.asr?.reason || "管理员尚未配置文件语音识别模型"}
               voiceBusy={voice.busy}
               recording={voice.recording}
               voiceRealtime={voiceRealtime}
-              onVoiceToggle={() => { stopSpeaking(); void voice.toggle(); }}
+              onVoiceToggle={() => {
+                stopSpeaking();
+                // 实时识别需要 session；空态先自动建会话，再把同一个 id 交给听写连接。
+                if (voiceRealtime && !activeSessionId) {
+                  void perform(async () => { const sessionId = await createSession(); await voice.toggle(sessionId); });
+                  return;
+                }
+                void voice.toggle();
+              }}
               voiceInsert={voiceInsert}
               voiceReset={voiceReset}
               voicePartial={voiceRealtime ? voice.partial : ""}

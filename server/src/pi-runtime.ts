@@ -68,7 +68,7 @@ export class PiRuntime {
         } catch { throw new AppError("技能文件不存在", 404); }
         const stat = fs.statSync(real);
         if (!stat.isFile() || stat.size > 256 * 1024) throw new AppError("技能文件不存在或超过 256 KB", 422);
-        if (!/\.(md|txt|json|ya?ml|csv)$/i.test(real)) throw new AppError("只允许读取文本技能文件", 422);
+        if (/\.(sh|bash|zsh)$/i.test(real)) throw new AppError("不允许读取 shell 脚本技能文件", 422);
         const text = fs.readFileSync(real, "utf8");
         return { content: [{ type: "text" as const, text }], details: { path: path.relative(root, real), bytes: stat.size } };
       },
@@ -162,9 +162,25 @@ export class PiRuntime {
         state.pending.push({ tool: spec.name, call_id: callId, arguments: args, risk: spec.risk });
         return { content: [{ type: "text" as const, text: "该操作尚未执行，需要用户在审批卡明确确认。不要宣称操作成功。" }], details: { approval_required: true } };
       }
-      const result = await this.registry.execute(spec, args, { ...executeContext, signal: toolSignal ? AbortSignal.any([signal, toolSignal]) : signal });
+      let result: unknown;
+      try {
+        result = await this.registry.execute(spec, args, { ...executeContext, signal: toolSignal ? AbortSignal.any([signal, toolSignal]) : signal });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "工具执行失败";
+        return {
+          content: [{ type: "text" as const, text: `工具 ${spec.name} 执行失败：${message}。请根据错误信息调整参数后重试，或改用其他可用工具继续完成任务；不要因为单个工具失败就停止回答。` }],
+          details: { error: message },
+          isError: true,
+        };
+      }
       const safeResult = redact(result);
       const text = JSON.stringify(safeResult);
+      if (text === "{}" || text === "[]" || text === "null") {
+        return {
+          content: [{ type: "text" as const, text: `工具 ${spec.name} 已执行，但返回了空结果（可能该接口当前没有数据或参数范围为空）。请根据空结果如实说明，必要时调整参数或改用其他工具继续。` }],
+          details: safeResult as any,
+        };
+      }
       return { content: [{ type: "text" as const, text: text.length > 24000 ? `${text.slice(0, 24000)}\n[工具结果过长已截断，请缩小查询范围]` : text }], details: safeResult as any };
     };
     const bm25 = settings.bm25_enabled && (tools.length > 0 || skills.length > 0);
@@ -388,7 +404,7 @@ export class PiRuntime {
         this.store.update("sessions", current.id, { title: fallbackTitle }); emit("session.title", { title: fallbackTitle });
         if (titleModel?.enabled) this.defer(async (backgroundSignal) => { const response = await this.providers.complete(titleModel, [{ role: "system", content: this.store.settings().title_prompt }, { role: "user", content: text.slice(0, 500) }], "title", { sessionId: current.id, username: user.username, signal: backgroundSignal }); const title = response.content.trim().slice(0, 60); if (title && this.store.one("SELECT title FROM sessions WHERE id=?", [current.id])?.title === fallbackTitle) this.store.update("sessions", current.id, { title }); });
       }
-      if (settings.memory_auto_extract && settings.memory_enabled && assistant.memory_enabled && status === "ok") this.defer((backgroundSignal) => this.extractMemory(user, current.id, text, backgroundSignal));
+      if (settings.memory_auto_extract && settings.memory_enabled && assistant.memory_enabled && status === "ok" && this.shouldExtractMemory(current.id, settings.memory_extract_interval)) this.defer((backgroundSignal) => this.extractMemory(user, current.id, text, backgroundSignal));
       return result;
     } finally { clearTimeout(timer); signal.removeEventListener("abort", onAbort); this.save(manager, current.id); session.dispose(); }
   }
@@ -515,5 +531,19 @@ export class PiRuntime {
         this.store.insert("memories", { ...this.store.ownerColumns(user), content, kind: "extracted", enabled: settings.memory_auto_confirm });
       }
     } catch { /* 记忆提取失败不影响会话 */ }
+  }
+  /**
+   * 自动记忆提取按会话已落盘的用户消息轮次节流，避免进程内计数器在重启后漂移。
+   * 当前轮用户消息在 run 中先落盘，所以第一轮为 1；第一轮不提取，避免上下文不足。
+   */
+  private shouldExtractMemory(sessionId: string, interval: unknown) {
+    const messages = this.store.conversations.messages(sessionId);
+    // 助手消息在本检查前已落盘；倒数第二条仍是用户消息才说明本轮产生了新的用户轮次。
+    // 审批续跑不会新增用户消息，因此同一轮不会重复提取。
+    if (messages.at(-2)?.role !== "user") return false;
+    const rounds = messages.filter((message) => message.role === "user").length;
+    const value = Number(interval);
+    const normalized = Number.isInteger(value) && value >= 0 && value <= 50 ? value : 3;
+    return rounds > 1 && (normalized === 0 || rounds % normalized === 0);
   }
 }

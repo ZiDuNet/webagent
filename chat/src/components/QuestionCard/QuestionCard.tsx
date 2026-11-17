@@ -14,6 +14,7 @@ export function QuestionCard({ question, onSubmit, onCancel, busy = false }: Que
   const [selected, setSelected] = useState<string[]>([]);
   const [freeText, setFreeText] = useState("");
   const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState(false);
   const pending = question.status === "pending";
   const answeredLabels = useMemo(() => {
     const values = question.values || [];
@@ -74,11 +75,20 @@ export function QuestionCard({ question, onSubmit, onCancel, busy = false }: Que
           </footer>
         </>
       ) : (
-        <div className="question-card__resolved">
-          {answeredLabels.length > 0 && <div><span>选择</span><strong>{answeredLabels.join("、")}</strong></div>}
-          {question.free_text && <div><span>补充</span><strong>{question.free_text}</strong></div>}
-          {!answeredLabels.length && !question.free_text && <span>{question.status === "cancelled" ? "你跳过了这次提问。" : "这次提问已过期。"}</span>}
-        </div>
+        <>
+          <button type="button" className="question-card__resolved" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+            <span>
+              {answeredLabels.length > 0 && <>选择 <strong>{answeredLabels.join("、")}</strong></>}
+              {question.free_text && <> · 补充 <strong>{question.free_text}</strong></>}
+              {!answeredLabels.length && !question.free_text && (question.status === "cancelled" ? "你跳过了这次提问。" : "这次提问已过期。")}
+            </span>
+            <Icon name="chevron-down" size={12} />
+          </button>
+          {expanded && <div className="question-card__resolved-detail">
+            {answeredLabels.length > 0 && <div><span>选择</span><strong>{answeredLabels.join("、")}</strong></div>}
+            {question.free_text && <div><span>补充</span><strong>{question.free_text}</strong></div>}
+          </div>}
+        </>
       )}
     </section>
   );

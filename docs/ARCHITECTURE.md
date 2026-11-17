@@ -71,6 +71,8 @@ MCP 工具必须显式映射 `permission` 或 `public: true`，未映射默认�
 
 同一会话只允许一个任务；当前进程按每用户最多 4 个、全局最多 100 个活动任务保护。审批续跑也占用同一任务锁。多实例部署不具备分布式锁，不能仅增加容器副本数扩容。
 
+自动长期记忆提取是低频后台任务：按会话已落盘的用户消息轮次节流（`memory_extract_interval` 默认 3，0 表示第二轮起每轮，首轮不提取），通过 `defer` 执行，不阻塞回答；提取失败不影响主流程，也不会扩大工具或业务权限。
+
 ## 6. 存储
 
 一个数据根目录 `WEBAGENT_DATA_DIR`（默认 `data/`），按用途分子目录，不再把所有东西塞进 `data/pi/`：
@@ -90,9 +92,7 @@ MCP 工具必须显式映射 `permission` 或 `public: true`，未映射默认�
 | `runtime/skill-runtime/` | 按助手与 Skill 集合物化的只读目录，派生数据 | 可重建 |
 | `workspaces/<sessionId>/` | 每会话隔离的空工作目录，不开放模型任意读写 | 否 |
 | `cache/models-dev.json` | models.dev 元数据缓存，不含 Key | 可重建 |
-| `legacy-backup/` | 旧版 `agent.db`、`business.db`、`models_dev_cache.json` 与 `pi/` 归档 | 迁移后按需保留 |
-
-配置类数据（供应商、模型、助手、全局设置、工具、MCP）以 JSON 为唯一事实来源，SQLite 只保存运行态。启动时若发现旧版配置表，会先 `VACUUM INTO` 备份到 `runtime/backups/config-before-json-*.db`，导出 JSON 后再删除表；`data/pi/*` 会被逐文件合并到新目录，旧 Python 数据移动到 `legacy-backup/`，不覆盖任何同名文件。
+配置类数据（供应商、模型、助手、全局设置、工具、MCP）以 JSON 为唯一事实来源，SQLite 只保存运行态。启动时若发现旧版配置表，会先 `VACUUM INTO` 备份到 `runtime/backups/config-before-json-*.db`，导出 JSON 后再删除表；`data/pi/*` 会被逐文件合并到新目录，旧 Python 数据归档到 `data/` 之外的备份目录，不覆盖任何同名文件。`data/` 里不再保留旧版 `agent.db` / `business.db` / `models_dev_cache.json`。
 
 PI canonical entries 与展示消息一起保存在会话 JSON 中，不在 SQLite。编辑、删除会失效 PI 上下文，分叉根据选定消息重建，不复制待执行审批。删除会话或保留期清理会同时删除对应 JSON；SQLite 只级联删除运行、审批和事件等元数据。
 

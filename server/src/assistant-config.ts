@@ -1,4 +1,5 @@
 import type { Row } from "./types.js";
+import { normalizeVoiceInputMode, type VoiceInputPrefer } from "./voice-input.js";
 
 export const assistantOverrideColumns = [
   "asr_model_id",
@@ -34,7 +35,7 @@ export type AssistantRuntimeConfig = {
   tts_model_id: number | null;
   voice_asr_model_id: number | null;
   voice_tts_model_id: number | null;
-  voice_input_mode: "auto" | "realtime" | "file";
+  voice_input_mode: VoiceInputPrefer;
   voice_auto_send: boolean;
   tts_auto_read: boolean;
   tts_max_read_chars: number;
@@ -65,7 +66,7 @@ export function effectiveAssistantConfig(assistant: Row | undefined, settings: R
     tts_model_id: Number(source.tts_model_id ?? settings.tts_model_id) || null,
     voice_asr_model_id: Number(source.voice_asr_model_id ?? settings.voice_asr_model_id) || null,
     voice_tts_model_id: Number(source.voice_tts_model_id ?? settings.voice_tts_model_id) || null,
-    voice_input_mode: String(inherited(source.voice_input_mode, settings.voice_input_mode || "auto")) as AssistantRuntimeConfig["voice_input_mode"],
+    voice_input_mode: normalizeVoiceInputMode(inherited(source.voice_input_mode, settings.voice_input_mode || "auto_file")),
     voice_auto_send: inheritedBoolean(source.voice_auto_send, Boolean(settings.voice_auto_send)),
     tts_auto_read: inheritedBoolean(source.tts_auto_read, Boolean(settings.tts_auto_read)),
     tts_max_read_chars: Number(inherited(source.tts_max_read_chars, settings.tts_max_read_chars || 1200)),

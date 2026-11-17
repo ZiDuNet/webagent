@@ -51,7 +51,8 @@ class Dictation {
   async start() {
     if (this.started) return;
     this.started = true;
-    this.store.ownedSession(this.sessionId, this.user);
+    // 输入框听写支持匿名临时会话：没有 session 时只识别文本，不写入任何会话。
+    if (this.sessionId) this.store.ownedSession(this.sessionId, this.user);
     const settings = this.store.settings();
     const assistant = this.store.assistant(this.assistantId);
     const effective = effectiveAssistantConfig(assistant, settings);
@@ -114,6 +115,8 @@ class SpeechQueue {
   private emitted = "";
   private pending = "";
   private closed = false;
+  private finishing = false;
+  private finishPromise?: Promise<void>;
   private spoke = false;
   private realtimeSampleRate = 24000;
   private cancelSynthesis?: AbortController;
@@ -123,7 +126,7 @@ class SpeechQueue {
     void this.ensureRealtime().catch(() => {});
   }
   feed(delta: string) {
-    if (this.closed) return;
+    if (this.closed || this.finishing) return;
     this.raw += delta;
     const filtered = speakableText(this.raw);
     if (filtered.startsWith(this.emitted)) {
@@ -148,8 +151,21 @@ class SpeechQueue {
     const sentences = this.sentences.splice(0);
     if (!sentences.length) return;
     this.work = this.work.then(async () => {
-      const session = await this.ensureRealtime();
-      for (const sentence of sentences) session.append(sentence);
+      if (this.closed) return;
+      let lastError: unknown;
+      // 单次连接失败不应丢掉整批句子：重建一次实时会话后重放本批文本。
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const session = await this.ensureRealtime();
+          for (const sentence of sentences) session.append(sentence);
+          return;
+        } catch (error) {
+          lastError = error;
+          this.realtimeSession = undefined;
+          this.realtimePromise = undefined;
+        }
+      }
+      throw lastError;
     }).catch((error) => { if (!this.closed) this.send({ type: "tts.error", message: error instanceof Error ? error.message : "实时语音合成失败" }); });
   }
   private async ensureRealtime() {
@@ -172,19 +188,31 @@ class SpeechQueue {
     this.work = this.work.then(async () => {
       for (const sentence of sentences) {
         if (this.closed) return;
-        for (let offset = 0; offset < sentence.length; offset += 600) {
-          const part = sentence.slice(offset, offset + 600);
-          this.cancelSynthesis ??= new AbortController();
-          const result = await this.speech.synthesize(this.model, part, {}, this.cancelSynthesis.signal, this.context);
+        try {
+          for (let offset = 0; offset < sentence.length; offset += 600) {
+            const part = sentence.slice(offset, offset + 600);
+            this.cancelSynthesis ??= new AbortController();
+            const result = await this.speech.synthesize(this.model, part, {}, this.cancelSynthesis.signal, this.context);
+            if (this.closed) return;
+            this.send({ type: "tts.audio", audio: result.bytes.toString("base64"), mime_type: result.mime_type, format: result.mime_type === "audio/pcm" ? "pcm" : "file", sample_rate: (result as Row).sample_rate });
+          }
+        } catch (error) {
+          // 单句合成失败只报告错误，继续后面的句子，避免整段回答从中间截断。
           if (this.closed) return;
-          this.send({ type: "tts.audio", audio: result.bytes.toString("base64"), mime_type: result.mime_type, format: result.mime_type === "audio/pcm" ? "pcm" : "file", sample_rate: (result as Row).sample_rate });
+          this.send({ type: "tts.error", message: error instanceof Error ? error.message : "语音合成失败" });
         }
       }
-    }).catch((error) => { if (!this.closed) this.send({ type: "tts.error", message: error instanceof Error ? error.message : "语音合成失败" }); });
+    });
   }
   async finish() {
+    if (!this.finishPromise) this.finishPromise = this.finalize();
+    return this.finishPromise;
+  }
+  private async finalize() {
     if (this.closed) return;
     this.feed("\n");
+    // 收尾开始后不再接受新的增量文本，避免 commit/session.finish 之后仍有 append 丢失。
+    this.finishing = true;
     const tail = this.pending.trim();
     if (tail.length >= 2) { this.sentences.push(tail.slice(0, 1200)); this.spoke = true; }
     this.pending = "";
@@ -375,6 +403,8 @@ class VoiceCall {
     let lastTool = "";
     let answerDone = false;
     let ttsDone: Promise<void> | undefined;
+    let ttsSettled = false;
+    const markTtsSettled = () => { ttsSettled = true; };
     try {
       const run = await this.runs.startWithListener(this.credential, {
         session_id: this.sessionId,
@@ -386,7 +416,13 @@ class VoiceCall {
         approval_mode: this.config.approval_mode,
       }, (name, payload) => {
         if (name === "text.delta" && payload.delta) { answer += payload.delta; this.send({ type: "assistant.delta", delta: payload.delta }); this.send({ type: "status", state: "speaking", label: "正在回答" }); tts.feed(payload.delta); }
-        if (name === "answer.completed") { answerDone = true; this.lastSpoken = speakableText(answer); this.spokenAt = Date.now(); ttsDone = tts.finish(); void ttsDone.catch(() => {}); }
+        if (name === "answer.completed") {
+          answerDone = true;
+          this.lastSpoken = speakableText(answer);
+          this.spokenAt = Date.now();
+          ttsDone = tts.finish();
+          void ttsDone.then(markTtsSettled, markTtsSettled);
+        }
         if (name === "thinking.delta" && payload.delta) this.send({ type: "thinking.delta", delta: payload.delta });
         if (name === "tool.started") { lastTool = String(payload.tool || "工具"); this.send({ type: "tool", state: "started", tool: lastTool, arguments: payload.arguments }); this.send({ type: "status", state: "tool", label: `正在调用 ${lastTool}` }); }
         if (name === "tool.finished") this.send({ type: "tool", state: payload.status === "failed" ? "failed" : "finished", tool: String(payload.tool || lastTool), summary: payload.summary, result: payload.result });
@@ -402,7 +438,9 @@ class VoiceCall {
       if (turn !== this.turn) return;
       if (answer && !answerDone) { this.lastSpoken = speakableText(answer); this.spokenAt = Date.now(); }
       if (result.status !== "ok") this.send({ type: "agent.status", status: result.status, message: result.message || "", answer: result.answer || answer });
-      const pending = (ttsDone || tts.finish()).then(() => {
+      const synthesis = ttsDone || tts.finish();
+      void synthesis.then(markTtsSettled, markTtsSettled);
+      const pending = synthesis.then(() => {
         if (turn === this.turn) this.send({ type: "tts.done" });
       }).catch((error) => {
         if (turn === this.turn) {
@@ -410,7 +448,7 @@ class VoiceCall {
           this.send({ type: "tts.done" });
         }
       });
-      this.send({ type: "agent.done", answer: result.answer || answer, status: result.status, usage: result.usage, context: result.context, approval: result.approval, question: result.question, duration_ms: result.run?.elapsed_seconds ? result.run.elapsed_seconds * 1000 : undefined, tts_pending: true });
+      this.send({ type: "agent.done", answer: result.answer || answer, status: result.status, usage: result.usage, context: result.context, approval: result.approval, question: result.question, duration_ms: result.run?.elapsed_seconds ? result.run.elapsed_seconds * 1000 : undefined, tts_pending: !ttsSettled });
       if (["question_required", "approval_required"].includes(result.status)) this.send({ type: "status", state: result.status === "question_required" ? "question" : "approval", label: result.status === "question_required" ? "等待你补充信息" : "等待你确认操作" });
       void pending;
     } catch (error) {
@@ -475,11 +513,10 @@ export function voiceRoutes(app: FastifyInstance, context: { store: Store; auth:
       const user = agent.identity;
       const credential = agent.credential;
       const sessionId = String(url.searchParams.get("session_id") || "");
-      if (!sessionId) throw new AppError("语音通话必须绑定当前会话", 422);
-      const session = store.ownedSession(sessionId, user);
-      if (!session) throw new AppError("会话不存在", 404);
       if (url.pathname === DICTATION_PATH) {
-        const assistant = runtime.assistant(user, session.assistant_id || undefined);
+        // 输入框听写不强制绑定会话：业务端空态没有 session 时也能直接使用实时识别。
+        const session = sessionId ? store.ownedSession(sessionId, user) : undefined;
+        const assistant = runtime.assistant(user, Number(url.searchParams.get("assistant_id")) || session?.assistant_id || undefined);
         dictation = new Dictation(ws, user, sessionId, assistant.id, store, speech);
         ws.on("message", (raw) => {
           void (async () => {
@@ -497,6 +534,9 @@ export function voiceRoutes(app: FastifyInstance, context: { store: Store; auth:
         ws.send(JSON.stringify({ type: "connected" }));
         return;
       }
+      if (!sessionId) throw new AppError("语音通话必须绑定当前会话", 422);
+      const session = store.ownedSession(sessionId, user);
+      if (!session) throw new AppError("会话不存在", 404);
       call = new VoiceCall(ws, request, user, credential, sessionId, store, speech, runs, runtime);
       calls.add(call);
       ws.on("message", (raw) => {

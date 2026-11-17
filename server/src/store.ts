@@ -305,6 +305,13 @@ export class Store {
   }
   purge() {
     const settings = this.settings();
+    // 兜底清理从未产生任何消息的空会话：前端新建会话已延迟到首条消息才落库，
+    // 这里防止语音/审批等入口在极端情况下留下空记录。只删除超过 10 分钟且没有消息的会话。
+    const emptyCutoff = new Date(Date.now() - 10 * 60000).toISOString();
+    const emptyIds = this.all("SELECT id FROM sessions WHERE created_at < ? AND id NOT IN (SELECT session_id FROM runs WHERE status='running')", [emptyCutoff])
+      .map((row) => String(row.id))
+      .filter((id) => this.conversations.count(id) === 0);
+    for (const id of emptyIds) this.removeSession(id);
     const days = settings.session_retention_days;
     if (days > 0) {
       const cutoff = new Date(Date.now() - days * 86400000).toISOString();

@@ -38,7 +38,11 @@ export interface AgentStatus {
   voice_tts: VoiceModelStatus;
   auth_mode?: "business" | "token";
   fixed_assistant_id?: number | null;
-  voice_input_mode?: "auto" | "realtime" | "file";
+  /** 服务端解析后的实际输入通道（不是原始偏好）。 */
+  voice_input_mode?: "file" | "realtime";
+  /** 原始配置偏好：auto_file/auto_realtime 带自动兜底，realtime/file 为显式选择。 */
+  voice_input_prefer?: "auto_file" | "auto_realtime" | "realtime" | "file";
+  voice_input_capabilities?: { file: boolean; realtime: boolean };
   voice_auto_send?: boolean;
   tts_auto_read?: boolean;
   tts_max_read_chars?: number;

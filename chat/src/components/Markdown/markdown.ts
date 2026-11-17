@@ -102,7 +102,7 @@ function mathInline(state: any, silent: boolean): boolean {
   return true;
 }
 
-const MERMAID_RE = /^\s{0,3}(`{3,}|~{3,})\s*(mermaid)\s*$/i;
+const MERMAID_RE = /^\s{0,3}(`{3,}|~{3,})\s*(mermaid|xychart-beta|xychart|xy|xy-chart)\s*$/i;
 
 export interface UnclosedFence {
   language: string;

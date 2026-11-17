@@ -159,8 +159,10 @@ test("automatic memory extraction does not delay completion of the chat response
   const service = await fixture(upstream.baseUrl);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    service.store.setSettings({ memory_auto_extract: true });
+    service.store.setSettings({ memory_auto_extract: true, memory_extract_interval: 0 });
     const session = await service.session();
+    // 新语义下会话第一轮不提取；补一条历史用户消息，使本次运行成为第二轮。
+    service.store.conversations.insert(session.id, { role: "user", content: "上一轮问题" });
     const run = await service.runs.start(service.credential(), { session_id: session.id, message: "以后请使用中文" });
     const result = await Promise.race([run.task, new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("记忆提取阻塞了聊天完成")), 3000); })]);
     assert.equal(result.status, "ok"); assert.equal(result.answer, "回答已经完成");

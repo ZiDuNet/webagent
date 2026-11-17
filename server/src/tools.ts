@@ -11,6 +11,17 @@ import { limitedResponse } from "./providers.js";
 import { createPiLocalDefinitions, piLocalTools, piLocalToolReason, runtimeToolNames } from "./pi-tools.js";
 import { AppError, type ExecutionContext, type Identity, type Row, type ToolSpec } from "./types.js";
 
+/** 覆盖只影响展示与模型提示，工具 name 始终作为权限、审计和白名单的唯一键。 */
+function withMetadata<T extends { name: string; title?: string; description?: string }>(tool: T, overrides: Record<string, Row>): T {
+  const override = overrides[tool.name];
+  if (!override) return tool;
+  return {
+    ...tool,
+    ...(override.title ? { title: String(override.title) } : {}),
+    ...(override.description ? { description: String(override.description) } : {}),
+  };
+}
+
 export class ToolRegistry {
   private native = new Map<string, ToolSpec>();
   constructor(private store: Store, private auth: Auth) {
@@ -27,7 +38,16 @@ export class ToolRegistry {
     return this.localDeploymentEnabled() && this.store.rawToolPolicy(name)?.enabled === true;
   }
   localToolDefinitions(cwd: string) {
-    return createPiLocalDefinitions(cwd, new Set(piLocalTools.map(({ definition }) => definition.name).filter((name) => this.localToolEnabled(name))));
+    const overrides = this.store.config.toolOverrides();
+    return createPiLocalDefinitions(cwd, new Set(piLocalTools.map(({ definition }) => definition.name).filter((name) => this.localToolEnabled(name))))
+      .map((definition) => {
+        const override = overrides[definition.name];
+        return override ? {
+          ...definition,
+          ...(override.title ? { label: String(override.title) } : {}),
+          ...(override.description ? { description: String(override.description) } : {}),
+        } : definition;
+      });
   }
   codemodeEnabled() { return this.localToolEnabled("codemode"); }
   async updateTags(name: string, tags: string[]) {
@@ -37,7 +57,21 @@ export class ToolRegistry {
     this.store.setToolPolicy(name, { tags: clean });
     return (await this.catalog()).find((item) => item.name === name)!;
   }
+  async updateMetadata(name: string, values: { title?: string; description?: string }) {
+    const tool = (await this.catalog()).find((item) => item.name === name);
+    if (!tool) throw new AppError("工具不存在", 404);
+    for (const key of ["title", "description"] as const) {
+      if (values[key] === undefined) continue;
+      const text = String(values[key]).trim();
+      const limit = key === "title" ? 80 : 500;
+      if (text.length > limit) throw new AppError(`${key === "title" ? "名称" : "描述"}不能超过 ${limit} 个字符`, 422);
+    }
+    if (values.title === undefined && values.description === undefined) throw new AppError("没有可更新的字段", 422);
+    this.store.config.setToolOverride(name, values);
+    return (await this.catalog()).find((item) => item.name === name)!;
+  }
   async catalog(): Promise<Row[]> {
+    const overrides = this.store.config.toolOverrides();
     const entries = (await this.all(undefined, true)).map((tool) => {
       const { execute, available, ...definition } = tool;
       const ready = !available || available();
@@ -55,12 +89,13 @@ export class ToolRegistry {
     });
     const codemodeSaved = this.store.rawToolPolicy("codemode");
     const codemode = { name: "codemode", title: "CodeMode 脚本编排", description: "PI 官方代码编排扩展。启用后模型可编写并执行受限 VM 脚本，仍属于本机执行能力。", source: "pi", category: "PI 官方扩展", capability: "code", risk: "write", permission: "", tags: ["原生", "本机执行", "脚本"], enabled: localOpen && codemodeSaved?.enabled === true, visible: false, selectable: false, default_selected: false, configured: localOpen, locked: !localOpen, blocked_reason: localReason, policy_editable: false };
-    return [...local, codemode, ...entries, ...[
+    const internal = [
       { name: "tool_search", title: "BM25 工具发现", source: "pi", category: "PI 官方扩展", enabled: Boolean(this.store.settings().bm25_enabled), description: "复用 PI 官方 tool-search，仅检索本轮已授权工具；在运行设置切换 BM25，允许与决策都关闭。" },
     ].map((tool) => {
       const saved = this.store.rawToolPolicy(tool.name);
       return { ...tool, tags: ["内置"], enabled: tool.name === "tool_search" ? tool.enabled : saved?.enabled !== false, visible: false, selectable: false, default_selected: true, risk: "read", permission: "", input_schema: {}, configured: true, locked: false, policy_editable: false, blocked_reason: tool.name === "tool_search" ? "由运行设置中的 BM25 开关控制。" : "内部知识加载工具；可全局停用，不出现在用户工具选择器。" };
-    })];
+    });
+    return [...local, codemode, ...entries, ...internal].map((tool) => withMetadata(tool, overrides));
   }
   async updatePolicy(name: string, values: Row) {
     const tool = (await this.catalog()).find((item) => item.name === name);
@@ -131,6 +166,7 @@ export class ToolRegistry {
     } finally { await client.close(); }
   }
   async all(context?: ExecutionContext, includeUnavailable = false): Promise<ToolSpec[]> {
+    const overrides = this.store.config.toolOverrides();
     const tools = [...this.native.values()].filter((tool) => includeUnavailable || !tool.available || tool.available());
     tools.push(...this.dynamic(includeUnavailable));
     for (const server of this.store.mcpServers().filter((item) => item.enabled !== false)) {
@@ -153,7 +189,7 @@ export class ToolRegistry {
       }
     }
     if (tools.some((tool) => runtimeToolNames.includes(tool.name)) || new Set(tools.map((tool) => tool.name)).size !== tools.length) throw new AppError("工具名称冲突或使用 PI 保留名称，请管理员调整连接器命名", 503);
-    return tools;
+    return tools.map((tool) => withMetadata(tool, overrides));
   }
   async permitted(identity: Identity, assistant: Row, requested?: string[]) {
     return (await this.all()).filter((tool) => {

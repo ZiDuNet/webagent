@@ -6,7 +6,92 @@ import { PageHeading, PageState, ResourceActions, useResource, type Row } from "
 
 const elapsed = (value: number) => `${((value || 0) / 1000).toFixed(2)}s`;
 interface SessionDetail extends Row { session: Row; runs: Row[]; messages: Row[]; llm_calls: Row[]; compactions: Row[] }
+
+function BusinessUsersTab() {
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  useEffect(() => {
+    const timer = setTimeout(() => { setQuery(search.trim()); setPage(1); }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+  const resource = useResource<{ items: Row[]; total: number }>(`/admin/business-users?limit=${pageSize}&offset=${(page - 1) * pageSize}${query ? `&query=${encodeURIComponent(query)}` : ""}`);
+  const [selected, setSelected] = useState<Row | null>(null);
+  const [memories, setMemories] = useState<Row[]>([]);
+  const [memoriesLoading, setMemoriesLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [editing, setEditing] = useState<Row | null>(null);
+  const [content, setContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const ownerKey = selected?.owner_key || "";
+  const loadMemories = async (key: string) => {
+    setMemoriesLoading(true); setError("");
+    try { const result = await controlRequest<{ items: Row[] }>(`/admin/business-users/${encodeURIComponent(key)}/memories`); setMemories(result.items); }
+    catch (failure) { setError(apiErrorMessage(failure)); }
+    finally { setMemoriesLoading(false); }
+  };
+  useEffect(() => { if (ownerKey) void loadMemories(ownerKey); }, [ownerKey]);
+  const refreshMemories = async () => {
+    if (!selected) return;
+    await loadMemories(selected.owner_key);
+    await resource.refresh({ silent: true });
+  };
+  const toggleMemory = async (row: Row) => {
+    setError("");
+    try { await controlRequest(`/admin/memories/${row.id}`, { enabled: !row.enabled }, "PATCH"); await refreshMemories(); }
+    catch (failure) { setError(apiErrorMessage(failure)); }
+  };
+  const saveMemory = async () => {
+    if (!editing || !content.trim()) return;
+    setSaving(true); setError("");
+    try {
+      await controlRequest(`/admin/memories/${editing.id}`, { content }, "PATCH");
+      setEditing(null);
+      await refreshMemories();
+    } catch (failure) { setError(apiErrorMessage(failure)); }
+    finally { setSaving(false); }
+  };
+  const removeMemory = async (row: Row) => {
+    setError("");
+    try { await controlRequest(`/admin/memories/${row.id}`, undefined, "DELETE"); await refreshMemories(); }
+    catch (failure) { setError(apiErrorMessage(failure)); }
+  };
+  return <>
+    <Space style={{ marginBottom: 20 }} wrap>
+      <Input prefix={<Search size={15} />} placeholder="搜索用户或 owner_key" aria-label="搜索业务用户" value={search} onChange={(event) => setSearch(event.target.value)} style={{ width: 340 }} />
+    </Space>
+    <PageState {...resource}>
+      <Table rowKey="owner_key" dataSource={resource.data?.items} onRow={(row) => ({ onClick: () => setSelected(row), style: { cursor: "pointer" } })} locale={{ emptyText: "暂无业务用户" }} pagination={{ current: page, pageSize, total: resource.data?.total || 0, showSizeChanger: true, pageSizeOptions: ["10", "20", "50", "100"], showTotal: (total, range) => `${range[0]}–${range[1]} / 共 ${total} 位用户`, onChange: (next, size) => { if (size !== pageSize) { setPageSize(size); setPage(1); } else setPage(next); } }} scroll={{ x: 760 }} columns={[
+        { title: "用户", dataIndex: "display_name", width: 300, render: (value, row) => <div><strong>{value || row.owner_key}</strong><div className="control-muted">{row.owner_key}</div></div> },
+        { title: "会话", dataIndex: "sessions", width: 100 },
+        { title: "消息", dataIndex: "messages", width: 100 },
+        { title: "记忆", dataIndex: "memories", width: 100 },
+        { title: "最后活跃", dataIndex: "last_active_at", render: (value) => value ? new Date(value).toLocaleString("zh-CN") : <span className="control-muted">—</span> },
+      ]} />
+    </PageState>
+    <Drawer open={Boolean(selected)} onClose={() => setSelected(null)} width="min(100vw, 860px)" title={selected ? `业务用户 · ${selected.display_name || selected.owner_key}` : "业务用户"}>
+      {selected && <>
+        <Descriptions size="small" column={2} items={[{ key: "owner", label: "owner_key", children: <span className="control-muted">{selected.owner_key}</span> }, { key: "active", label: "最后活跃", children: selected.last_active_at ? new Date(selected.last_active_at).toLocaleString("zh-CN") : "—" }, { key: "sessions", label: "会话", children: selected.sessions }, { key: "memories", label: "记忆", children: memories.length }]} />
+        {error && <Alert title={error} type="error" showIcon style={{ margin: "16px 0" }} />}
+        <Table rowKey="id" size="small" loading={memoriesLoading} dataSource={memories} pagination={false} locale={{ emptyText: "暂无记忆" }} scroll={{ x: 680 }} columns={[
+          { title: "内容", dataIndex: "content", render: (value) => <div style={{ whiteSpace: "pre-wrap" }}>{value}</div> },
+          { title: "来源", dataIndex: "source", width: 100, render: (value) => <Tag>{value === "model" ? "模型提取" : "用户添加"}</Tag> },
+          { title: "状态", dataIndex: "enabled", width: 90, render: (value) => <Tag color={value ? "green" : "default"}>{value ? "已启用" : "已停用"}</Tag> },
+          { title: "时间", dataIndex: "updated_at", width: 170, render: (value) => new Date(value).toLocaleString("zh-CN") },
+          { title: "操作", width: 170, render: (_, row) => <Space size={0}><Button size="small" type="text" onClick={() => { setEditing(row); setContent(row.content); }}>编辑</Button><Button size="small" type="text" onClick={() => void toggleMemory(row)}>{row.enabled ? "停用" : "启用"}</Button><Popconfirm title="删除这条记忆？" onConfirm={() => void removeMemory(row)}><Button size="small" type="text" danger>删除</Button></Popconfirm></Space> },
+        ]} />
+      </>}
+    </Drawer>
+    <Modal open={editing !== null} title="编辑记忆" onCancel={() => setEditing(null)} onOk={() => void saveMemory()} confirmLoading={saving} okText="保存" cancelText="取消" okButtonProps={{ disabled: !content.trim() }}>
+      {error && <Alert title={error} type="error" showIcon style={{ marginBottom: 16 }} />}
+      <Input.TextArea rows={6} maxLength={2000} showCount value={content} onChange={(event) => setContent(event.target.value)} />
+    </Modal>
+  </>;
+}
+
 export default function SessionsPage() {
+  const [tab, setTab] = useState("sessions");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [owner, setOwner] = useState("");
@@ -51,18 +136,23 @@ export default function SessionsPage() {
     {error && <Alert title={error} type="error" showIcon style={{ marginBottom: 16 }} />}
     {notice && <Alert title={notice} type="success" showIcon closable onClose={() => setNotice("")} style={{ marginBottom: 16 }} />}
     <section className="control-card" style={{ marginBottom: 20 }}><div className="control-actions" style={{ justifyContent: "space-between", marginBottom: 12 }}><h2 style={{ margin: 0 }}><Database size={16} /> 存储与保留</h2><Space><Button size="small" onClick={() => void storage.refresh()}>刷新容量</Button><Popconfirm title="压缩 SQLite？" description="会回收已删除会话的空闲页；运行中的任务存在时服务端会拒绝执行。" onConfirm={() => void vacuum()}><Button size="small" icon={<Eraser size={14} />} loading={vacuuming}>压缩数据库</Button></Popconfirm></Space></div>{storage.loading ? <span className="control-muted">正在读取存储…</span> : storage.data && <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[{ key: "sessions", label: "会话", children: storage.data.sessions }, { key: "messages", label: "消息", children: storage.data.messages }, { key: "runs", label: "运行事件", children: storage.data.run_events }, { key: "db", label: "Agent DB", children: `${(storage.data.agent_db_bytes / 1024 / 1024).toFixed(2)} MB` }, { key: "wal", label: "WAL", children: `${(storage.data.agent_wal_bytes / 1024 / 1024).toFixed(2)} MB` }, { key: "calls", label: "模型调用", children: storage.data.llm_calls }, { key: "questions", label: "待回答", children: storage.data.questions }, { key: "oldest", label: "最早会话", children: storage.data.oldest_session ? new Date(storage.data.oldest_session).toLocaleDateString("zh-CN") : "无" }]} />}</section>
-    <Space style={{ marginBottom: 20 }} wrap>
-      <Input prefix={<Search size={15} />} placeholder="按用户、会话标题搜索" aria-label="搜索会话" value={search} onChange={(event) => setSearch(event.target.value)} style={{ width: 340 }} />
-      <Select allowClear showSearch placeholder="按业务用户 / PID 范围筛选" style={{ width: 360 }} value={owner || undefined} onChange={(value) => { setOwner(value || ""); setPage(1); }} options={(resource.data?.users || []).map((row: Row) => ({ value: row.owner_key, label: `${row.username || row.owner_key}${row.namespace ? ` · ${row.namespace}` : ""}（${row.sessions}）` }))} />
-    </Space>
-    <PageState {...resource}><Table rowKey="id" dataSource={resource.data?.items} pagination={{ current: page, pageSize, total: resource.data?.total || 0, showSizeChanger: true, pageSizeOptions: ["10", "20", "50", "100"], showTotal: (total, range) => `${range[0]}–${range[1]} / 共 ${total} 个会话（全部 ${resource.data?.all_total ?? total}）`, onChange: (next, size) => { if (size !== pageSize) { setPageSize(size); setPage(1); } else setPage(next); } }} scroll={{ x: 900 }} columns={[
-      { title: "会话", dataIndex: "title", render: (title, row) => <Button type="link" loading={inspecting && detail?.session.id === row.id} onClick={() => void inspect(row.id)}>{title}</Button> },
-      { title: "业务用户", dataIndex: "username" }, { title: "范围", dataIndex: "namespace", width: 170, render: (value) => value ? <Tag>{value}</Tag> : <span className="control-muted">—</span> }, { title: "助手", dataIndex: "assistant_name" },
-      { title: "消息", dataIndex: "message_count" }, { title: "Token", dataIndex: "total_tokens" },
-      { title: "状态", dataIndex: "last_status", render: (value) => <Tag>{value || "未运行"}</Tag> },
-      { title: "更新时间", dataIndex: "updated_at", render: (value) => new Date(value).toLocaleString("zh-CN") },
+    <Tabs activeKey={tab} onChange={setTab} items={[
+      { key: "sessions", label: "会话", children: <>
+        <Space style={{ marginBottom: 20 }} wrap>
+          <Input prefix={<Search size={15} />} placeholder="按用户、会话标题搜索" aria-label="搜索会话" value={search} onChange={(event) => setSearch(event.target.value)} style={{ width: 340 }} />
+          <Select allowClear showSearch placeholder="按业务用户 / PID 范围筛选" style={{ width: 360 }} value={owner || undefined} onChange={(value) => { setOwner(value || ""); setPage(1); }} options={(resource.data?.users || []).map((row: Row) => ({ value: row.owner_key, label: `${row.username || row.owner_key}${row.namespace ? ` · ${row.namespace}` : ""}（${row.sessions}）` }))} />
+        </Space>
+        <PageState {...resource}><Table rowKey="id" dataSource={resource.data?.items} pagination={{ current: page, pageSize, total: resource.data?.total || 0, showSizeChanger: true, pageSizeOptions: ["10", "20", "50", "100"], showTotal: (total, range) => `${range[0]}–${range[1]} / 共 ${total} 个会话（全部 ${resource.data?.all_total ?? total}）`, onChange: (next, size) => { if (size !== pageSize) { setPageSize(size); setPage(1); } else setPage(next); } }} scroll={{ x: 900 }} columns={[
+      { title: "会话", dataIndex: "title", width: 260, render: (title, row) => <Button type="link" loading={inspecting && detail?.session.id === row.id} onClick={() => void inspect(row.id)} title={String(title || "")} style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", verticalAlign: "top" }}>{title}</Button> },
+      { title: "业务用户", dataIndex: "username", ellipsis: true }, { title: "范围", dataIndex: "namespace", width: 170, render: (value) => value ? <Tag>{value}</Tag> : <span className="control-muted">—</span> }, { title: "助手", dataIndex: "assistant_name", ellipsis: true, width: 140 },
+      { title: "消息", dataIndex: "message_count", width: 70 }, { title: "Token", dataIndex: "total_tokens", width: 90 },
+      { title: "状态", dataIndex: "last_status", width: 110, render: (value) => <Tag>{value || "未运行"}</Tag> },
+      { title: "更新时间", dataIndex: "updated_at", width: 170, render: (value) => new Date(value).toLocaleString("zh-CN") },
       { title: "操作", render: (_, row) => <Popconfirm title="删除这个会话？" description="聊天记录、运行与 PI 上下文将一并删除；已发布页面保留但解除会话关联。" onConfirm={() => void removeSession(row.id)}><Button type="text" danger icon={<Trash2 size={14} />} aria-label={`删除会话 ${row.title}`} /></Popconfirm> },
-    ]} /></PageState>
+        ]} /></PageState>
+      </> },
+      { key: "business-users", label: "业务用户", children: <BusinessUsersTab /> },
+    ]} />
     <Drawer loading={inspecting} open={Boolean(detail)} onClose={() => { setDetail(null); setDiagnostic(null); }} width="min(100vw, 1080px)" title={detail?.session.title || "会话详情"} extra={detail && <a href={`/api/control/admin/sessions/${encodeURIComponent(detail.session.id)}/export`} target="_blank" rel="noreferrer"><Download size={15} /> 导出</a>}>
       {detail && <><Descriptions column={2} size="small" items={[{ key: "user", label: "业务用户", children: detail.session.username }, { key: "model", label: "最近模型", children: detail.session.last_model_name }, { key: "tokens", label: "总 Token", children: detail.session.total_tokens }, { key: "cost", label: "估算费用", children: `$${Number(detail.session.total_cost_usd).toFixed(6)}` }]} /><Tabs items={[
         { key: "messages", label: "聊天记录", children: detail.messages.length ? <div className="control-messages">{detail.messages.map((message: Row) => <article className="control-message" key={message.id}><header><strong>{message.role === "user" ? "用户" : "助手"}</strong><span>{new Date(message.created_at).toLocaleString("zh-CN")}</span></header><div className="control-message__body">{message.content || "（无文字内容）"}</div>{(message.reasoning || message.tool_runs.length > 0) && <Collapse ghost items={[...(message.reasoning ? [{ key: "reasoning", label: "模型思考", children: <pre className="control-json">{message.reasoning}</pre> }] : []), ...(message.tool_runs.length ? [{ key: "tools", label: `${message.tool_runs.length} 次工具调用`, children: <pre className="control-json">{JSON.stringify(message.tool_runs, null, 2)}</pre> }] : [])]} />}</article>)}</div> : <Alert type="info" showIcon title="没有可显示的消息，或管理员查看内容已关闭。" /> },

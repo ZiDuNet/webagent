@@ -15,6 +15,13 @@ export class Publications {
     return { items: this.store.all(`SELECT * FROM publications WHERE ${where.join(" AND ")} ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?`, [...values, limit, offset]), total: this.store.one(`SELECT count(*) AS n FROM publications WHERE ${where.join(" AND ")}`, values)!.n, limit, offset };
   }
   detail(id: number, user: Identity) { const publication = this.owned(id, user); const versions = this.store.all("SELECT id,version,title,description,url,visibility,password_set,size,status,created_at FROM publication_versions WHERE publication_id=? ORDER BY id DESC", [id]); const html = this.store.one("SELECT html FROM publication_versions WHERE id=? AND publication_id=?", [publication.latest_version_id || 0, id])?.html || ""; return { ...publication, html, versions }; }
+  remove(id: number, user: Identity) {
+    const row = this.owned(id, user);
+    this.store.run("DELETE FROM publication_versions WHERE publication_id=?", [id]);
+    this.store.run("DELETE FROM publications WHERE id=?", [id]);
+    this.store.audit(user.username, "pagepilot.delete", String(id), { title: row.title, remote_code: row.code });
+    return { ok: true, remote_deleted: false, note: "PagePilot 未开放删除部署的接口，已删除本地发布记录" };
+  }
   async test() {
     const settings = this.store.settings();
     if (!settings.pagepilot_base_url || !settings.pagepilot_token) return { ok: false, message: "请先配置 PagePilot 地址和 Token" };
@@ -62,7 +69,8 @@ export class Publications {
       const setMetadata = async (route: string, fallback: string, payload: Row) => {
         try { await send("PATCH", route, payload); } catch (error) { if (![404, 405].includes((error as any).remoteStatus)) throw error; await send("POST", fallback, payload); }
       };
-      if (body.access_password !== undefined) try { await setMetadata(`/api/deploys/${result.code}/access`, `/api/deploys/${result.code}/access/set`, { password: body.access_password }); } catch { warnings.push("访问密码设置失败，请核对页面访问权限"); result.password_set = previous?.password_set || Boolean(body.access_password); }
+      // 首次发布时密码已随 /api/deploy 一并提交，无需再补设；只有更新时单独同步。
+      if (previous && body.access_password !== undefined) try { await setMetadata(`/api/deploys/${result.code}/access`, `/api/deploys/${result.code}/access/set`, { password: body.access_password }); } catch { warnings.push("访问密码设置失败，请核对页面访问权限"); result.password_set = previous?.password_set || Boolean(body.access_password); }
       try { await setMetadata(`/api/deploys/${result.code}/visibility`, `/api/deploys/${result.code}/visibility`, { visibility: data.visibility }); } catch { warnings.push("可见范围设置失败"); }
       Object.assign(result, { ok: !warnings.length, status: warnings.length ? "partial" : "published", warning: warnings.join("；") });
     } catch (error) {
@@ -77,7 +85,7 @@ export class Publications {
   tools(): ToolSpec[] {
     const properties = { html: { type: "string" }, title: { type: "string" }, description: { type: "string" }, access_password: { type: "string", description: "必须先询问用户是否设置密码；用户明确不设置时填空，不得生成密码。" }, visibility: { type: "string", enum: ["public", "unlisted"] }, publication_id: { type: "integer", description: "更新时填写当前用户的已发布记录 ID" } };
     return [
-      { name: "pagepilot_publish_html", title: "发布或更新 HTML", description: "发布 HTML 页面到 PagePilot，或更新当前用户已发布的页面。先询问用户标题、可见范围和是否设置密码，密码可以为空。写入需要审批。", source: "builtin", category: "PagePilot", permission: "", risk: "write", available: () => this.status().configured, parameters: { type: "object", properties, required: ["html", "title", "visibility", "access_password"] }, execute: async (args, context) => this.publish(context.identity, { ...args, session_id: context.sessionId }, "tool") },
+      { name: "pagepilot_publish_html", title: "发布或更新 HTML", description: "把已经完成并得到用户确认的 HTML 页面发布到 PagePilot，或更新当前用户已发布的页面。仅在用户明确要求“发布/上线/生成链接”时调用；生成或修改 HTML 的过程中不要调用。调用前必须先问清标题、可见范围（public/unlisted）以及是否设置访问密码，密码可以为空，禁止自行生成密码。写入需要审批。", source: "builtin", category: "PagePilot", permission: "", risk: "write", available: () => this.status().configured, parameters: { type: "object", properties, required: ["html", "title", "visibility", "access_password"] }, execute: async (args, context) => this.publish(context.identity, { ...args, session_id: context.sessionId }, "tool") },
       { name: "pagepilot_list_my_pages", title: "我的已发布页面", description: "从本地归属记录查询当前用户已发布页面，不读取全局 Token 下其他用户的页面。", source: "builtin", category: "PagePilot", permission: "", risk: "read", parameters: { type: "object", properties: { q: { type: "string" } } }, execute: async (args, context) => this.list(context.identity, args) },
     ];
   }

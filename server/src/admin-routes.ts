@@ -19,6 +19,7 @@ import { promptDefaults } from "./prompts.js";
 import { skillFromTextFiles, skillFromZip } from "./skills.js";
 import { assistantModelColumns } from "./assistant-config.js";
 import { brandUrl, readBrandLogo, removeBrandLogo, saveBrandLogo } from "./brand.js";
+import { normalizeVoiceInputMode, voiceInputModeInputs } from "./voice-input.js";
 
 const name = z.string().trim().min(1).max(100);
 const providerSchema = z.object({ name, provider_type: z.literal("openai_compatible").default("openai_compatible"), base_url: z.string().max(1000), api_key: z.string().max(5000).optional(), clear_api_key: z.boolean().optional(), extra_headers: z.record(z.string(), z.string()).default({}), enabled: z.boolean().default(true), timeout_seconds: z.number().min(3).max(180).default(90) });
@@ -30,7 +31,7 @@ const assistantSchema = z.object({
   tts_model_id: z.number().int().positive().nullable().default(null),
   voice_asr_model_id: z.number().int().positive().nullable().default(null),
   voice_tts_model_id: z.number().int().positive().nullable().default(null),
-  voice_input_mode: z.enum(["auto", "realtime", "file"]).nullable().default(null),
+  voice_input_mode: z.enum(voiceInputModeInputs).nullable().default(null).transform((value) => (value === null ? null : normalizeVoiceInputMode(value))),
   voice_auto_send: z.boolean().nullable().default(null),
   tts_auto_read: z.boolean().nullable().default(null),
   tts_max_read_chars: z.number().int().min(1).max(4000).nullable().default(null),
@@ -66,16 +67,28 @@ const api = "/api/control";
 export function adminRoutes(app: FastifyInstance, context: { store: Store; auth: Auth; skills: SkillLibrary; providers: Providers; speech: Speech; decision: Decision; registry: ToolRegistry; publications: Publications; runs: Runs; core: CoreMaintenance }) {
   const { store, auth, skills, providers, speech, decision, registry, publications, runs, core } = context;
   const publicConfig = () => { const { pagepilot_token, ...settings } = store.settings(); return { ...settings, prompt_defaults: promptDefaults, pagepilot_token_set: Boolean(pagepilot_token), pagepilot_token_masked: mask(pagepilot_token ? decrypt(pagepilot_token) : "") }; };
+  /** 记忆来自用户手动添加或模型提取；数据库只存 kind，对外补充稳定的 source 语义。 */
+  const memoryRow = (row: Row) => ({
+    id: row.id,
+    content: row.content,
+    kind: row.kind,
+    source: row.kind === "extracted" ? "model" : "user",
+    enabled: Boolean(row.enabled),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  });
   // 品牌徽标是公开静态资源，其余 /api/control 接口仍要求管理端登录。
   app.addHook("preHandler", async (request) => { if (request.method === "OPTIONS") return; if (request.url.startsWith(`${api}/`) && !request.url.startsWith(`${api}/auth/`) && !request.url.startsWith(`${api}/brand/`)) auth.admin(request); });
   app.get(`${api}/config`, async () => publicConfig());
   app.put(`${api}/config`, async (request) => {
     const input = request.body as Row; const values: Row = {};
     for (const [key, value] of Object.entries(input || {})) {
-      if (!(key in defaults) || key.startsWith("pagepilot_")) continue;
+      // 工具覆盖通过 PATCH /admin/tools/:name/metadata 单独维护，避免整表单提交时绕过长度与条数校验。
+      if (!(key in defaults) || key.startsWith("pagepilot_") || key === "tool_overrides") continue;
       const fallback = defaults[key];
       if (fallback === null) { if (value !== null && (!Number.isSafeInteger(value) || Number(value) < 0)) throw new AppError(`参数 ${key} 需要模型 ID 或空值`, 422); values[key] = value || null; }
       else if (typeof value !== typeof fallback) throw new AppError(`参数 ${key} 类型无效`, 422);
+      else if (key === "memory_extract_interval") { if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > 50) throw new AppError("memory_extract_interval 需要是 0–50 的整数", 422); values[key] = value; }
       else if (typeof fallback === "number" && (!Number.isFinite(value) || Number(value) < 0 || Number(value) > 100000000)) throw new AppError(`参数 ${key} 范围无效`, 422);
       else if (typeof value === "string" && value.length > 20000) throw new AppError(`参数 ${key} 过长`, 422);
       else values[key] = value;
@@ -91,13 +104,14 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     if (next.bm25_enabled && next.decision_enabled) throw new AppError("BM25 与决策不能同时开启，但允许都关闭", 422);
     if (!(next.decision_threshold > 0 && next.decision_threshold < 1) || next.decision_min_count < 1 || next.decision_min_count > 200 || next.decision_timeout_seconds < 1 || next.decision_timeout_seconds > 30) throw new AppError("决策阈值或候选数量、超时无效", 422);
     if (next.retry_max_attempts < 1 || next.retry_max_attempts > 8 || next.compaction_keep_ratio < 0.2 || next.compaction_keep_ratio > 0.9 || next.max_run_seconds < 10 || next.max_run_seconds > 3600 || next.modelsdev_cache_hours < 1 || next.modelsdev_cache_hours > 8760) throw new AppError("重试、压缩、缓存或运行时长参数超出范围", 422);
+    if (!Number.isSafeInteger(next.memory_extract_interval) || next.memory_extract_interval < 0 || next.memory_extract_interval > 50) throw new AppError("memory_extract_interval 需要是 0–50 的整数", 422);
     for (const key of ["max_iterations", "max_tool_calls", "context_max_rounds", "session_retention_days", "retry_max_attempts", "run_event_retention_hours", "llm_call_retention_days", "compaction_event_retention_days", "audit_retention_days"]) if (!Number.isSafeInteger(next[key])) throw new AppError(`${key} 必须是整数`, 422);
     const modelBindings: Record<string, string[]> = {
       asr_model_id: ["asr"],
       asr_realtime_model_id: ["asr_realtime"],
       tts_model_id: ["tts"],
-      voice_asr_model_id: ["asr_realtime"],
-      voice_tts_model_id: ["tts_realtime"],
+      voice_asr_model_id: ["asr_realtime", "asr"],
+      voice_tts_model_id: ["tts_realtime", "tts"],
       title_model_id: ["chat", "vision"],
       fallback_model_id: ["chat", "vision"],
       compaction_model_id: ["chat", "vision"],
@@ -108,7 +122,8 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
       const model = store.model(next[key]);
       if (!model?.enabled || !model.provider_enabled || !expected.includes(model.model_kind)) throw new AppError(`${key} 对应模型不可用或类型不匹配`, 422);
     }
-    if (next.voice_input_mode && !["auto", "realtime", "file"].includes(next.voice_input_mode)) throw new AppError("voice_input_mode 无效", 422);
+    if (values.voice_input_mode !== undefined && !(voiceInputModeInputs as readonly string[]).includes(String(values.voice_input_mode))) throw new AppError("voice_input_mode 无效", 422);
+    if (values.voice_input_mode !== undefined) values.voice_input_mode = normalizeVoiceInputMode(values.voice_input_mode);
     if (next.tts_max_read_chars < 1 || next.tts_max_read_chars > 4000) throw new AppError("tts_max_read_chars 需要在 1–4000 之间", 422);
     if (next.decision_enabled && (!next.decision_model_id || (!next.decision_tools && !next.decision_skills))) throw new AppError("开启决策需要有效模型，并至少选择工具或技能", 422);
     const previousGlobalLogo = String(store.settings().welcome_logo || "");
@@ -350,7 +365,9 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     const values = assistantSchema.parse({ ...previous, ...request.body as Row });
     if (values.is_default && !values.enabled) throw new AppError("默认助手必须启用", 422);
     if (values.model_row_id && !["chat", "vision"].includes(store.model(values.model_row_id)?.model_kind)) throw new AppError("助手只能绑定对话模型", 422);
-    const assistantModelBindings: Record<string, string[]> = { asr_model_id: ["asr"], asr_realtime_model_id: ["asr_realtime"], tts_model_id: ["tts"], voice_asr_model_id: ["asr_realtime"], voice_tts_model_id: ["tts_realtime"] };
+    // 输入框和通话都同时支持实时/非实时：通话的 STT 未配置实时模型时会缓冲 PCM 后走文件识别，
+    // TTS 未配置实时模型时按句调用非实时合成，因此这里允许绑定两种类型。
+    const assistantModelBindings: Record<string, string[]> = { asr_model_id: ["asr"], asr_realtime_model_id: ["asr_realtime"], tts_model_id: ["tts"], voice_asr_model_id: ["asr_realtime", "asr"], voice_tts_model_id: ["tts_realtime", "tts"] };
     for (const [key, kinds] of Object.entries(assistantModelBindings)) {
       const modelId = values[key as keyof typeof values] as number | null;
       if (!modelId) continue;
@@ -373,6 +390,13 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
     return { ok: true };
   });
   app.get(`${api}/admin/tools`, async () => ({ items: await registry.catalog() }));
+  app.patch(`${api}/admin/tools/:name/metadata`, async (request) => {
+    const toolName = String((request.params as Row).name);
+    const values = z.object({ title: z.string().max(80).optional(), description: z.string().max(500).optional() }).strict().parse(request.body);
+    const tool = await registry.updateMetadata(toolName, values);
+    store.audit(auth.admin(request).username, "tool.metadata", toolName, values);
+    return { tool };
+  });
   app.put(`${api}/admin/tools/:name/tags`, async (request) => {
     const tags = z.object({ tags: z.array(z.string().max(24)).max(12) }).strict().parse(request.body).tags;
     const tool = await registry.updateTags((request.params as Row).name, tags);
@@ -488,6 +512,61 @@ export function adminRoutes(app: FastifyInstance, context: { store: Store; auth:
       users: store.all("SELECT owner_key,namespace,username,count(*) AS sessions,sum(total_tokens) AS total_tokens FROM sessions GROUP BY owner_key,namespace,username ORDER BY sessions DESC LIMIT 300"),
       filtered: items.length, limit, offset,
     };
+  });
+  app.get(`${api}/admin/business-users`, async (request) => {
+    const query = request.query as Row;
+    const limit = Math.min(200, Math.max(1, Number(query.limit) || 50));
+    const offset = Math.max(0, Number(query.offset) || 0);
+    const search = String(query.query || "").trim();
+    const where = search ? "WHERE s.owner_key LIKE ? OR s.username LIKE ?" : "";
+    const values = search ? [`%${search}%`, `%${search}%`] : [];
+    const groups = store.all(
+      `SELECT s.owner_key AS owner_key, max(s.username) AS display_name, count(*) AS sessions, max(s.updated_at) AS last_active_at
+       FROM sessions s ${where}
+       GROUP BY s.owner_key
+       ORDER BY last_active_at DESC, s.owner_key ASC`,
+      values,
+    );
+    const items = groups.slice(offset, offset + limit).map((group) => {
+      const ownerKey = String(group.owner_key || "");
+      const sessionIds = store.all("SELECT id FROM sessions WHERE owner_key=?", [ownerKey]).map((row) => String(row.id));
+      const messages = sessionIds.reduce((total, id) => total + store.conversations.count(id), 0);
+      const memories = Number(store.one("SELECT count(*) AS n FROM memories WHERE owner_key=?", [ownerKey])?.n || 0);
+      return {
+        owner_key: ownerKey,
+        display_name: String(group.display_name || ownerKey),
+        sessions: Number(group.sessions || 0),
+        messages,
+        memories,
+        last_active_at: group.last_active_at || null,
+      };
+    });
+    return { items, total: groups.length, limit, offset };
+  });
+  app.get(`${api}/admin/business-users/:ownerKey/memories`, async (request) => {
+    const ownerKey = String((request.params as Row).ownerKey);
+    const exists = store.one("SELECT owner_key FROM sessions WHERE owner_key=? LIMIT 1", [ownerKey])
+      || store.one("SELECT owner_key FROM memories WHERE owner_key=? LIMIT 1", [ownerKey]);
+    if (!exists) throw new AppError("业务用户不存在", 404);
+    return { owner_key: ownerKey, items: store.all("SELECT * FROM memories WHERE owner_key=? ORDER BY updated_at DESC", [ownerKey]).map(memoryRow) };
+  });
+  app.patch(`${api}/admin/memories/:id`, async (request) => {
+    const id = Number((request.params as Row).id);
+    const previous = Number.isSafeInteger(id) ? store.one("SELECT * FROM memories WHERE id=?", [id]) : undefined;
+    if (!previous) throw new AppError("记忆不存在", 404);
+    const body = z.object({ content: z.string().trim().min(1).max(2000).optional(), enabled: z.boolean().optional() }).strict().parse(request.body);
+    if (body.content === undefined && body.enabled === undefined) throw new AppError("没有可更新的字段", 422);
+    const memory = store.update("memories", id, body)!;
+    store.audit(auth.admin(request).username, "memory.update", String(id), { owner_key: previous.owner_key, content: body.content !== undefined, enabled: body.enabled });
+    return { memory: memoryRow(memory) };
+  });
+  app.delete(`${api}/admin/memories/:id`, async (request) => {
+    const id = Number((request.params as Row).id);
+    const previous = Number.isSafeInteger(id) ? store.one("SELECT * FROM memories WHERE id=?", [id]) : undefined;
+    if (!previous) throw new AppError("记忆不存在", 404);
+    store.run("DELETE FROM memories WHERE id=?", [id]);
+    store.audit(auth.admin(request).username, "memory.delete", String(id), { owner_key: previous.owner_key });
+    return { ok: true };
   });
   app.get(`${api}/admin/sessions/:id`, async (request) => { const id = (request.params as Row).id; const session = store.one("SELECT * FROM sessions WHERE id=?", [id]); if (!session) throw new AppError("会话不存在", 404); return { session, messages: store.settings().admin_session_content ? store.conversations.messages(id) : [], llm_calls: store.all("SELECT * FROM llm_calls WHERE session_id=? ORDER BY id", [id]), compactions: store.all("SELECT * FROM compaction_events WHERE session_id=? ORDER BY id", [id]), runs: store.all("SELECT * FROM runs WHERE session_id=? ORDER BY started_at DESC", [id]) }; });
   app.get(`${api}/admin/sessions/:id/export`, async (request, reply) => { const id = (request.params as Row).id; if (!store.settings().admin_session_content) throw new AppError("管理员查看会话内容已关闭", 403); if (!store.one("SELECT id FROM sessions WHERE id=?", [id])) throw new AppError("会话不存在", 404); reply.header("Content-Disposition", `attachment; filename="session-${id.replace(/[^a-zA-Z0-9_-]/g, "")}.json"`); return { session: store.one("SELECT * FROM sessions WHERE id=?", [id]), messages: store.conversations.messages(id) }; });

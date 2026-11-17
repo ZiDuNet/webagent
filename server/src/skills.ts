@@ -2,7 +2,7 @@ import { inflateRawSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { AppError, type Row } from "./types.js";
 
-const TEXT_FILE = /\.(md|txt|json|ya?ml|csv)$/i;
+const FORBIDDEN_FILE = /\.(sh|bash|zsh)$/i;
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_TOTAL_BYTES = 4 * 1024 * 1024;
 const MAX_FILES = 200;
@@ -21,7 +21,7 @@ function safePath(value: string) {
   if (!normalized || normalized.startsWith("/") || normalized.includes("\0")) throw new AppError(`技能包路径无效：${value}`, 422);
   const parts = normalized.split("/").filter(Boolean);
   if (!parts.length || parts.some((part) => part === "." || part === "..")) throw new AppError(`技能包包含路径穿越：${value}`, 422);
-  if (!TEXT_FILE.test(normalized)) throw new AppError(`技能包只允许文本文件（md/txt/json/yaml/yml/csv）：${value}`, 422);
+  if (FORBIDDEN_FILE.test(normalized)) throw new AppError(`技能包不允许包含 shell 脚本：${value}`, 422);
   return parts.join("/");
 }
 

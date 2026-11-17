@@ -220,6 +220,8 @@ React 组件见 `chat/src/index.ts`。Chat 样式依赖主题 CSS；在宿主复
 
 保存位置：HTTP 连接器为 `data/tools/http/<name>.json`，MCP 为 `data/tools/mcp/<name>.json`，四态策略与标签在 `data/tools/policies.json`。三者都是纯 JSON，可直接用编辑器或部署脚本维护，不需要改数据库；配置文件不是合法 JSON 时服务会明确报错而不是覆盖它。
 
+工具的展示名称（`title`）和描述可以在管理端直接编辑，不用改 JSON 文件：覆盖值保存在 `settings.tool_overrides`，同时作用于管理端列表、助手工具白名单下拉，以及模型看到的工具标题与描述。`name` 是模型调用和业务配置引用的键，永远不改；清空输入即恢复内置文案。
+
 这是面向受信任业务 API 的轻量连接器，不是万能 OpenAPI 编排器。第三方服务密钥优先放 MCP 加密凭据或开发原生适配器，不能把业务 Token 转发给不可信网站。目标 API 必须最终校验用户数据权限，不能只依据 `X-Agent-*` 请求头信任身份。
 
 ## 5. MCP 三种传输
@@ -309,6 +311,11 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 | `DELETE /api/control/admin/control-tokens/:id` | 删除 Token |
 | `POST /api/control/admin/brand-logo` | 上传空态品牌徽标（Base64 图片，≤2 MB），返回 `brand/<hash>.<ext>` |
 | `GET /api/control/brand/:file` | 管理端预览徽标（公开静态资源） |
+| `PATCH /api/control/admin/tools/:name/metadata` | 覆盖工具展示名称 / 描述（`title` ≤80、`description` ≤500，空串恢复默认），`name` 不可改 |
+| `GET /api/control/admin/business-users` | 按 `owner_key` 聚合业务用户（会话数、消息数、记忆数、最近活跃），支持 `query` / `limit` / `offset` |
+| `GET /api/control/admin/business-users/:ownerKey/memories` | 查看该业务用户的长期记忆 |
+| `PATCH /api/control/admin/memories/:id` | 修改记忆正文或启停 |
+| `DELETE /api/control/admin/memories/:id` | 删除一条记忆 |
 
 跨域直连需要代理或后端返回的 CORS 头，并正确转发 `Authorization: Bearer ...`。仍然推荐由业务网关同源反向代理 `/api/control`，这样管理 Cookie 与 Token 两种方式都能工作。
 
@@ -327,8 +334,8 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 | `POST /api/agent/approvals/:id/approve` / `reject` | 用户确认 / 拒绝 |
 | `POST /api/agent/questions/:id/answer` | 回答 `ask_user` 交互问题；支持选项、补充文本和取消 |
 | `WS /api/agent/voice/stream?session_id=...` | 当前会话绑定的实时语音通话；ASR / TTS 未配置或会话运行中时拒绝 |
-| `POST /api/agent/transcribe` | 普通文件 STT；`auto` 策略下优先文件模型、失败再回退实时模型；识别结果由前端回填输入框，默认不自动发送 |
-| `WS /api/agent/voice/dictate?session_id=...` | 输入框实时听写；只有策略明确设为 `realtime` 时使用，partial / final 回填，不创建额外会话 |
+| `POST /api/agent/transcribe` | 输入框语音转写（文件 STT），`auto_file` / `auto_realtime` 会按候选顺序换算通道并在失败时降级；识别结果回填输入框，默认不自动发送 |
+| `WS /api/agent/voice/dictate` | 输入框实时听写，`session_id` 可省略（空态可直接用），partial / final 回填，不额外建会话 |
 | `POST /api/agent/audio/speech` | 普通 TTS 合成；正式 Chat 已在右上角提供朗读入口，业务前端也可复用 |
 | `POST /api/agent/sessions/:id/compact` | 手动压缩（幂等，跳过时返回 `skipped: true`） |
 | `GET /api/agent/brand/:file` | 空态品牌徽标（公开静态资源，文件名带内容哈希） |
@@ -338,7 +345,7 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 
 主要 SSE 名称：`run.started`、`run.phase`、`decision.completed`、`step.started`、`thinking.delta`、`text.delta`、`answer.completed`、`tool.args.delta`、`tool.started`、`tool.finished`、`tool.approval_required`、`question.required`、`retry`、`usage`、`session.title`、`run.completed`、`run.failed`。
 
-语音能力按助手配置继承全局：输入框语音默认走文件 STT，只有 `voice_input_mode=realtime` 才建立实时听写；右上角实时语音通话固定使用 `voice_asr_model_id` / `voice_tts_model_id`，TTS 在 LLM 输出过程中按句合成，不等待整段回答结束。未配置对应模型时前端不渲染语音按钮。实时通话的 WebSocket 使用 `webagent.voice` 子协议，并通过 `webagent.token.<base64url>` 携带短期接入凭据；浏览器不会拿到渠道 Token 原文。
+语音能力按助手配置继承全局。输入框语音有四种策略：`auto_file`（默认，优先文件 STT、失败降级实时）、`auto_realtime`（优先实时、失败降级文件）、`realtime`（仅实时听写）、`file`（仅文件 STT）；显式 `realtime` / `file` 不做跨通道回退，旧值 `auto` 等价于 `auto_file`。`GET /api/agent/status` 返回 `voice_input_mode`（解析后的实际通道）、`voice_input_prefer`（原始偏好）和 `voice_input_capabilities{file,realtime}`，前端据此决定麦克风入口和调用哪个接口，不要自己猜模型类型。右上角实时语音通话固定使用 `voice_asr_model_id` / `voice_tts_model_id`，与输入框互不影响；TTS 在 LLM 输出过程中按句合成，不等待整段回答结束，也不能阻塞上一轮正文输出。未配置对应模型时前端不渲染语音按钮。实时通话的 WebSocket 使用 `webagent.voice` 子协议，并通过 `webagent.token.<base64url>` 携带短期接入凭据；浏览器不会拿到渠道 Token 原文。
 
 `answer.completed` 表示回答正文已经生成完毕，可以结束 Markdown / HTML 渲染、展示复制等只读操作，也可以开始 TTS；此时后台可能仍在自动压缩上下文，`run.completed` 尚未到达，因此下一轮输入应继续禁用。`run.completed` 才表示整个运行（含压缩、落库和辅助任务）结束。
 

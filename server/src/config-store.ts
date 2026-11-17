@@ -3,6 +3,7 @@ import path from "node:path";
 import { promptDefaults } from "./prompts.js";
 import { storagePaths } from "./storage-paths.js";
 import { AppError, type Row } from "./types.js";
+import { normalizeVoiceInputMode } from "./voice-input.js";
 
 const now = () => new Date().toISOString();
 const COLLECTION_VERSION = 1;
@@ -12,7 +13,7 @@ export const defaults: Row = {
   context_compression: true, bm25_enabled: false, tool_selection_mode: "none", decision_enabled: false,
   decision_model_id: null, decision_tools: true, decision_skills: true, decision_threshold: 0.6,
   decision_min_count: 8, decision_timeout_seconds: 5, memory_enabled: true,
-  memory_auto_extract: true, memory_auto_confirm: false, memory_model_id: null,
+  memory_auto_extract: true, memory_extract_interval: 3, memory_auto_confirm: false, memory_model_id: null,
   memory_extraction_prompt: promptDefaults.memory_extraction_prompt,
   base_system_prompt: promptDefaults.base_system_prompt,
   compaction_prompt: promptDefaults.compaction_prompt,
@@ -24,7 +25,7 @@ export const defaults: Row = {
   welcome_prompts: "查询业务数据|用只读工具查看设备、项目与运行状态\n分析当前情况|梳理数据异常、风险点和处理优先级\n生成数据报表|汇总指标并输出可发布的 HTML 页面\n制定执行计划|拆解步骤、责任人和交付物\n优化已有内容|按你的要求改写、精简或扩写\n记住我的偏好|把长期有效的规则加入我的记忆",
   welcome_logo: "",
   asr_model_id: null, asr_realtime_model_id: null, tts_model_id: null, voice_asr_model_id: null, voice_tts_model_id: null,
-  voice_input_mode: "auto", voice_auto_send: false, tts_auto_read: false, tts_max_read_chars: 1200,
+  voice_input_mode: "auto_file", voice_auto_send: false, tts_auto_read: false, tts_max_read_chars: 1200,
   skills_enabled: true, skill_files_enabled: true, title_model_id: null, fallback_model_id: null,
   context_reserve_tokens: 1600, compaction_model_id: null, compaction_keep_ratio: 0.58,
   session_retention_days: 30, admin_session_content: true, user_daily_token_limit: 0,
@@ -36,9 +37,30 @@ export const defaults: Row = {
   store_reasoning: false, pagepilot_base_url: "", pagepilot_token: "", pagepilot_enabled: false,
   pagepilot_default_title: "", pagepilot_default_description: "", pagepilot_default_visibility: "unlisted",
   modelsdev_cache_hours: 168,
+  tool_overrides: {} as Row,
 };
 
 const toolPolicyDefaults: Row = { enabled: true, visible: true, selectable: true, default_selected: true, tags: [] as string[] };
+
+export const TOOL_OVERRIDES_LIMIT = 500;
+export const TOOL_OVERRIDE_TITLE_LIMIT = 80;
+export const TOOL_OVERRIDE_DESCRIPTION_LIMIT = 500;
+
+/** 清洗磁盘上的覆盖值：只保留非空字符串字段，长度超限的旧数据截断而不是让整个配置读取失败。 */
+function normalizeToolOverrides(value: unknown): Row {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result: Row = {};
+  for (const [name, entry] of Object.entries(value as Row).slice(0, TOOL_OVERRIDES_LIMIT)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const item: Row = {};
+    const title = typeof entry.title === "string" ? entry.title.trim() : "";
+    const description = typeof entry.description === "string" ? entry.description.trim() : "";
+    if (title) item.title = title.slice(0, TOOL_OVERRIDE_TITLE_LIMIT);
+    if (description) item.description = description.slice(0, TOOL_OVERRIDE_DESCRIPTION_LIMIT);
+    if (Object.keys(item).length) result[name] = item;
+  }
+  return result;
+}
 
 /**
  * JSON 文件没有 SQLite 列默认值，读取时补齐。
@@ -159,6 +181,9 @@ export class ConfigStore {
       result.decision_enabled = storedMode === "decision";
     } else if (result.decision_enabled) result.bm25_enabled = false;
     result.tool_selection_mode = result.decision_enabled ? "decision" : result.bm25_enabled ? "bm25" : "none";
+    // 旧配置里的 auto 与新枚举中的未知值统一落到 auto_file，避免前端拿到无法识别的策略。
+    result.voice_input_mode = normalizeVoiceInputMode(result.voice_input_mode);
+    result.tool_overrides = normalizeToolOverrides(result.tool_overrides);
     return result;
   }
 
@@ -166,7 +191,7 @@ export class ConfigStore {
     const stored = readJson<Row>(this.settingsFile, {});
     for (const [key, value] of Object.entries(values)) {
       if (!(key in defaults)) continue;
-      stored[key] = value;
+      stored[key] = key === "voice_input_mode" ? normalizeVoiceInputMode(value) : value;
     }
     writeJson(this.settingsFile, stored);
     return this.settings();
@@ -309,6 +334,35 @@ export class ConfigStore {
     policies[name] = { ...this.toolPolicy(name), ...values, updated_at: now() };
     writeJson(this.policiesFile, policies);
     return this.toolPolicy(name);
+  }
+
+  toolOverrides(): Row {
+    return normalizeToolOverrides(this.settings().tool_overrides);
+  }
+
+  /**
+   * 合并写入单个工具的标题/描述覆盖；空字符串表示删除该字段。
+   * 工具名不在这里校验，由调用方确认它仍在当前 catalog 中。
+   */
+  setToolOverride(name: string, values: { title?: string; description?: string }) {
+    const stored = readJson<Row>(this.settingsFile, {});
+    const overrides = normalizeToolOverrides(stored.tool_overrides);
+    const current: Row = { ...(overrides[name] || {}) };
+    for (const key of ["title", "description"] as const) {
+      if (values[key] === undefined) continue;
+      const text = String(values[key]).trim();
+      const limit = key === "title" ? TOOL_OVERRIDE_TITLE_LIMIT : TOOL_OVERRIDE_DESCRIPTION_LIMIT;
+      if (text.length > limit) throw new AppError(`${key} 不能超过 ${limit} 个字符`, 422);
+      if (text) current[key] = text;
+      else delete current[key];
+    }
+    if (Object.keys(current).length) {
+      if (!(name in overrides) && Object.keys(overrides).length >= TOOL_OVERRIDES_LIMIT) throw new AppError(`工具覆盖最多 ${TOOL_OVERRIDES_LIMIT} 条`, 422);
+      overrides[name] = current;
+    } else delete overrides[name];
+    stored.tool_overrides = overrides;
+    writeJson(this.settingsFile, stored);
+    return overrides[name] as Row | undefined;
   }
 
   httpTools(): Row[] {

@@ -89,6 +89,10 @@ test("PagePilot keeps local ownership and versions; publication passwords never 
     }
     const sealed = service.store.one("SELECT * FROM approvals_v2 WHERE id=?", [result.approval.id])!; assert.ok(sealed.data.sealed.startsWith("enc:v2:"));
     assert.equal(upstream.requests.filter((request) => request.path === "/api/deploy").length, 2);
+    const removed = await service.publications.remove(created.publication_id, user);
+    assert.equal(removed.ok, true); assert.equal(removed.remote_deleted, false);
+    assert.equal(service.store.one("SELECT id FROM publications WHERE id=?", [created.publication_id]), undefined);
+    assert.equal(service.store.all("SELECT id FROM publication_versions WHERE publication_id=?", [created.publication_id]).length, 0);
   } finally { await service.close(); await upstream.close(); }
 });
 test("SSE disconnection does not cancel the backend; reconnect and explicit cancel are separate", async () => {

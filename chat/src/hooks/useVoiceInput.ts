@@ -58,6 +58,8 @@ export function useVoiceInput(
   const assistantIdRef = useRef(options.assistantId);
   const recordingRef = useRef(false);
   const commitRequestedRef = useRef(false);
+  // 本次录音实际绑定的会话；自动建会话时用于避免 contextKey 更新触发 cleanup 关闭连接。
+  const scopeRef = useRef<string | undefined>(undefined);
   callbackRef.current = onRecognized;
   partialCallbackRef.current = options.onPartial;
   contextRef.current = contextKey;
@@ -102,6 +104,9 @@ export function useVoiceInput(
 
   useEffect(() => {
     return () => {
+      // contextKey 从空变为自动创建的新会话时，录音目标与当前会话一致，不能停止录音。
+      // 用户手动切换到其它会话（contextRef.current !== scopeRef.current）时仍会正常清理。
+      if (scopeRef.current && contextRef.current === scopeRef.current && contextRef.current !== contextKey) return;
       const recorder = recorderRef.current;
       if (recorder?.state === "recording") recorder.stop();
       recorder?.stream.getTracks().forEach((track) => track.stop());
@@ -160,7 +165,7 @@ export function useVoiceInput(
     timerRef.current = window.setTimeout(() => stopRealtime(), 60_000);
   };
 
-  const startRealtime = async () => {
+  const startRealtime = async (sessionOverride?: string) => {
     if (!navigator.mediaDevices?.getUserMedia || typeof AudioContext === "undefined") {
       setError("当前浏览器无法录音，请通过 HTTPS 或 localhost 打开。");
       return;
@@ -169,9 +174,16 @@ export function useVoiceInput(
     setPartial("");
     setBusy(true);
     commitRequestedRef.current = false;
+    const sessionId = sessionOverride || contextKey || "";
+    if (!sessionId) {
+      setBusy(false);
+      setError("实时语音识别需要先创建会话");
+      return;
+    }
+    scopeRef.current = sessionId;
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const assistantQuery = assistantIdRef.current ? `&assistant_id=${assistantIdRef.current}` : "";
-    const socket = new WebSocket(`${protocol}//${location.host}/api/agent/voice/dictate?session_id=${encodeURIComponent(contextKey || "")}${assistantQuery}`);
+    const socket = new WebSocket(`${protocol}//${location.host}/api/agent/voice/dictate?session_id=${encodeURIComponent(sessionId)}${assistantQuery}`);
     socketRef.current = socket;
     socket.onopen = () => socket.send(JSON.stringify({ type: "start" }));
     socket.onmessage = (event) => {
@@ -197,7 +209,7 @@ export function useVoiceInput(
         closeSocket();
         setPartial("");
         setBusy(false);
-        if (text && mountedRef.current && enabledRef.current && contextRef.current === contextKey) deliver(text);
+        if (text && mountedRef.current && enabledRef.current && (contextRef.current === sessionId || contextRef.current === contextKey)) deliver(text);
         return;
       }
       if (message.type === "asr.empty") {
@@ -225,6 +237,7 @@ export function useVoiceInput(
     socket.onclose = () => {
       // 任何原因断开都不要把按钮留在「识别中」，否则只能刷新页面。
       cleanupRealtime();
+      scopeRef.current = undefined;
       if (!mountedRef.current) return;
       setBusy(false);
       setRecording(false);
@@ -288,11 +301,11 @@ export function useVoiceInput(
     }
   };
 
-  const toggle = async () => {
+  const toggle = async (sessionOverride?: string) => {
     if (busy || !enabled) return;
     if (realtimeRef.current) {
       if (recordingRef.current) stopRealtime();
-      else await startRealtime();
+      else await startRealtime(sessionOverride);
     } else {
       await toggleFile();
     }

@@ -207,7 +207,7 @@ function renderBlocks(tokens: Token[], streaming = false): ReactNode[] {
       }
       if (token.type === "fence") {
         const language = (token.info ?? "text").trim().toLowerCase();
-        if (language === "mermaid") {
+        if (["mermaid", "xychart-beta", "xychart", "xy", "xy-chart"].includes(language)) {
           children.push(<Mermaid code={token.content} streaming={streaming} key={children.length} />);
         } else if (language === "chart") {
           children.push(<DataChart source={token.content} key={children.length} />);

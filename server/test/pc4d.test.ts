@@ -217,7 +217,7 @@ test("PC4D validates schema limits before upstream queries and removes private r
   } finally { await fixture.close(); }
 });
 
-test("PC4D HTML previews use expiring isolated documents and PagePilot/history stay with their owner", async () => {
+test("PC4D 不再把 HTML 写入后端 artifacts，PagePilot/history stay with their owner", async () => {
   const fixture = await businessFixture();
   try {
     const first = await fixture.exchange("screen", 19);
@@ -225,25 +225,9 @@ test("PC4D HTML previews use expiring isolated documents and PagePilot/history s
     const user = await fixture.auth.identity(first.token);
     const session = fixture.runtime.createSession(user);
     const html = "<!doctype html><html><body><h1>项目报告</h1></body></html>";
-    const response = await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/artifacts", headers: { authorization: `Bearer ${first.token}`, "x-forwarded-proto": "https" }, payload: { html, session_id: session.id } });
-    assert.equal(response.statusCode, 201, response.body);
-    assert.match(response.json().url, /^\/api\/integrations\/pc4d\/artifacts\//);
-    assert.equal(response.json().path, response.json().url);
-    const url = new URL(response.json().url, "http://localhost");
-    assert.equal(url.href.includes(first.token), false);
-    const preview = await fixture.app.inject({ url: url.pathname });
-    assert.equal(preview.statusCode, 200);
-    assert.equal(preview.body, html);
-    assert.match(String(preview.headers["content-security-policy"]), /sandbox allow-scripts/);
-    assert.match(String(preview.headers["content-security-policy"]), /connect-src 'none'/);
-    assert.equal(preview.headers["cache-control"], "no-store");
-    fixture.store.purge();
-    assert.equal((await fixture.app.inject({ url: url.pathname })).statusCode, 200);
-    fs.rmSync(path.join(fixture.directory, "artifacts/pc4d"), { recursive: true, force: true });
-    const recreated = await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/artifacts", headers: { authorization: `Bearer ${first.token}` }, payload: { html, session_id: session.id } });
-    assert.equal(recreated.statusCode, 201, recreated.body);
-    assert.equal((await fixture.app.inject({ url: new URL(recreated.json().url, "http://localhost").pathname })).statusCode, 200);
-    assert.equal((await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/artifacts", headers: { authorization: `Bearer ${other.token}` }, payload: { html, session_id: session.id } })).statusCode, 404);
+    // 预览改为前端 iframe srcDoc 渲染，服务端不再落盘；两个路由都应 404。
+    assert.equal((await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/artifacts", headers: { authorization: `Bearer ${first.token}` }, payload: { html, session_id: session.id } })).statusCode, 404);
+    assert.equal((await fixture.app.inject({ url: "/api/integrations/pc4d/artifacts/whatever" })).statusCode, 404);
     fixture.store.insert("publications", { ...fixture.store.ownerColumns(user), remote_base_url: "https://pages.example", title: "报告", code: "project-report" });
     const list = (raw: string) => fixture.app.inject({ url: "/api/agent/pagepilot/publications", headers: { authorization: `Bearer ${raw}` } });
     assert.equal((await list(first.token)).json().items.length, 1);

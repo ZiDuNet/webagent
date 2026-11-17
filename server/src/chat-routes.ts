@@ -14,6 +14,7 @@ import { brandUrl, readBrandLogo } from "./brand.js";
 import { AppError, type Row } from "./types.js";
 import { effectiveAssistantConfig } from "./assistant-config.js";
 import { copySessionAttachments, readSessionUpload } from "./attachments.js";
+import { normalizeVoiceInputMode, resolveVoiceInputMode, voiceInputCandidates } from "./voice-input.js";
 
 const prefix = "/api/agent";
 const chatSchema = z.object({ message: z.string().max(20000).optional(), messages: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(20000) })).max(40).optional(), session_id: z.string().max(100).optional(), assistant_id: z.number().int().positive().optional(), model_row_id: z.number().int().positive().optional(), enabled_tools: z.array(z.string().max(64)).max(500).optional(), reasoning_effort: z.enum(["off", "none", "minimal", "low", "medium", "high", "xhigh"]).nullish().transform((value) => value ?? undefined), approval_mode: z.enum(["confirm", "full_access"]).optional(), attachments: z.array(z.object({ name: z.string().max(160), mime_type: z.enum(["image/png", "image/jpeg", "image/webp", "image/gif"]), data_url: z.string().max(8000000) })).max(4).optional() });
@@ -35,18 +36,11 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
     const fileTts = speechStatus(effective.tts_model_id, ["tts", "tts_realtime"]);
     const voiceAsr = speechStatus(effective.voice_asr_model_id, ["asr_realtime", "asr"]);
     const voiceTts = speechStatus(effective.voice_tts_model_id, ["tts_realtime", "tts"]);
-    // 输入框语音默认走文件 STT：auto 在文件模型可用时解析为 file；只有实时模型可用时
-    // 才回退 realtime，避免前端按 auto 直接建立实时 WebSocket。显式选择 realtime/file
-    // 时保持原语义，不替用户跨模式回退。
-    const voiceInputMode = effective.voice_input_mode === "realtime"
-      ? "realtime"
-      : effective.voice_input_mode === "file"
-        ? "file"
-        : fileAsr.configured
-          ? "file"
-          : realtimeAsr.configured
-            ? "realtime"
-            : "file";
+    // voice_input_mode 返回解析后的实际通道；原始偏好单独返回，便于管理端和接入方区分
+    // “自动优先文件/实时”与显式选择。只有 auto_* 会在模型不可用时跨通道兜底。
+    const voiceInputCapabilities = { file: fileAsr.configured, realtime: realtimeAsr.configured };
+    const voiceInputPrefer = normalizeVoiceInputMode(effective.voice_input_mode);
+    const voiceInputMode = resolveVoiceInputMode(voiceInputPrefer, voiceInputCapabilities);
     const ownerKey = agent.identity.owner_key;
     const memoryCount = Number(store.one("SELECT COUNT(*) AS total FROM memories WHERE owner_key=? AND enabled=1", [ownerKey])?.total || 0);
     const memoryPending = Number(store.one("SELECT COUNT(*) AS total FROM memories WHERE owner_key=? AND enabled=0 AND kind='extracted'", [ownerKey])?.total || 0);
@@ -69,6 +63,8 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
       voice_asr: voiceAsr,
       voice_tts: voiceTts,
       voice_input_mode: voiceInputMode,
+      voice_input_prefer: voiceInputPrefer,
+      voice_input_capabilities: voiceInputCapabilities,
       voice_auto_send: effective.voice_auto_send,
       tts_auto_read: effective.tts_auto_read,
       tts_max_read_chars: effective.tts_max_read_chars,
@@ -175,11 +171,14 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
     if (body.session_id) store.ownedSession(body.session_id, user);
     const assistant = runtime.assistant(user, body.assistant_id);
     const effective = effectiveAssistantConfig(assistant, settings);
-    const candidatesByMode = effective.voice_input_mode === "realtime"
-      ? [effective.asr_realtime_model_id]
-      : effective.voice_input_mode === "file"
-        ? [effective.asr_model_id]
-        : [effective.asr_model_id, effective.asr_realtime_model_id];
+    const fileModel = effective.asr_model_id ? store.model(effective.asr_model_id) : undefined;
+    const realtimeModel = effective.asr_realtime_model_id ? store.model(effective.asr_realtime_model_id) : undefined;
+    const capabilities = {
+      file: Boolean(fileModel?.enabled && fileModel.provider_enabled !== false && fileModel.model_kind === "asr"),
+      realtime: Boolean(realtimeModel?.enabled && realtimeModel.provider_enabled !== false && realtimeModel.model_kind === "asr_realtime"),
+    };
+    const candidatesByMode = voiceInputCandidates(normalizeVoiceInputMode(effective.voice_input_mode), capabilities)
+      .map((channel) => channel === "realtime" ? effective.asr_realtime_model_id : effective.asr_model_id);
     const models = [...new Set(candidatesByMode.filter((id): id is number => Number.isInteger(id) && Number(id) > 0))];
     const candidates = models.map((id) => store.model(id)).filter((model): model is Row => Boolean(model?.enabled && model.provider_enabled && ["asr", "asr_realtime"].includes(model.model_kind)));
     if (!candidates.length) throw new AppError("管理员尚未配置可用 STT 模型", 422);
@@ -211,5 +210,6 @@ export function chatRoutes(app: FastifyInstance, context: { store: Store; auth: 
   app.get(`${prefix}/pagepilot/publications`, async (request, reply) => { const { identity } = await auth.agent(request, reply); return publications.list(identity, request.query as Row); });
   app.get(`${prefix}/pagepilot/publications/:id`, async (request, reply) => { const { identity } = await auth.agent(request, reply); return { publication: publications.detail(Number((request.params as Row).id), identity) }; });
   app.get(`${prefix}/pagepilot/publications/:id/versions/:version`, async (request, reply) => { const { identity: user } = await auth.agent(request, reply); const params = request.params as Row; publications.owned(Number(params.id), user); const version = store.one("SELECT * FROM publication_versions WHERE publication_id=? AND id=?", [Number(params.id), Number(params.version)]); if (!version) throw new AppError("页面版本不存在", 404); return { version }; });
+  app.delete(`${prefix}/pagepilot/publications/:id`, async (request, reply) => { const { identity } = await auth.agent(request, reply); return publications.remove(Number((request.params as Row).id), identity); });
   app.post(`${prefix}/pagepilot/publish`, async (request, reply) => { const { identity } = await auth.agent(request, reply); return publications.publish(identity, request.body as Row); });
 }

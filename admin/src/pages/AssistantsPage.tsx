@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Alert, Button, Checkbox, Divider, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag } from "antd";
+import { Alert, Button, Checkbox, Divider, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip } from "antd";
 import { Pencil, Star, Trash2, Upload as UploadIcon } from "lucide-react";
 import { controlBase, controlRequest, apiErrorMessage } from "../api/pagepilot";
 import { PageHeading, PageState, ResourceActions, useResource, type Row } from "./shared";
@@ -33,7 +33,8 @@ export default function AssistantsPage() {
     .map((tool) => {
       const tags: string[] = Array.isArray(tool.tags) ? tool.tags : [];
       const title = String(tool.title || tool.name);
-      return { value: String(tool.name), label: title, tags, toolName: String(tool.name), searchText: `${title} ${tool.name} ${tags.join(" ")}`.toLowerCase() };
+      const description = String(tool.description || "").trim();
+      return { value: String(tool.name), label: title, tags, toolName: String(tool.name), description, searchText: `${title} ${tool.name} ${description} ${tags.join(" ")}`.toLowerCase() };
     });
 
   const edit = (value: Row = {}) => {
@@ -58,7 +59,7 @@ export default function AssistantsPage() {
       tts_model_id: nullable(value.tts_model_id),
       voice_asr_model_id: nullable(value.voice_asr_model_id),
       voice_tts_model_id: nullable(value.voice_tts_model_id),
-      voice_input_mode: nullable(value.voice_input_mode),
+      voice_input_mode: nullable(value.voice_input_mode === "auto" ? "auto_file" : value.voice_input_mode),
       voice_auto_send: nullable(value.voice_auto_send),
       tts_auto_read: nullable(value.tts_auto_read),
       tts_max_read_chars: nullable(value.tts_max_read_chars),
@@ -231,14 +232,20 @@ export default function AssistantsPage() {
               filterOption={(input, option) => String(option?.searchText || "").includes(input.trim().toLowerCase())}
               optionRender={(option) => {
                 const tags = (option.data as { tags?: string[] }).tags || [];
+                const description = String((option.data as { description?: string }).description || "");
                 return (
-                  <div className="tool-option">
-                    <span>{option.data.label}</span>
-                    <span className="tool-option__meta">
-                      <code>{option.data.value}</code>
-                      {tags.map((tag) => <Tag key={tag} bordered={false}>{tag}</Tag>)}
-                    </span>
-                  </div>
+                  <Tooltip title={description || undefined} placement="right" mouseEnterDelay={0.4}>
+                    <div className="tool-option">
+                      <span className="tool-option__main">
+                        <span className="tool-option__title">{option.data.label}</span>
+                        {description && <small className="tool-option__desc">{description}</small>}
+                      </span>
+                      <span className="tool-option__meta">
+                        <code>{option.data.value}</code>
+                        {tags.map((tag) => <Tag key={tag} bordered={false}>{tag}</Tag>)}
+                      </span>
+                    </div>
+                  </Tooltip>
                 );
               }}
             />
@@ -286,8 +293,8 @@ export default function AssistantsPage() {
           <div className="control-grid">
             {voiceModel("asr_model_id", "文件 STT", ["asr"], "停止录音后识别并填入输入框。")}
             {voiceModel("asr_realtime_model_id", "实时 STT（输入框）", ["asr_realtime"], "仅自动策略缺少文件 STT 时兜底，或明确选择实时识别时使用。")}
-            <Form.Item name="voice_input_mode" label="输入框识别策略" tooltip="自动模式优先文件 STT，文件不可用时回退实时；留空继承全局。">
-              <Select allowClear placeholder="继承全局" options={[{ value: "auto", label: "自动" }, { value: "realtime", label: "仅实时" }, { value: "file", label: "仅文件" }]} />
+            <Form.Item name="voice_input_mode" label="输入框识别策略" tooltip="优先项不可用时自动降级到另一种；留空继承全局。">
+              <Select allowClear placeholder="继承全局" options={[{ value: "auto_file", label: "自动·优先文件" }, { value: "auto_realtime", label: "自动·优先实时" }, { value: "realtime", label: "仅实时" }, { value: "file", label: "仅文件" }]} />
             </Form.Item>
             {inherited("voice_auto_send", "识别后自动发送", "留空继承全局；默认关闭，只回填输入框。")}
             {voiceModel("tts_model_id", "非实时 TTS", ["tts"], "只朗读最终正文，过滤代码、HTML 和链接。")}
