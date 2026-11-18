@@ -24,7 +24,7 @@ npm start
 
 `WEBAGENT_UI_ORIGINS` 是浏览器跨域来源白名单；推荐业务部署使用同源反向代理，避免多域 Cookie 和跨域流式代理问题。请求使用 Bearer 接入凭据，不依赖业务 Cookie。
 
-首次启用自动建立三个助手：PC4D 大屏助手、Web 助手、小程序助手，并在「接入与安全」为 `screen` / `web` / `miniprogram` 各创建一个渠道接入 Token。渠道 Token 决定该端使用的助手；每个渠道取最近更新的启用 Token，停用或删除后该端立即拒绝交换。模型、语音、工具、Skill、提示词、欢迎语和预算均在管理端按助手修改。浏览器只接触 `pc4d_…` 短期凭据，不会拿到 `wa_…` 原文；短期凭据携带 `access_token_id`，每次请求重新校验 Token 是否启用、是否过期。
+首次启用自动建立三个助手：PC4D 大屏助手、Web 助手、小程序助手，并在「接入与安全」为 `screen` / `web` / `miniprogram` 各创建一个渠道接入 Token。客户端必须在每次交换时把对应渠道的接入 Token 放入 `Authorization: Bearer <wa_…>`，由它决定该端使用的助手和权限边界；业务 Token 与 PID 仅用于核验业务身份和调用业务工具。停用或删除该 Token 后，对应端立即拒绝交换。模型、语音、工具、Skill、提示词、欢迎语和预算均在管理端按助手修改。浏览器只接触 `pc4d_…` 短期凭据，不会拿到 `wa_…` 原文；短期凭据携带 `access_token_id`，每次请求重新校验 Token 是否启用、是否过期。
 
 ## 身份交换
 
@@ -32,12 +32,13 @@ npm start
 
 ```http
 POST /api/integrations/pc4d/exchange
+Authorization: Bearer <该端接入Token>
 Content-Type: application/json
 
 {"channel":"miniprogram","pid":19,"access_token":"宿主当前的业务Token"}
 ```
 
-大屏请求为 `{"channel":"screen","pid":19}`，可补充 `project_name` 作为显示名称回退值。项目名称优先使用公开项目概况接口；它在部分项目上返回空名称，回退名称不会参与身份或权限判断。
+大屏请求为 `{"channel":"screen","pid":19}`，同样必须携带 `Authorization: Bearer <大屏接入Token>`，可补充 `project_name` 作为显示名称回退值。项目名称优先使用公开项目概况接口；它在部分项目上返回空名称，回退名称不会参与身份或权限判断。
 
 成功返回 `token`、`expires_at`、`user`、`project: {id,name,logo?}`、`assistant_id`、`capabilities`。项目名称和 Logo 优先取业务项目概况接口，`project_name` 只作为显示回退值；管理端配置的品牌 Logo 只在该项目没有可用 Logo 时兜底。之后所有 `/api/agent/*` 请求携带 `Authorization: Bearer <token>`，包括流式请求、历史、附件、问答、审批、发布和运行恢复。前端应在到期前重新交换；切换项目或业务账号时丢弃旧订阅和当前界面状态，再重新交换。
 

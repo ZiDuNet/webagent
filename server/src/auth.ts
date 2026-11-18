@@ -34,6 +34,13 @@ export class Auth {
   credential(request: FastifyRequest) { return request.headers.authorization?.replace(/^Bearer\s+/i, "") || request.cookies.wa_session || ""; }
   private bearer(request: FastifyRequest) { return String(request.headers.authorization || "").replace(/^Bearer\s+/i, "").trim(); }
   private origin(request: FastifyRequest) { return typeof request.headers.origin === "string" ? request.headers.origin : ""; }
+  accessToken(raw: string, origin = "") {
+    const row = this.accessRowByToken(String(raw || ""));
+    if (!row) throw new AppError("接入 Token 无效", 401);
+    this.assertAccess(row, origin);
+    this.touch(row);
+    return row;
+  }
   private controlTokenRow(raw: string) {
     if (!raw) return undefined;
     return this.store.one("SELECT * FROM control_tokens WHERE token_hash=?", [digest(raw)]);

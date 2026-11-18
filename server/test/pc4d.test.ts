@@ -6,7 +6,7 @@ import path from "node:path";
 import { createPc4dAgent } from "../src/integrations/pc4d/index.js";
 import { Pc4dConnector, type Pc4dTool } from "../src/integrations/pc4d/connector.js";
 import { Store } from "../src/store.js";
-import { encrypt } from "../src/security.js";
+import { decrypt, encrypt } from "../src/security.js";
 import { mockServer, toolCall, sse } from "./helpers.js";
 import type { Row } from "../src/types.js";
 
@@ -41,15 +41,19 @@ async function businessFixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "webagent-pc4d-test-"));
   const store = new Store(directory);
   const service = await createPc4dAgent({ store, baseUrl: upstream.baseUrl, cacheSeconds: 0, logger: false, staticUi: false, warmCatalogue: false });
+  const accessRows = Object.fromEntries(store.all("SELECT * FROM access_tokens WHERE channel IN ('screen','web','miniprogram')").map((row) => [String(row.channel), row]));
+  const accessToken = (channel: string) => decrypt(String(accessRows[channel]?.token_cipher || ""));
   const provider = store.config.insertProvider({ name: "Test", base_url: `${upstream.baseUrl}/v1`, api_key: "mock-model-key" });
   store.config.insertModel({ name: "Test", provider_id: provider.id, model_id: "test-chat", is_default: true, context_window: 16384, max_output_tokens: 1024 });
   store.setSettings({ retry_enabled: false, memory_auto_extract: false });
   const exchange = async (channel: "screen" | "web" | "miniprogram", pid = 19, access_token = "first-login") => {
-    const response = await service.app.inject({ method: "POST", url: "/api/integrations/pc4d/exchange", payload: { channel, pid, ...(channel === "screen" ? {} : { access_token }) } });
+    const token = accessToken(channel);
+    assert.ok(token, `missing access token for channel ${channel}`);
+    const response = await service.app.inject({ method: "POST", url: "/api/integrations/pc4d/exchange", headers: { authorization: `Bearer ${token}` }, payload: { channel, pid, ...(channel === "screen" ? {} : { access_token }) } });
     assert.equal(response.statusCode, 200, response.body);
     return response.json<Row>();
   };
-  return { ...service, directory, seen, upstream, exchange, changeQueryData: (value: unknown) => { queryData = value; }, changeRights: (values: Row) => Object.assign(rights, values), deny: () => { denied = true; }, close: async () => { await service.app.close(); store.close(); await upstream.close(); fs.rmSync(directory, { recursive: true, force: true }); } };
+  return { ...service, directory, seen, upstream, accessRows, accessToken, exchange, changeQueryData: (value: unknown) => { queryData = value; }, changeRights: (values: Row) => Object.assign(rights, values), deny: () => { denied = true; }, close: async () => { await service.app.close(); store.close(); await upstream.close(); fs.rmSync(directory, { recursive: true, force: true }); } };
 }
 
 test("PC4D verifies business identities and shares ownership across clients without trusting client user IDs", async () => {
@@ -77,10 +81,11 @@ test("PC4D verifies business identities and shares ownership across clients with
       const response = await fixture.app.inject({ url: `/api/agent/sessions/${session.id}/messages`, headers: { authorization: `Bearer ${other.token}` } });
       assert.equal(response.statusCode, 404);
     }
-    const forged = await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/exchange", payload: { channel: "web", pid: 19, access_token: "first-login", user_id: "admin" } });
+    const forged = await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/exchange", headers: { authorization: `Bearer ${fixture.accessToken("web")}` }, payload: { channel: "web", pid: 19, access_token: "first-login", user_id: "admin" } });
     assert.equal(forged.statusCode, 422);
     assert.equal((await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/exchange", payload: { channel: "web", pid: 19 } })).statusCode, 401);
-    assert.equal((await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/exchange", payload: { channel: "web", pid: 19, access_token: "invalid" } })).statusCode, 401);
+    assert.equal((await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/exchange", headers: { authorization: `Bearer ${fixture.accessToken("web")}` }, payload: { channel: "web", pid: 19, access_token: "invalid" } })).statusCode, 401);
+    assert.equal((await fixture.app.inject({ method: "POST", url: "/api/integrations/pc4d/exchange", payload: { channel: "web", pid: 19, access_token: "first-login" } })).statusCode, 401);
     await assert.rejects(fixture.auth.identity(`${web.token}tampered`), /凭据无效/);
     const expired = `pc4d_${encrypt(JSON.stringify({ version: 1, channel: "screen", pid: 19, expires: Date.now() - 1000 })).slice(7)}`;
     await assert.rejects(fixture.auth.identity(expired), /过期/);
@@ -148,7 +153,7 @@ test("PC4D checks project plugins and exact operation permission again before in
     fs.writeFileSync(catalogue, JSON.stringify([...existing, tool]));
     const connector = new Pc4dConnector(fixture.store, { baseUrl: fixture.upstream.baseUrl, cacheSeconds: 0 });
     connector.initialize([...existing, tool]);
-    const access = await connector.exchange({ channel: "web", pid: 19, access_token: "first-login" });
+    const access = await connector.exchange({ channel: "web", pid: 19, access_token: "first-login", access_token_id: Number(fixture.accessRows.web.id), assistant_id: Number(fixture.accessRows.web.assistant_id) });
     const user = await connector.resolve(access.token);
     assert.ok(user!.permissions.includes("pc4d:tool:pc4d_business_test"));
     const definition = connector.tools().find((item) => item.name === tool.name)!;

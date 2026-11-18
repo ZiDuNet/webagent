@@ -23,7 +23,11 @@ export function pc4dRoutes(app: FastifyInstance, connector: Pc4dConnector, auth:
     if (attempts.size > 5000) for (const [key, value] of attempts) if (value.until <= current) attempts.delete(key);
     const input = z.object({ channel: z.enum(["screen", "web", "miniprogram"]), pid: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), access_token: z.string().min(1).max(8192).optional(), project_name: z.string().max(120).optional() }).strict().parse(request.body);
     if (input.channel !== "screen" && !input.access_token) throw new AppError("请先在业务系统登录", 401);
+    const bearer = String(request.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+    const access = auth.accessToken(bearer, typeof request.headers.origin === "string" ? request.headers.origin : "");
+    if (!["screen", "web", "miniprogram"].includes(String(access.channel))) throw new AppError("接入 Token 渠道不匹配，请使用 PC4D 业务接入 Token", 403);
+    if (String(access.channel) !== input.channel) throw new AppError(`接入 Token 与请求端不匹配：Token 绑定 ${access.channel}，请求为 ${input.channel}`, 403);
     reply.header("Cache-Control", "no-store");
-    return connector.exchange(input);
+    return connector.exchange({ ...input, access_token_id: Number(access.id), assistant_id: Number(access.assistant_id) });
   });
 }

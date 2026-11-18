@@ -180,13 +180,6 @@ export class Pc4dConnector implements IdentityAdapter {
     return this.store.one("SELECT * FROM access_tokens WHERE channel=? AND enabled=1 AND (expires_at IS NULL OR expires_at>?) ORDER BY updated_at DESC,id DESC LIMIT 1", [channel, new Date().toISOString()]);
   }
 
-  private requireChannelToken(channel: Pc4dChannel) {
-    const row = this.channelToken(channel);
-    if (!row) throw new AppError(`管理员尚未为 PC4D ${channel === "screen" ? "大屏" : channel === "web" ? "Web" : "小程序"}启用接入 Token`, 503);
-    if (!this.store.assistant(Number(row.assistant_id))) throw new AppError("PC4D 接入 Token 绑定的助手不存在", 503);
-    return row;
-  }
-
   private credentialToken(credential: Credential) {
     const row = this.store.one("SELECT * FROM access_tokens WHERE id=? AND enabled=1", [Number(credential.access_token_id)]);
     if (!row) throw new AppError("PC4D 接入 Token 已停用或删除，请联系管理员", 401);
@@ -286,13 +279,14 @@ export class Pc4dConnector implements IdentityAdapter {
     };
   }
 
-  async exchange(input: { channel: Pc4dChannel; pid: number; access_token?: string; project_name?: string }) {
-    const bound = this.requireChannelToken(input.channel);
-    const credential: Credential = { version: 1, channel: input.channel, pid: input.pid, access_token_id: Number(bound.id), expires: Date.now() + this.tokenHours * 3600000, ...(input.channel === "screen" ? { project_name: input.project_name?.slice(0, 120) } : { access_token: input.access_token }) };
+  async exchange(input: { channel: Pc4dChannel; pid: number; access_token?: string; project_name?: string; access_token_id: number; assistant_id: number }) {
+    const bound = { id: Number(input.access_token_id), assistant_id: Number(input.assistant_id) };
+    if (!Number.isSafeInteger(bound.id) || bound.id < 1 || !this.store.assistant(bound.assistant_id)) throw new AppError("PC4D 接入 Token 绑定的助手不存在", 503);
+    const credential: Credential = { version: 1, channel: input.channel, pid: input.pid, access_token_id: bound.id, expires: Date.now() + this.tokenHours * 3600000, ...(input.channel === "screen" ? { project_name: input.project_name?.slice(0, 120) } : { access_token: input.access_token }) };
     const raw = `pc4d_${encrypt(JSON.stringify(credential)).slice(7)}`;
     const user = await this.resolve(raw);
     const context = await this.context(raw);
-    return { token: raw, expires_at: new Date(credential.expires).toISOString(), user, project: context.project, assistant_id: Number(bound.assistant_id), capabilities: { history: true, publications: true, project_shared: input.channel === "screen" } };
+    return { token: raw, expires_at: new Date(credential.expires).toISOString(), user, project: context.project, assistant_id: bound.assistant_id, capabilities: { history: true, publications: true, project_shared: input.channel === "screen" } };
   }
 
   tools(): ToolSpec[] {

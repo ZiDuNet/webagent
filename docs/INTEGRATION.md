@@ -298,7 +298,7 @@ Skill 以后端 `data/skills/` 为唯一事实来源，每个目录包含 `SKILL
 
 管理 Token 只能调用 `/api/control`，不能调用 `/api/agent`，也不能替代业务 Token。框架 Token（接入 Token `wa_…` 与管理 Token `wac_…`）同时保存哈希与用 `WEBAGENT_SECRET_KEY` 派生的 AES-GCM 密文，因此管理员可在「接入与安全」再次查看并复制原文；旧版本创建的记录没有密文，会提示先轮换。轮换后旧 Token 立即失效。生产环境必须使用 HTTPS，不要把 Token 放进 URL、日志、截图或前端构建变量。
 
-> 这里的管理 / 接入 Token 都是**框架自身**的凭据，不是业务系统签发的 `access_token`。业务 Token 仅在请求期间用于解析身份或转发给受信任业务工具，不写入框架数据库；大屏渠道交换出的 `pc4d_…` 是携带 `pid`、项目名、渠道 Token ID 的短期凭据，不含 `wa_…` 原文。接入 Token 的「使用渠道」为 `screen` / `web` / `miniprogram` 时由对应 PC4D 端自动选取；`chat` 用于独立 Chat 或第三方前端。
+> 这里的管理 / 接入 Token 都是**框架自身**的凭据，不是业务系统签发的 `access_token`。业务 Token 仅在请求期间用于解析身份或转发给受信任业务工具，不写入框架数据库；PC4D 渠道交换出的 `pc4d_…` 是携带 `pid`、项目名、渠道 Token ID 的短期凭据，不含 `wa_…` 原文。接入 Token 的「使用渠道」为 `screen` / `web` / `miniprogram` 时，由对应 PC4D 端在 `Authorization: Bearer` 中显式携带；`chat` 用于独立 Chat 或第三方前端。
 
 管理端 API：
 
